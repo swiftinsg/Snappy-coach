@@ -44,7 +44,8 @@ enum FlashSetting: CaseIterable {
     }
 }
 
-enum AspectRatio: CaseIterable {
+/// Plain data, so it's `nonisolated` for use by the photo processor off the main thread.
+nonisolated enum AspectRatio: CaseIterable {
     case fourByThree, sixteenByNine, square
 
     var title: String {
@@ -52,6 +53,15 @@ enum AspectRatio: CaseIterable {
         case .fourByThree: "4:3"
         case .sixteenByNine: "16:9"
         case .square: "1:1"
+        }
+    }
+
+    /// Long side ÷ short side, used to crop captured photos.
+    var longToShort: CGFloat {
+        switch self {
+        case .fourByThree: 4.0 / 3.0
+        case .sixteenByNine: 16.0 / 9.0
+        case .square: 1
         }
     }
 }

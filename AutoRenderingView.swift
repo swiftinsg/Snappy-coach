@@ -10,8 +10,15 @@ import SwiftUI
 struct AutoRenderingView: View {
     @State private var controls = PhotoControlsModel()
     @State private var camera = CameraManager()
+    @State private var gallery = PhotoGallery()
+    @State private var isGalleryPresented = false
+    /// Remembered between launches.
+    @AppStorage("adviceTopic") private var adviceTopic: AdviceTopic = .composition
+    @AppStorage("compositionGuide") private var compositionGuide: CompositionGuide = .ruleOfThirdsOne
     @State private var activeAdjustment: PhotoControl?
     @State private var statusMessage: String?
+    /// Briefly blacks out the screen when a photo is taken, like the Camera app.
+    @State private var isShutterBlinking = false
 
     var body: some View {
         ZStack {
@@ -19,8 +26,15 @@ struct AutoRenderingView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {
-                PhotoControlsBar(model: controls, camera: camera, activeAdjustment: $activeAdjustment) { message in
-                    statusMessage = message
+                // Top bar: advice topic dropdown on the left, camera controls on the right.
+                HStack(alignment: .center, spacing: 8) {
+                    if !controls.isEditing {
+                        AdviceTopicMenu(selection: $adviceTopic)
+                            .transition(.opacity)
+                    }
+                    PhotoControlsBar(model: controls, camera: camera, activeAdjustment: $activeAdjustment) { message in
+                        statusMessage = message
+                    }
                 }
 
                 if !controls.isEditing {
@@ -39,10 +53,48 @@ struct AutoRenderingView: View {
 
                 if controls.isEditing {
                     PhotoControlsSheet(model: controls)
+                        .padding(.bottom, 24)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else {
+                    VStack(spacing: 16) {
+                        ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel) { level in
+                            if let message = camera.setZoom(level) {
+                                statusMessage = message
+                            }
+                        }
+
+                        // Composition styles, only while the Composition topic is chosen.
+                        if adviceTopic == .composition {
+                            CompositionPicker(selection: $compositionGuide)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                        CaptureBar(camera: camera, gallery: gallery) {
+                            isGalleryPresented = true
+                        } onStatus: { message in
+                            statusMessage = message
+                        }
+                    }
+                    .padding(.bottom, 20)
                 }
             }
             .padding(.horizontal)
+            // Run into the home-indicator area so the shutter row sits low, like the Camera app.
+            .ignoresSafeArea(.container, edges: .bottom)
+
+            // Self-timer countdown.
+            if let countdown = camera.countdown {
+                Text("\(countdown)")
+                    .font(.system(size: 120, weight: .thin))
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText(countsDown: true))
+                    .allowsHitTesting(false)
+                    .accessibilityLabel("\(countdown) seconds")
+            }
+
+            Color.black
+                .ignoresSafeArea()
+                .opacity(isShutterBlinking ? 1 : 0)
+                .allowsHitTesting(false)
         }
         // Brief banner confirming what a tap changed, e.g. "Flash Auto".
         .overlay(alignment: .top) {
@@ -52,7 +104,7 @@ struct AutoRenderingView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .glassEffect(.clear, in: .capsule)
+                    .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
                     .padding(.top, 72)
                     .transition(.opacity)
                     .allowsHitTesting(false)
@@ -60,6 +112,17 @@ struct AutoRenderingView: View {
         }
         .task {
             await camera.start()
+        }
+        .task {
+            await gallery.load()
+        }
+        // Add each newly saved photo to the in-app gallery.
+        .onChange(of: camera.lastSavedAssetIdentifier) {
+            guard let identifier = camera.lastSavedAssetIdentifier else { return }
+            Task { await gallery.add(identifier) }
+        }
+        .fullScreenCover(isPresented: $isGalleryPresented) {
+            GalleryView(gallery: gallery)
         }
         .task(id: statusMessage) {
             guard statusMessage != nil else { return }
@@ -71,10 +134,22 @@ struct AutoRenderingView: View {
                 activeAdjustment = nil
             }
         }
+        .onChange(of: camera.shutterCount) {
+            isShutterBlinking = true
+            Task {
+                try? await Task.sleep(for: .milliseconds(80))
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isShutterBlinking = false
+                }
+            }
+        }
         .animation(.spring, value: controls.isEditing)
         .animation(.snappy, value: controls.draft)
         .animation(.snappy, value: activeAdjustment)
+        .animation(.snappy, value: adviceTopic)
         .animation(.easeInOut, value: statusMessage)
+        .animation(.snappy, value: camera.countdown)
+        .sensoryFeedback(.impact(weight: .medium), trigger: camera.shutterCount)
         .sensoryFeedback(.impact, trigger: controls.draft)
         .sensoryFeedback(.selection, trigger: statusMessage)
         .environment(\.colorScheme, .dark)

@@ -71,7 +71,7 @@ struct HistogramView: View {
         }
         .padding(8)
         .frame(width: 128, height: 64)
-        .glassEffect(.clear, in: .rect(cornerRadius: 12))
+        .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 12))
         .accessibilityLabel("Histogram")
     }
 }

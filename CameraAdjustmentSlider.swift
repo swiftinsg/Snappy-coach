@@ -25,7 +25,7 @@ struct CameraAdjustmentSlider: View {
                 Button(control == .exposure ? "Reset" : "Auto") {
                     camera.resetAdjustment(control)
                 }
-                .buttonStyle(.glass(.clear))
+                .buttonStyle(.glass)
                 .disabled(camera.isAuto(control))
             }
 
@@ -42,6 +42,6 @@ struct CameraAdjustmentSlider: View {
         .foregroundStyle(.white)
         .tint(.yellow)
         .padding()
-        .glassEffect(.clear, in: .rect(cornerRadius: 24))
+        .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 24))
     }
 }

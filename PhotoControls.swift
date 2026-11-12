@@ -173,7 +173,9 @@ struct ControlIcon: View {
             }
         }
         .foregroundStyle(isActive ? .yellow : .white)
+        .shadow(color: .black.opacity(0.5), radius: 2)
         .frame(width: size, height: size)
-        .glassEffect(.clear, in: .circle)
+        // Frosted, slightly darkened glass so icons stay readable over bright scenes.
+        .glassEffect(.regular.tint(.black.opacity(0.35)), in: .circle)
     }
 }

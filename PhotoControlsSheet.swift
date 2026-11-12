@@ -28,7 +28,8 @@ struct PhotoControlsSheet: View {
                  ? "Drag controls to the top bar."
                  : "The top bar is full. Remove a control to add another.")
                 .font(.footnote)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(.white.opacity(0.9))
+                .shadow(color: .black.opacity(0.6), radius: 2)
 
             VStack(spacing: 20) {
                 ForEach(rows, id: \.self) { row in
@@ -49,7 +50,7 @@ struct PhotoControlsSheet: View {
             Button("Reset to Essentials") {
                 model.resetToEssentials()
             }
-            .buttonStyle(.glass(.clear))
+            .buttonStyle(.glass)
         }
         .padding(20)
         // Clear Liquid Glass so the camera viewfinder shows through.
@@ -69,7 +70,7 @@ struct PhotoControlsSheet: View {
                 Image(systemName: "xmark")
                     .frame(width: 24, height: 24)
             }
-            .buttonStyle(.glass(.clear))
+            .buttonStyle(.glass)
             .buttonBorderShape(.circle)
             .accessibilityLabel("Cancel")
 
@@ -78,6 +79,7 @@ struct PhotoControlsSheet: View {
             Text("Add Photo Controls")
                 .font(.headline)
                 .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.6), radius: 2)
 
             Spacer()
 
@@ -87,7 +89,7 @@ struct PhotoControlsSheet: View {
                 Image(systemName: "checkmark")
                     .frame(width: 24, height: 24)
             }
-            .buttonStyle(.glass(.clear))
+            .buttonStyle(.glass)
             .buttonBorderShape(.circle)
             .accessibilityLabel("Done")
         }
@@ -111,6 +113,7 @@ struct PhotoControlsSheet: View {
             Text(control.title)
                 .font(.caption)
                 .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.6), radius: 2)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }

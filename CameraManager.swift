@@ -8,6 +8,8 @@
 import Foundation
 @preconcurrency import AVFoundation
 import Observation
+import Photos
+import UIKit
 
 @Observable
 class CameraManager {
@@ -35,14 +37,36 @@ class CameraManager {
     /// Luminance histogram, normalised to 0...1 per bin. Updated while the histogram is on.
     private(set) var histogram: [Float] = []
 
+    // MARK: - Capture state
+
+    /// True from pressing the shutter until the photo is saved.
+    private(set) var isCapturing = false
+    /// Seconds left on the self-timer, or `nil` when no countdown is running.
+    private(set) var countdown: Int?
+    /// Photos library identifier of the most recently saved photo, picked up by the gallery.
+    private(set) var lastSavedAssetIdentifier: String?
+    /// Goes up by one each time the sensor fires, so the view can blink the screen.
+    private(set) var shutterCount = 0
+
     // MARK: - Capture pipeline
 
     private(set) var device: AVCaptureDevice?
+    private(set) var isUsingFrontCamera = false
+    /// Zoom buttons to show, e.g. [0.5, 1, 2, 5], depending on the phone's lenses.
+    private(set) var zoomStops: [CGFloat] = [1, 2]
+    /// Current zoom relative to the main 1× lens.
+    private(set) var zoomLevel: CGFloat = 1
+    private var videoInput: AVCaptureDeviceInput?
     let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let histogramProcessor = HistogramProcessor()
     private let sessionQueue = DispatchQueue(label: "CameraManager.session")
     private let videoQueue = DispatchQueue(label: "CameraManager.video")
+    /// Keeps each capture's delegate alive until its photo is saved.
+    private var inProgressCaptures: [Int64: PhotoCaptureProcessor] = [:]
+    private var countdownTask: Task<Void, Never>?
+    /// Tracks how the phone is held so photos are saved upright.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
 
     /// True when the back camera has a physically adjustable aperture (iPhone 18 Pro / Pro Max).
     /// Checks the hardware capability instead of the model name, so it also covers future devices.
@@ -76,6 +100,7 @@ class CameraManager {
             let input = try AVCaptureDeviceInput(device: camera)
             if session.canAddInput(input) {
                 session.addInput(input)
+                videoInput = input
             }
         } catch {
             print("Something went wrong: \(error)")
@@ -94,6 +119,8 @@ class CameraManager {
         }
         session.commitConfiguration()
         isLivePhotoOn = photoOutput.isLivePhotoCaptureEnabled
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
+        refreshZoomStops()
     }
 
     func start() async {
@@ -109,6 +136,121 @@ class CameraManager {
         sessionQueue.async {
             session.startRunning()
         }
+    }
+
+    // MARK: - Switching cameras and lenses
+
+    /// Swaps between the back and front cameras. Returns a message if it couldn't switch.
+    func switchCamera() -> String? {
+        guard videoInput != nil else { return "The camera isn't available" }
+        let newPosition: AVCaptureDevice.Position = isUsingFrontCamera ? .back : .front
+        guard let newDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition) else {
+            return "That camera isn't available"
+        }
+        guard use(newDevice) else { return "Couldn't switch cameras" }
+        isUsingFrontCamera = newPosition == .front
+        zoomLevel = 1
+        refreshZoomStops()
+        return nil
+    }
+
+    /// Zooms like the Camera app's lens buttons: below 1× uses the ultra wide lens, the
+    /// telephoto's native zoom uses the telephoto, and everything else zooms the main lens.
+    func setZoom(_ level: CGFloat) -> String? {
+        guard videoInput != nil, var target = device else { return "The camera isn't available" }
+        var lensZoom = level
+        if !isUsingFrontCamera, let wide = Self.backCamera(.builtInWideAngleCamera) {
+            if level < 1, let ultraWide = Self.backCamera(.builtInUltraWideCamera) {
+                target = ultraWide
+                lensZoom = level / (Self.magnification(of: ultraWide, relativeTo: wide) ?? 0.5)
+            } else if let telephoto = Self.backCamera(.builtInTelephotoCamera),
+                      let teleZoom = Self.magnification(of: telephoto, relativeTo: wide),
+                      teleZoom > 2, level >= teleZoom.rounded() {
+                target = telephoto
+                lensZoom = level / teleZoom
+            } else {
+                target = wide
+            }
+        }
+        if target.uniqueID != device?.uniqueID {
+            guard use(target) else { return "Couldn't change lens" }
+        }
+        zoomLevel = level
+        configureDevice { device in
+            let factor = min(max(lensZoom, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+            device.ramp(toVideoZoomFactor: factor, withRate: 16)
+        }
+        return nil
+    }
+
+    /// Works out which zoom buttons this camera can offer.
+    private func refreshZoomStops() {
+        guard !isUsingFrontCamera, let wide = Self.backCamera(.builtInWideAngleCamera) else {
+            zoomStops = [1, 2]
+            return
+        }
+        var stops: [CGFloat] = []
+        if Self.backCamera(.builtInUltraWideCamera) != nil {
+            stops.append(0.5)
+        }
+        stops += [1, 2]
+        if let telephoto = Self.backCamera(.builtInTelephotoCamera),
+           let teleZoom = Self.magnification(of: telephoto, relativeTo: wide), teleZoom > 2 {
+            stops.append(teleZoom.rounded())
+        }
+        zoomStops = stops
+    }
+
+    private static func backCamera(_ type: AVCaptureDevice.DeviceType) -> AVCaptureDevice? {
+        AVCaptureDevice.default(type, for: .video, position: .back)
+    }
+
+    /// How much a lens magnifies compared with the main 1× lens, e.g. about 0.5 or 5.
+    private static func magnification(of lens: AVCaptureDevice, relativeTo wide: AVCaptureDevice) -> CGFloat? {
+        guard lens.nominalFocalLengthIn35mmFilm > 0, wide.nominalFocalLengthIn35mmFilm > 0 else { return nil }
+        return CGFloat(lens.nominalFocalLengthIn35mmFilm / wide.nominalFocalLengthIn35mmFilm)
+    }
+
+    /// Replaces the session's camera input with `newDevice` and resets settings that
+    /// belonged to the old one. Returns false if the session can't use it.
+    private func use(_ newDevice: AVCaptureDevice) -> Bool {
+        guard let currentInput = videoInput,
+              let newInput = try? AVCaptureDeviceInput(device: newDevice) else { return false }
+
+        session.beginConfiguration()
+        session.removeInput(currentInput)
+        guard session.canAddInput(newInput) else {
+            session.addInput(currentInput)
+            session.commitConfiguration()
+            return false
+        }
+        session.addInput(newInput)
+        videoInput = newInput
+        device = newDevice
+
+        // Photo features depend on the camera, so re-check what this one supports.
+        photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
+        photoOutput.isAppleProRAWEnabled = photoOutput.isAppleProRAWSupported
+        let keepDepth = isDepthOn && photoOutput.isDepthDataDeliverySupported
+        photoOutput.isDepthDataDeliveryEnabled = keepDepth
+        photoOutput.isPortraitEffectsMatteDeliveryEnabled = keepDepth && photoOutput.isPortraitEffectsMatteDeliverySupported
+        session.commitConfiguration()
+
+        isDepthOn = keepDepth
+        isLivePhotoOn = isLivePhotoOn && photoOutput.isLivePhotoCaptureEnabled
+        if format == .proRAW && !photoOutput.isAppleProRAWEnabled {
+            format = .heif
+        }
+        isCenterStageOn = newDevice.activeFormat.isCenterStageSupported && AVCaptureDevice.isCenterStageEnabled
+        // Manual values belonged to the old lens, so hand them back to auto.
+        exposureBias = 0
+        focusPosition = nil
+        shutterSeconds = nil
+        whiteBalanceKelvin = nil
+        aperture = nil
+        _ = setNightMode(isNightModeOn)
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: newDevice, previewLayer: nil)
+        return true
     }
 
     // MARK: - Tap controls
@@ -404,6 +546,83 @@ class CameraManager {
             settings.photoQualityPrioritization = isNightModeOn ? .quality : .balanced
         }
         return settings
+    }
+
+    // MARK: - Taking photos
+
+    /// Called by the shutter button. Starts the self-timer if one is set, cancels a running
+    /// countdown if tapped again, otherwise takes the photo. Returns a message to show, if any.
+    func shutterTapped() async -> String? {
+        if countdownTask != nil {
+            countdownTask?.cancel()
+            countdownTask = nil
+            countdown = nil
+            return "Timer Cancelled"
+        }
+        guard !isCapturing else { return nil }
+        guard timer != .off else { return await capturePhoto() }
+
+        let task = Task { [timer] in
+            for remaining in stride(from: timer.seconds, to: 0, by: -1) {
+                countdown = remaining
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+            }
+        }
+        countdownTask = task
+        await task.value
+        // A cancelled countdown already reported itself when the shutter was tapped again.
+        guard countdownTask != nil, !task.isCancelled else { return nil }
+        countdownTask = nil
+        countdown = nil
+        return await capturePhoto()
+    }
+
+    private func capturePhoto() async -> String? {
+        guard device != nil, session.isRunning else { return "The camera isn't available" }
+
+        // Read/write access (not add-only) so the in-app gallery can show and delete these photos.
+        let access = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        guard access == .authorized || access == .limited else {
+            return "Allow Photos access in Settings to save photos"
+        }
+
+        // Keep the photo level with the horizon, whichever way the phone is held.
+        if let connection = photoOutput.connection(with: .video),
+           let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture,
+           connection.isVideoRotationAngleSupported(angle) {
+            connection.videoRotationAngle = angle
+        }
+
+        let settings = makePhotoSettings()
+        let id = settings.uniqueID
+        isCapturing = true
+
+        return await withCheckedContinuation { continuation in
+            // The delegate calls back off the main thread; these hop back to update the UI.
+            let onWillCapture: @MainActor () -> Void = { [weak self] in
+                self?.shutterCount += 1
+            }
+            let onFinish: @MainActor (Result<String?, Error>) -> Void = { [weak self] result in
+                self?.inProgressCaptures[id] = nil
+                self?.isCapturing = false
+                switch result {
+                case .success(let assetIdentifier):
+                    self?.lastSavedAssetIdentifier = assetIdentifier
+                    continuation.resume(returning: nil)
+                case .failure(let error):
+                    continuation.resume(returning: "Couldn't save photo: \(error.localizedDescription)")
+                }
+            }
+            let processor = PhotoCaptureProcessor(
+                aspectRatio: aspectRatio,
+                encodeAsJPEG: format == .jpeg,
+                willCapture: { Task { @MainActor in onWillCapture() } },
+                completion: { result in Task { @MainActor in onFinish(result) } }
+            )
+            inProgressCaptures[id] = processor
+            photoOutput.capturePhoto(with: settings, delegate: processor)
+        }
     }
 
     // MARK: - Helpers
