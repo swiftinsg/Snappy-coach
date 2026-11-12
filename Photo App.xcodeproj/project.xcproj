@@ -16,6 +16,12 @@
     { "path": "AutoRenderingView.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     { "path": "PreviewView.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     { "kind": "folder", "path": "MyApp", "target-membership": [ "Grp 6pm Photo App" ] },
+    { "path": "PhotoControls.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
+    { "path": "PhotoControlsBar.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
+    { "path": "PhotoControlsSheet.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
+    { "path": "CameraSettings.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
+    { "path": "Histogram.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
+    { "path": "CameraAdjustmentSlider.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     {
       "kind": "group",
       "name": "Products",
@@ -38,6 +44,7 @@
       "build-settings": {
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
+        "DEVELOPMENT_TEAM": "7WND928CSD",
         "ENABLE_APP_SANDBOX": "YES",
         "ENABLE_PREVIEWS": "YES",
         "ENABLE_USER_SELECTED_FILES": "readonly",
