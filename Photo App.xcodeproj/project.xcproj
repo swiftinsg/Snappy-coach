@@ -11,6 +11,9 @@
     ],
   },
   "files": [
+    { "path": "CameraManager.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
+    { "path": "Grp-6pm-Photo-App-Info.plist" },
+    { "path": "AutoRenderingView.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     { "kind": "folder", "path": "MyApp", "target-membership": [ "Grp 6pm Photo App" ] },
     {
       "kind": "group",
@@ -34,11 +37,12 @@
       "build-settings": {
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
-        "DEVELOPMENT_TEAM": "4TLAZ4NNFR",
         "ENABLE_APP_SANDBOX": "YES",
         "ENABLE_PREVIEWS": "YES",
         "ENABLE_USER_SELECTED_FILES": "readonly",
         "GENERATE_INFOPLIST_FILE": "YES",
+        "INFOPLIST_FILE": "Grp-6pm-Photo-App-Info.plist",
+        "INFOPLIST_KEY_NSCameraUsageDescription": "We use your camera to give you live photo tips.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]": "YES",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]": "YES",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]": "YES",
@@ -48,7 +52,6 @@
         "INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]": "UIStatusBarStyleDefault",
         "INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]": "UIStatusBarStyleDefault",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
-        "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
         "LD_RUNPATH_SEARCH_PATHS": "@executable_path/Frameworks",
         "LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]": "@executable_path/../Frameworks",
         "MARKETING_VERSION": "1.0",
@@ -102,6 +105,7 @@
     "DEAD_CODE_STRIPPING": "YES",
     "DEBUG_INFORMATION_FORMAT[config=Debug]": "dwarf",
     "DEBUG_INFORMATION_FORMAT[config=Release]": "dwarf-with-dsym",
+    "DEVELOPMENT_TEAM": "4TLAZ4NNFR",
     "DRIVERKIT_DEPLOYMENT_TARGET": "27.2",
     "ENABLE_NS_ASSERTIONS[config=Release]": "NO",
     "ENABLE_STRICT_OBJC_MSGSEND": "YES",
@@ -137,6 +141,6 @@
     "WATCHOS_DEPLOYMENT_TARGET": "27.2",
     "XROS_DEPLOYMENT_TARGET": "27.2",
   },
-  "last-upgrade": "27.0",
+  "last-upgrade": "27.2",
   "last-swift-update": "27.0",
 }
