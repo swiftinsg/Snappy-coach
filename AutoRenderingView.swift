@@ -8,8 +8,14 @@
 import SwiftUI
 
 struct AutoRenderingView: View {
+    @State private var camera = CameraManager()
+
     var body: some View {
-        Text(/*@START_MENU_TOKEN@*/"Hello, World!"/*@END_MENU_TOKEN@*/)
+        CameraPreview(session: camera.session)
+            .ignoresSafeArea()
+            .task {
+                await camera.start()
+            }
     }
 }
 
