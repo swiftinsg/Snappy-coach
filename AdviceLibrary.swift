@@ -101,6 +101,17 @@ extension FrameRegion {
         }
     }
 
+    /// The other side of the frame, or nil for regions without one.
+    nonisolated var opposite: FrameRegion? {
+        switch self {
+        case .left: .right
+        case .right: .left
+        case .top: .bottom
+        case .bottom: .top
+        default: nil
+        }
+    }
+
     /// How to point the camera away from this side of the frame.
     nonisolated var turnAway: (text: String, symbol: String)? {
         switch self {

@@ -607,8 +607,11 @@ final class PhotoCoach {
                 && top.alternativeAdvice(for: topic) != nil
             memory.noteShown(top)
             sectionDetail = details[top]
-        } else if let detail = details[top], detail.region != sectionDetail?.region {
-            // The problem has moved, so the direction has to change too.
+        } else if let detail = details[top], detail.region != sectionDetail?.region,
+                  detail.region != sectionDetail?.region.opposite {
+            // The problem has moved, so the direction has to change too. A jump to the
+            // opposite side is the model wavering, not the scene, so the tip keeps its
+            // direction rather than flipping between left and right.
             sectionDetail = detail
         }
         // The ring fills as the issues in the section are cleared.

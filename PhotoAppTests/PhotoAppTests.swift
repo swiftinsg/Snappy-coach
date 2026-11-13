@@ -219,6 +219,24 @@ struct CoachRulesTests {
         #expect(!CoachIssue.phoneTilted.isModelOnly)
     }
 
+    @Test func directionsDontFlipBetweenLeftAndRight() {
+        // The subject sits left of the top-left crossing, so it's guided there.
+        let start = SubjectTarget.make(subject: CGRect(x: 0.1, y: 0.25, width: 0.1, height: 0.1), placement: .thirdsPoint)
+        #expect(start?.aimPoint == CGPoint(x: 1.0 / 3, y: 1.0 / 3))
+        // Past the middle the nearest crossing is on the right, but the box keeps its place.
+        let later = SubjectTarget.make(
+            subject: CGRect(x: 0.47, y: 0.28, width: 0.1, height: 0.1), placement: .thirdsPoint, previous: start
+        )
+        #expect(later?.aimPoint == CGPoint(x: 1.0 / 3, y: 1.0 / 3))
+        // Moving just past the box counts as lined up instead of "go back".
+        let before = SubjectTarget.make(subject: CGRect(x: 0.2, y: 0.4, width: 0.2, height: 0.2), placement: .centre)
+        let past = SubjectTarget.make(
+            subject: CGRect(x: 0.52, y: 0.4, width: 0.2, height: 0.2), placement: .centre, previous: before
+        )
+        #expect(past?.isAligned == true)
+        #expect(FrameRegion.left.opposite == .right)
+    }
+
     @Test func subjectCutOffNeedsAnEdge() {
         #expect(scene(subject: CGRect(x: 0, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
         #expect(!scene(subject: CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)

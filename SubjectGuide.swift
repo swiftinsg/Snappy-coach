@@ -90,6 +90,8 @@ struct SubjectTarget: Equatable {
     let target: CGRect
     /// Close enough by hand. Decided when the target is made, so it can depend on the last result.
     let isAligned: Bool
+    /// The point the subject is being guided to. Kept between updates so the box doesn't jump.
+    let aimPoint: CGPoint
 
     /// How close the centres must be, as a fraction of the frame, to count as lined up.
     /// Hand-held framing is never exact, so close enough counts.
@@ -111,7 +113,14 @@ struct SubjectTarget: Equatable {
 
     /// Puts the target where the chosen composition style wants the subject.
     /// `wasAligned` is the last result, so a lined-up subject gets the looser `holdTolerance`.
-    static func make(subject: CGRect, placement: SubjectPlacement, wasAligned: Bool = false) -> SubjectTarget? {
+    /// `previous` is the last target, so the coach doesn't flip between left and right:
+    /// the same crossing is kept, and moving just past the box counts as lined up.
+    static func make(
+        subject: CGRect,
+        placement: SubjectPlacement,
+        wasAligned: Bool = false,
+        previous: SubjectTarget? = nil
+    ) -> SubjectTarget? {
         // A subject that fills the frame can't be placed anywhere else.
         guard subject.width < 0.75, subject.height < 0.75 else { return nil }
 
@@ -128,20 +137,31 @@ struct SubjectTarget: Equatable {
                 CGPoint(x: 1.0 / 3, y: 1.0 / 3), CGPoint(x: 2.0 / 3, y: 1.0 / 3),
                 CGPoint(x: 1.0 / 3, y: 2.0 / 3), CGPoint(x: 2.0 / 3, y: 2.0 / 3),
             ]
-            guard let nearest = crossings.min(by: { distance(from: subject, to: $0) < distance(from: subject, to: $1) }) else {
+            // Keep aiming at the crossing already chosen. Otherwise the nearest one switches
+            // sides as the subject passes the middle, and "move left" turns into "move right".
+            if let kept = previous?.aimPoint, crossings.contains(kept) {
+                point = kept
+            } else if let nearest = crossings.min(by: { distance(from: subject, to: $0) < distance(from: subject, to: $1) }) {
+                point = nearest
+            } else {
                 return nil
             }
-            point = nearest
         }
 
         let x = min(max(point.x - subject.width / 2, 0), 1 - subject.width)
         let y = min(max(point.y - subject.height / 2, 0), 1 - subject.height)
         let target = CGRect(x: x, y: y, width: subject.width, height: subject.height)
-        let distance = hypot(target.midX - subject.midX, target.midY - subject.midY)
+        let dx = target.midX - subject.midX
+        let dy = target.midY - subject.midY
+        // Moving just past the box isn't a reason to send the person back the other way.
+        let overshot = previous.map { last in
+            (last.dx * dx < 0 && abs(last.dx) > 0.01) || (last.dy * dy < 0 && abs(last.dy) > 0.01)
+        } ?? false
         return SubjectTarget(
             subject: subject,
             target: target,
-            isAligned: distance < (wasAligned ? holdTolerance : tolerance)
+            isAligned: hypot(dx, dy) < (wasAligned || overshot ? holdTolerance : tolerance),
+            aimPoint: point
         )
     }
 
@@ -190,7 +210,8 @@ final class SubjectGuide {
                 target = SubjectTarget.make(
                     subject: smooth(found.box),
                     placement: placement,
-                    wasAligned: target?.isAligned ?? false
+                    wasAligned: target?.isAligned ?? false,
+                    previous: target
                 )
             }
             try? await Task.sleep(for: .milliseconds(300))
