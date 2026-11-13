@@ -127,6 +127,8 @@ struct AutoRenderingView: View {
                                     .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
                         }
+                        // Full width, so the coach card gets room even when only the zoom buttons are showing.
+                        .frame(maxWidth: .infinity)
                         .overlay(alignment: .top) {
                             // Floats above the controls, so a longer card never pushes them around.
                             coachCard
