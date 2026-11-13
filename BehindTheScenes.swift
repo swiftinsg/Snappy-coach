@@ -150,6 +150,62 @@ struct FrameStats {
     }
 }
 
+/// What the coach needs to know about each composition style in the picker.
+extension CompositionGuide {
+    /// Where the green box puts the subject, or nil when the style isn't about subject position.
+    var subjectPlacement: SubjectPlacement? {
+        switch self {
+        case .ruleOfThirdsOne: .thirdsLine(1.0 / 3)
+        case .ruleOfThirdsTwo: .thirdsLine(2.0 / 3)
+        case .ruleOfThirdsCorner, .negativeSpace: .thirdsPoint
+        case .centre: .centre
+        case .symmetry: .centreLine
+        default: nil
+        }
+    }
+
+    /// What a good photo in this style looks like, for the model to judge against.
+    var coachingFocus: String {
+        let tools = "Tools: move the camera, step closer or back, tilt it up or down, or tap a zoom button"
+        let judged: String
+        switch self {
+        case .ruleOfThirdsOne:
+            judged = "the Thirds 1/3 style: the main subject should sit on the left vertical third line of the frame"
+        case .ruleOfThirdsTwo:
+            judged = "the Thirds 2/3 style: the main subject should sit on the right vertical third line of the frame"
+        case .ruleOfThirdsCorner:
+            judged = "the Thirds Corner style: the main subject should sit on one of the four points where the third lines cross"
+        case .centre:
+            judged = "the Centre style: the main subject should be in the middle of the frame with even space around it"
+        case .onePointPerspective:
+            judged = "the One-Point Perspective style: lines such as a road, hallway or railway should run toward a single vanishing point, ideally near the middle of the frame, with the camera level and square-on so both sides look balanced"
+        case .tableTop45:
+            judged = "the Table-Top 45 degree style: a tabletop scene shot from about 45 degrees above, with the whole arrangement in frame, the table edge level and nothing cropped awkwardly"
+        case .tableTop90:
+            judged = "the Table-Top 90 degree aerial style: shooting straight down onto a flat surface, with the camera parallel to the surface, items arranged neatly and the frame filled evenly"
+        case .leadingLines:
+            judged = "the Leading Lines style: lines such as paths, edges or rails should be visible, point toward the main subject and not be cut off, so they guide the eye to it"
+        case .singleVertex:
+            judged = "the Single Vertex style: one point where two lines meet should be a clear focal point, near a third position, with the lines leading away from it"
+        case .doubleVertex:
+            judged = "the Double Vertex style: two points where lines meet should both be visible and balanced across the frame, leading the eye between them"
+        case .triangle:
+            judged = "the Triangle style: three key elements, or the lines between them, should form a triangle, with all three in frame and well spaced"
+        case .leadingLinesAligning:
+            judged = "the Aligning Lines style: strong straight lines such as horizons, walls and edges should be perfectly level or perfectly vertical, and parallel lines should line up with the frame edges"
+        case .symmetry:
+            judged = "the Symmetry style: the subject should be centred so the left and right halves mirror each other, with the camera square-on and level"
+        case .halfBodyPortrait:
+            judged = "the Half-Body Portrait style: a person framed from about the waist up, with the head in the upper third, a little space above the head, and no joints cropped awkwardly"
+        case .compression:
+            judged = "the Compression style: the subject and background should look stacked close together, as with a long lens, which needs more zoom and standing farther back, with layered elements overlapping"
+        case .negativeSpace:
+            judged = "the Negative Space style: a small subject should sit off-centre, surrounded by plenty of empty, uncluttered space"
+        }
+        return "how well the photo follows \(judged). \(tools)"
+    }
+}
+
 /// What the coach says about the current frame.
 @Generable
 struct PhotoFeedback: Equatable {
@@ -173,7 +229,8 @@ final class PhotoCoach {
 
     var isReady: Bool { feedback?.isGoodEnough ?? false }
 
-    private static let interval: Duration = .seconds(4)
+    /// Seconds to wait between questions to the model.
+    private static let interval: TimeInterval = 4
 
     func checkModel() -> String {
         let model = SystemLanguageModel.default
@@ -186,12 +243,12 @@ final class PhotoCoach {
     }
 
     /// Runs until the task is cancelled. Restart it (with a new topic) when the dropdown changes.
-    func run(camera: CameraManager, topic: AdviceTopic, guide: SubjectGuide) async {
+    func run(camera: CameraManager, topic: AdviceTopic, style: CompositionGuide, guide: SubjectGuide) async {
         feedback = nil
         notice = nil
 
         // Where the subject sits is geometry, so the green box decides and the coach reads it out.
-        let usesBox = topic == .subjectPosition || topic == .composition
+        let usesBox = topic == .subjectPosition || (topic == .composition && style.subjectPlacement != nil)
         var modelIsAvailable = true
         if case .unavailable = SystemLanguageModel.default.availability {
             modelIsAvailable = false
@@ -201,6 +258,8 @@ final class PhotoCoach {
             }
         }
 
+        // Checks twice a second, so the coach reacts as soon as the green box has a subject.
+        var lastAsk = Date()
         while !Task.isCancelled {
             if usesBox, let target = guide.target {
                 feedback = Self.positionFeedback(for: target)
@@ -214,9 +273,13 @@ final class PhotoCoach {
                 continue
             }
 
-            try? await Task.sleep(for: Self.interval)
-            guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
-            if let answer = await ask(about: topic, image: frame), !Task.isCancelled {
+            guard Date().timeIntervalSince(lastAsk) >= Self.interval,
+                  let frame = currentFrame(from: camera) else {
+                try? await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+            lastAsk = Date()
+            if let answer = await ask(about: topic, style: style, image: frame), !Task.isCancelled {
                 feedback = answer
             }
         }
@@ -253,10 +316,10 @@ final class PhotoCoach {
     }
 
     /// What the coach should look at for each topic in the dropdown.
-    private func focus(for topic: AdviceTopic) -> String {
+    private func focus(for topic: AdviceTopic, style: CompositionGuide) -> String {
         switch topic {
         case .composition:
-            "how the scene is framed. Tools: move the camera up, down, left or right, step closer or back, or tilt it, to line the subject up with the guide lines on screen"
+            style.coachingFocus
         case .subjectPosition:
             "where the main subject sits in the frame. Tools: move the camera or the subject left, right, up or down, step closer or back, or tap a zoom button"
         case .anglePerspective:
@@ -271,8 +334,13 @@ final class PhotoCoach {
     }
 
     /// Removes repeats, and never says "take it" when the exposure is clearly wrong.
-    private func cleaned(_ feedback: PhotoFeedback, stats: FrameStats?, topic: AdviceTopic) -> PhotoFeedback {
+    private func cleaned(_ feedback: PhotoFeedback, stats: FrameStats?, topic: AdviceTopic, style: CompositionGuide) -> PhotoFeedback {
         var result = feedback
+        // The model can't verify abstract styles like Leading Lines from one photo, so it only
+        // gives hints for them and never tells the user the shot is ready.
+        if topic == .composition {
+            result.isGoodEnough = false
+        }
         // The model sometimes quotes numbers or slider percentages, which mean nothing on screen.
         result.good = unique(result.good.filter { !$0.contains(where: \.isNumber) })
         result.improve = unique(result.improve.map {
@@ -329,17 +397,22 @@ final class PhotoCoach {
     }
 
     /// Asks the model what is good and what to improve. Returns nil if it couldn't answer.
-    func ask(about topic: AdviceTopic, image: CGImage) async -> PhotoFeedback? {
+    func ask(about topic: AdviceTopic, style: CompositionGuide, image: CGImage) async -> PhotoFeedback? {
         let session = LanguageModelSession(
             instructions: """
             You are a photography coach looking at what the user's camera sees right now. \
-            Judge only \(focus(for: topic)). \
+            Judge only \(focus(for: topic, style: style)). \
             List up to 2 things that are already good. \
             List up to 3 improvements. Each improvement tells the user exactly what to do and \
             which way to do it: when one of the listed tools applies, use its exact name and say \
             which way to drag or tap, otherwise say which way to move the camera and roughly how far. \
-            Set isGoodEnough to true only when the photo is already good for this topic and the user \
-            should take it now, and then list no improvements. \
+            Set isGoodEnough to true only when every requirement of the topic or style is clearly \
+            visible and the user should take it now, and then list no improvements. \
+            If the scene does not suit the chosen style at all, set isGoodEnough to false and tell \
+            the user what kind of scene to point the camera at. \
+            Each improvement is one single movement: pan left or right, tilt up or down, step closer \
+            or back, or tap a zoom button. Never combine movements in one item, and never say drag \
+            for moving the camera. \
             Base everything on what you actually see. \
             Only list something as good if it is clearly true. An empty list is fine. \
             Never repeat an item. Never quote the measured values or any numbers about the picture. \
@@ -357,7 +430,7 @@ final class PhotoCoach {
                 }
                 Attachment(image)
             }
-            return cleaned(response.content, stats: stats, topic: topic)
+            return cleaned(response.content, stats: stats, topic: topic, style: style)
         } catch {
             if !Task.isCancelled {
                 print("Coach error: \(error)")

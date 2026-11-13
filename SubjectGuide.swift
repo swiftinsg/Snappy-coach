@@ -34,6 +34,17 @@ nonisolated enum SubjectFinder {
     }
 }
 
+/// Where a composition style wants the subject.
+enum SubjectPlacement: Equatable {
+    /// The nearest of the four points where the thirds lines cross.
+    case thirdsPoint
+    /// A vertical thirds line (x is 1/3 or 2/3), at whatever height the subject is.
+    case thirdsLine(CGFloat)
+    case centre
+    /// The vertical middle line, at whatever height the subject is.
+    case centreLine
+}
+
 /// Where the subject is now, and where the green box says it should be.
 /// Both rectangles use 0...1 coordinates from the top left of the frame.
 struct SubjectTarget: Equatable {
@@ -51,18 +62,28 @@ struct SubjectTarget: Equatable {
     private var dx: CGFloat { target.midX - subject.midX }
     private var dy: CGFloat { target.midY - subject.midY }
 
-    /// Puts the target at the nearest rule-of-thirds point, or at the centre.
-    static func make(subject: CGRect, centred: Bool) -> SubjectTarget? {
+    /// Puts the target where the chosen composition style wants the subject.
+    static func make(subject: CGRect, placement: SubjectPlacement) -> SubjectTarget? {
         // A subject that fills the frame can't be placed anywhere else.
         guard subject.width < 0.75, subject.height < 0.75 else { return nil }
 
-        let thirds = [
-            CGPoint(x: 1.0 / 3, y: 1.0 / 3), CGPoint(x: 2.0 / 3, y: 1.0 / 3),
-            CGPoint(x: 1.0 / 3, y: 2.0 / 3), CGPoint(x: 2.0 / 3, y: 2.0 / 3),
-        ]
-        let points = centred ? [CGPoint(x: 0.5, y: 0.5)] : thirds
-        guard let point = points.min(by: { distance(from: subject, to: $0) < distance(from: subject, to: $1) }) else {
-            return nil
+        let point: CGPoint
+        switch placement {
+        case .centre:
+            point = CGPoint(x: 0.5, y: 0.5)
+        case .centreLine:
+            point = CGPoint(x: 0.5, y: subject.midY)
+        case .thirdsLine(let x):
+            point = CGPoint(x: x, y: subject.midY)
+        case .thirdsPoint:
+            let crossings = [
+                CGPoint(x: 1.0 / 3, y: 1.0 / 3), CGPoint(x: 2.0 / 3, y: 1.0 / 3),
+                CGPoint(x: 1.0 / 3, y: 2.0 / 3), CGPoint(x: 2.0 / 3, y: 2.0 / 3),
+            ]
+            guard let nearest = crossings.min(by: { distance(from: subject, to: $0) < distance(from: subject, to: $1) }) else {
+                return nil
+            }
+            point = nearest
         }
 
         let x = min(max(point.x - subject.width / 2, 0), 1 - subject.width)
@@ -105,16 +126,17 @@ final class SubjectGuide {
     private var smoothed: CGRect?
 
     /// Runs until the task is cancelled. Restart it when the topic or the guide style changes.
-    func run(camera: CameraManager, enabled: Bool, centred: Bool) async {
+    /// Pass nil when the current topic or style has no box.
+    func run(camera: CameraManager, placement: SubjectPlacement?) async {
         target = nil
         smoothed = nil
-        camera.frameGrabber.setTracksSubject(enabled)
-        guard enabled else { return }
+        camera.frameGrabber.setTracksSubject(placement != nil)
+        guard let placement else { return }
 
         while !Task.isCancelled {
             if let found = latestSubject(from: camera) {
                 frameAspect = found.aspect
-                target = SubjectTarget.make(subject: smooth(found.box), centred: centred)
+                target = SubjectTarget.make(subject: smooth(found.box), placement: placement)
             }
             try? await Task.sleep(for: .milliseconds(300))
         }
