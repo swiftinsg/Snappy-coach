@@ -18,8 +18,22 @@ enum FeedbackState: Equatable {
     case failed(String)
 }
 
+/// The model's review of a finished photo.
+@Generable
+struct Critique {
+    @Guide(description: "One specific thing that works well in the photo, under 12 words. Call any person the subject")
+    var strength: String
+
+    @Guide(description: "The biggest visual problem, or none")
+    var issue: VisualIssue
+
+    @Guide(description: "One concrete thing to try on the next shot, under 15 words")
+    var nextTime: String
+}
+
 /// Generates a short critique of a single photo with the Apple Foundation Models
-/// system model. Everything runs on device.
+/// system model. Everything runs on device. The photo is measured first, so the
+/// critique is grounded in facts, and the topic the user was practising decides what matters.
 @Observable
 final class PhotoCritique {
     private(set) var state: FeedbackState = .idle
@@ -27,40 +41,49 @@ final class PhotoCritique {
     /// True while the model is reading the photo.
     var isThinking: Bool { state == .thinking }
 
-    /// Sends `image` to the model and publishes the answer in `state`.
-    func requestFeedback(for image: UIImage) async {
+    /// Measures `image`, asks the model about it, and publishes the answer in `state`.
+    func requestFeedback(for image: UIImage, topic: AdviceTopic) async {
         guard state != .thinking else { return }
         state = .thinking
 
-        if case .unavailable(let reason) = SystemLanguageModel.default.availability {
-            state = .failed("Photo feedback needs Apple Intelligence. \(reason)")
+        guard let attachment = Self.smallImage(from: image),
+              let analysis = await SceneAnalysis.analyze(attachment) else {
+            state = .failed("The photo couldn't be read. Please try again.")
             return
         }
-        guard let attachment = Self.smallImage(from: image) else {
-            state = .failed("The photo couldn't be read. Please try again.")
+        let measured = CoachRules.issues(for: topic, in: analysis)
+
+        // Without Apple Intelligence the measurements still give useful feedback.
+        guard SystemLanguageModel.default.isAvailable else {
+            state = .finished(Self.text(strength: CoachRules.strengths(for: topic, in: analysis).first,
+                                        issue: measured.first, nextTime: nil, topic: topic, analysis: analysis))
             return
         }
 
         let session = LanguageModelSession(
             instructions: """
-            You are a friendly photography teacher reviewing a photo the user just took. \
-            Write 2 to 4 short sentences of specific, practical feedback. \
-            Start with one thing that works well, then give one or two concrete suggestions \
-            for improving the photo next time, such as framing, angle, light or focus. \
-            Only mention what is actually visible and relevant. \
-            Never name or describe the people in the photo; if you must refer to one, say "the subject". \
-            Use plain prose without headings, bullet points or markdown. \
-            Keep the whole answer under 90 words.
+            You are a friendly photography teacher reviewing a photo a beginner just took. \
+            They were practising \(topic.title.lowercased()). \
+            Be specific to what is actually visible. Never name or describe people; say "the subject". \
+            The camera's measurements are always correct, so don't contradict them.
             """
         )
 
         do {
-            let response = try await session.respond {
-                "What feedback do you have on this photo?"
+            let response = try await session.respond(
+                generating: Critique.self,
+                options: GenerationOptions(samplingMode: .greedy)
+            ) {
+                "Measured by the camera: \(analysis.summary)."
+                "Review this photo."
                 Attachment(attachment)
             }
             guard !Task.isCancelled else { return }
-            state = .finished(response.content)
+            let critique = response.content
+            // A measured problem beats the model's guess.
+            let issue = measured.first ?? critique.issue.coachIssue
+            state = .finished(Self.text(strength: critique.strength, issue: issue,
+                                        nextTime: critique.nextTime, topic: topic, analysis: analysis))
         } catch {
             guard !Task.isCancelled else { return }
             print("Photo feedback error: \(error)")
@@ -71,6 +94,24 @@ final class PhotoCritique {
     /// Returns to the offer so the person can ask again.
     func reset() {
         state = .idle
+    }
+
+    /// One thing that works, one fix with the reason behind it, and one idea for next time.
+    private static func text(strength: String?, issue: CoachIssue?, nextTime: String?, topic: AdviceTopic, analysis: SceneAnalysis) -> String {
+        var parts: [String] = []
+        if let strength, !strength.isEmpty {
+            parts.append("What works: \(strength.trimmingCharacters(in: .punctuationCharacters)).")
+        }
+        if let issue {
+            let advice = issue.advice(for: topic, analysis: analysis)
+            parts.append("To improve: \(advice.action). \(advice.why)")
+        } else {
+            parts.append("Nothing to fix for \(topic.title.lowercased()). Nice shot!")
+        }
+        if let nextTime, !nextTime.isEmpty {
+            parts.append("Next time: \(nextTime.trimmingCharacters(in: .punctuationCharacters)).")
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     /// Shrinks the photo so the model can read it quickly, keeping the whole frame.

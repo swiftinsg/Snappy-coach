@@ -23,6 +23,8 @@ struct AutoRenderingView: View {
     @State private var statusMessage: String?
     /// Briefly blacks out the screen when a photo is taken, like the Camera app.
     @State private var isShutterBlinking = false
+    /// Shows the coach's raw measurements over the card, for tuning the advice.
+    @State private var isCoachDebugOn = false
 
     /// The green box is only useful when the topic is about where things sit in the frame.
     private var showsSubjectBox: Bool {
@@ -32,10 +34,24 @@ struct AutoRenderingView: View {
     /// The auto-rendering coach's latest feedback, or a notice when it can't run.
     @ViewBuilder
     private var coachCard: some View {
-        if let notice = coach.notice {
-            CoachTipView(text: notice)
-        } else if let feedback = coach.feedback {
-            CoachFeedbackView(feedback: feedback)
+        VStack(spacing: 8) {
+            // Hidden debug view: press and hold the card to see what the coach measured.
+            if isCoachDebugOn, !coach.debugText.isEmpty {
+                Text(coach.debugText)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(.black.opacity(0.6), in: .rect(cornerRadius: 12))
+            }
+            if let notice = coach.notice {
+                CoachTipView(text: notice)
+            } else if let feedback = coach.feedback {
+                CoachFeedbackView(feedback: feedback)
+            }
+        }
+        .onLongPressGesture {
+            isCoachDebugOn.toggle()
         }
     }
 
@@ -179,7 +195,7 @@ struct AutoRenderingView: View {
             GalleryView(gallery: gallery)
         }
         .fullScreenCover(item: $capturedPhoto) { photo in
-            PhotoReviewView(photo: photo, gallery: gallery)
+            PhotoReviewView(photo: photo, gallery: gallery, topic: adviceTopic)
         }
         .task(id: statusMessage) {
             guard statusMessage != nil else { return }
@@ -199,6 +215,8 @@ struct AutoRenderingView: View {
             }
         }
         .onChange(of: camera.shutterCount) {
+            // Taking the photo finishes the coach's current section.
+            coach.noteShutter()
             isShutterBlinking = true
             Task {
                 try? await Task.sleep(for: .milliseconds(80))

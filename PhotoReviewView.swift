@@ -21,6 +21,8 @@ struct CapturedPhoto: Identifiable {
 struct PhotoReviewView: View {
     let photo: CapturedPhoto
     let gallery: PhotoGallery
+    /// The advice topic the person was practising, so feedback focuses on it.
+    var topic: AdviceTopic = .composition
 
     @Environment(\.dismiss) private var dismiss
     @State private var critique = PhotoCritique()
@@ -214,7 +216,7 @@ struct PhotoReviewView: View {
         guard let image else { return }
         feedbackTask?.cancel()
         feedbackTask = Task {
-            await critique.requestFeedback(for: image)
+            await critique.requestFeedback(for: image, topic: topic)
         }
     }
 }
