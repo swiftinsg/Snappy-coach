@@ -39,10 +39,11 @@ struct AutoRenderingView: View {
             VStack(spacing: 12) {
                 // Top bar: advice topic dropdown on the left, camera controls on the right.
                 HStack(alignment: .center, spacing: 8) {
-                    if !controls.isEditing {
-                        AdviceTopicMenu(selection: $adviceTopic)
-                            .transition(.opacity)
-                    }
+                    // Hidden rather than removed while editing, so the controls bar doesn't shift.
+                    AdviceTopicMenu(selection: $adviceTopic)
+                        .opacity(controls.isEditing ? 0 : 1)
+                        .disabled(controls.isEditing)
+                        .accessibilityHidden(controls.isEditing)
                     PhotoControlsBar(model: controls, camera: camera, activeAdjustment: $activeAdjustment) { message in
                         statusMessage = message
                     }
@@ -60,6 +61,19 @@ struct AutoRenderingView: View {
                     }
                 }
 
+                // Brief banner confirming what a tap changed, e.g. "Flash Auto". It sits in the
+                // stack so it appears below an open slider or histogram instead of covering them.
+                if let statusMessage {
+                    Text(statusMessage)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+
                 Spacer()
 
                 if controls.isEditing {
@@ -67,22 +81,28 @@ struct AutoRenderingView: View {
                         .padding(.bottom, 24)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
-                    VStack(spacing: 16) {
-                        if let tip = coach.tip {
-                            CoachTipView(text: tip)
-                                .transition(.opacity)
-                        }
+                    VStack(spacing: 10) {
+                        // Always laid out and faded instead of removed, so the controls
+                        // below don't jump when a tip appears or the topic changes.
+                        CoachTipView(text: coach.tip ?? " ")
+                            .opacity(coach.tip == nil ? 0 : 1)
+                            .accessibilityHidden(coach.tip == nil)
 
-                        ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel) { level in
-                            if let message = camera.setZoom(level) {
-                                statusMessage = message
+                        // Zoom and composition styles share one row to keep more of the viewfinder clear.
+                        HStack(spacing: 8) {
+                            ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel) { level in
+                                if let message = camera.setZoom(level) {
+                                    statusMessage = message
+                                }
                             }
-                        }
 
-                        // Composition styles, only while the Composition topic is chosen.
-                        if adviceTopic == .composition {
-                            CompositionPicker(selection: $compositionGuide)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                            // Composition styles, only while the Composition topic is chosen.
+                            if adviceTopic == .composition {
+                                CompositionPicker(selection: $compositionGuide)
+                                    // Undo the picker's leading bleed so chips don't scroll under the zoom buttons.
+                                    .padding(.leading, 16)
+                                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                            }
                         }
                         CaptureBar(camera: camera, gallery: gallery) {
                             isGalleryPresented = true
@@ -102,6 +122,8 @@ struct AutoRenderingView: View {
                 Text("\(countdown)")
                     .font(.system(size: 120, weight: .thin))
                     .foregroundStyle(.white)
+                    // Keeps the thin numerals readable against bright scenes.
+                    .shadow(color: .black.opacity(0.6), radius: 8)
                     .contentTransition(.numericText(countsDown: true))
                     .allowsHitTesting(false)
                     .accessibilityLabel("\(countdown) seconds")
@@ -111,20 +133,6 @@ struct AutoRenderingView: View {
                 .ignoresSafeArea()
                 .opacity(isShutterBlinking ? 1 : 0)
                 .allowsHitTesting(false)
-        }
-        // Brief banner confirming what a tap changed, e.g. "Flash Auto".
-        .overlay(alignment: .top) {
-            if let statusMessage {
-                Text(statusMessage)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
-                    .padding(.top, 72)
-                    .transition(.opacity)
-                    .allowsHitTesting(false)
-            }
         }
         .task {
             await camera.start()
@@ -156,6 +164,13 @@ struct AutoRenderingView: View {
         .onChange(of: controls.isEditing) {
             if controls.isEditing {
                 activeAdjustment = nil
+            }
+        }
+        // Swap the top bar to the controls that matter for the chosen topic.
+        .onChange(of: adviceTopic, initial: true) {
+            controls.setTopic(adviceTopic)
+            if let activeAdjustment, !controls.pinned.contains(activeAdjustment) {
+                self.activeAdjustment = nil
             }
         }
         .onChange(of: camera.shutterCount) {

@@ -47,8 +47,8 @@ struct PhotoControlsSheet: View {
                 }
             }
 
-            Button("Reset to Essentials") {
-                model.resetToEssentials()
+            Button("Reset to Defaults") {
+                model.resetToDefaults()
             }
             .buttonStyle(.glass)
         }

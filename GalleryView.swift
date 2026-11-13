@@ -233,8 +233,9 @@ struct PhotoDetailView: View {
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
                 if let image {
+                    // Shares the full-resolution original, not the on-screen preview.
                     ShareLink(
-                        item: Image(uiImage: image),
+                        item: SharedPhoto(assetIdentifier: asset.localIdentifier),
                         preview: SharePreview("Photo", image: Image(uiImage: image))
                     )
                 }

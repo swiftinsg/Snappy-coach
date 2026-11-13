@@ -41,6 +41,19 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
         case .exposure: "plusminus.circle"
         }
     }
+
+    /// Controls pinned to the top bar for this topic until the user customises it.
+    /// These match the tools the coach names in its tips for the topic.
+    var defaultControls: [PhotoControl] {
+        switch self {
+        case .composition: [.aspect, .timer, .live]
+        case .subjectPosition: [.aspect, .depth, .timer]
+        case .anglePerspective: [.aspect, .timer, .live]
+        case .focus: [.focus, .depth, .lensAperture]
+        case .light: [.flash, .nightMode, .whiteBalance]
+        case .exposure: [.exposure, .shutterSpeed, .histogram]
+        }
+    }
 }
 
 /// Glass dropdown button for picking the advice topic.

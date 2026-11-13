@@ -15,9 +15,6 @@ enum PhotoControl: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The controls shown by default and restored by "Reset to Essentials".
-    static let essentials: [PhotoControl] = [.flash, .live]
-
     var title: String {
         switch self {
         case .flash: "Flash"
@@ -75,21 +72,47 @@ enum PhotoControl: String, CaseIterable, Identifiable {
 
 /// Holds the controls pinned to the top bar and the in-progress edits made
 /// in the photo controls panel. Edits only apply when the user taps Done.
+/// Each advice topic has its own bar, so customising one topic leaves the others alone.
 @Observable
 final class PhotoControlsModel {
     static let maxPinned = 3
 
-    private(set) var pinned: [PhotoControl] = PhotoControl.essentials
+    /// The advice topic whose bar is showing.
+    private(set) var topic: AdviceTopic
+    /// Bars the user has customised. Topics missing here use their defaults.
+    private var pinnedByTopic: [AdviceTopic: [PhotoControl]] = [:]
     private(set) var draft: [PhotoControl] = []
     private(set) var isEditing = false
 
     /// Controls this device can offer. Aperture is hidden unless the camera has a variable aperture.
     let availableControls: [PhotoControl]
 
-    init(supportsVariableAperture: Bool = CameraManager.supportsVariableAperture) {
+    init(topic: AdviceTopic = .composition, supportsVariableAperture: Bool = CameraManager.supportsVariableAperture) {
+        self.topic = topic
         availableControls = PhotoControl.allCases.filter {
             $0 != .lensAperture || supportsVariableAperture
         }
+    }
+
+    /// The controls pinned to the top bar for the current topic.
+    var pinned: [PhotoControl] { pinnedByTopic[topic] ?? defaults(for: topic) }
+
+    /// The topic's default controls, swapping in the Timer for any this device can't offer.
+    func defaults(for topic: AdviceTopic) -> [PhotoControl] {
+        var controls: [PhotoControl] = []
+        for control in topic.defaultControls {
+            let usable = availableControls.contains(control) ? control : .timer
+            if !controls.contains(usable) {
+                controls.append(usable)
+            }
+        }
+        return controls
+    }
+
+    /// Shows the bar for `topic`. Ignored while editing so in-progress changes aren't lost.
+    func setTopic(_ topic: AdviceTopic) {
+        guard !isEditing else { return }
+        self.topic = topic
     }
 
     /// While editing, the top bar previews the draft so drops show up immediately.
@@ -108,12 +131,13 @@ final class PhotoControlsModel {
     }
 
     func done() {
-        pinned = draft
+        pinnedByTopic[topic] = draft
         isEditing = false
     }
 
-    func resetToEssentials() {
-        draft = PhotoControl.essentials
+    /// Restores the current topic's default controls.
+    func resetToDefaults() {
+        draft = defaults(for: topic)
     }
 
     /// Adds `control` to the bar, or moves it if it is already there.
