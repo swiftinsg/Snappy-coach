@@ -112,7 +112,7 @@ extension CoachIssue {
     /// Short, beginner-friendly advice that names the controls in the topic's top bar.
     /// With a `detail` from the model, the action names what to move away from and which way.
     func advice(for topic: AdviceTopic, analysis: SceneAnalysis? = nil, detail: IssueDetail? = nil) -> Advice {
-        let general = generalAdvice(for: topic, analysis: analysis)
+        let general = sceneAdvice(for: analysis?.scene) ?? generalAdvice(for: topic, analysis: analysis)
         guard let detail, let specific = specificAction(detail) else { return general }
         return Advice(action: specific.text, why: general.why, symbol: specific.symbol ?? general.symbol)
     }
@@ -187,6 +187,28 @@ extension CoachIssue {
             Advice(action: "Step back so the subject is small", why: "Negative space works when empty space outweighs the subject.")
         case .jointsCropped:
             Advice(action: "Frame at the waist, not at elbows or knees", why: "Cropping at a joint makes a body look cut off.")
+        }
+    }
+
+    /// Wording for the kind of photo being taken, where the usual tip doesn't fit it well.
+    private func sceneAdvice(for scene: SceneType?) -> Advice? {
+        switch (self, scene) {
+        case (.clutteredBackground, .food):
+            Advice(action: "Move the plate so only the table is behind it", why: "A plain surface keeps the eye on the food.")
+        case (.flatAngle, .food):
+            Advice(action: "Shoot from 45° or straight above", why: "Food looks most appetising from a high angle.", symbol: "arrow.up")
+        case (.flatAngle, .city):
+            Advice(action: "Crouch low to make the buildings tower", why: "A low angle makes buildings look tall and grand.", symbol: "arrow.down")
+        case (.horizonThroughMiddle, .landscape):
+            Advice(action: "Put the horizon on the bottom third for more sky", why: "Giving the sky or the land two thirds makes a clear choice.")
+        case (.subjectTooSmall, .nature):
+            Advice(action: "Step closer, or tap 2× to fill the frame", why: "Small details in nature only shine when they fill the photo.")
+        case (.harshContrast, .people):
+            Advice(action: "Move the subject into shade for soft light", why: "Shade stops squinting and harsh shadows on the face.")
+        case (.tooDark, .food), (.highISO, .food):
+            Advice(action: "Move the plate next to a window", why: "Soft window light shows the texture of food.")
+        default:
+            nil
         }
     }
 

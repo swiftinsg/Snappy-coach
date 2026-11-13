@@ -138,6 +138,83 @@ nonisolated final class PhoneAttitude: @unchecked Sendable {
     }
 }
 
+/// What kind of photo the camera is looking at. Good advice depends on it: food wants a high
+/// angle and window light, a landscape wants a level horizon on a third, and so on.
+nonisolated enum SceneType: String, CaseIterable, Sendable {
+    case people, food, landscape, city, nature, object
+
+    var title: String {
+        switch self {
+        case .people: "People"
+        case .food: "Food"
+        case .landscape: "Landscape"
+        case .city: "City"
+        case .nature: "Nature"
+        case .object: "Object"
+        }
+    }
+
+    /// One line of photography theory for the model, so it judges the photo like this kind of shot.
+    var coachingHint: String {
+        switch self {
+        case .people: "People look best shot at eye level, with the eyes sharp and a little space above the head."
+        case .food: "Food looks best from 45 degrees or straight above, in soft side light, with a clean plate edge."
+        case .landscape: "Landscapes need a level horizon on a third line, and some foreground to give depth."
+        case .city: "City shots need straight vertical lines, with streets and edges used as leading lines."
+        case .nature: "Nature shots work best close to the subject with a simple background."
+        case .object: "An object stands out against a clean background, filling the frame."
+        }
+    }
+
+    /// Words in Vision's classification labels that point to each kind of scene.
+    private static let keywords: [SceneType: Set<String>] = [
+        .people: ["people", "person", "adult", "child", "portrait", "crowd", "baby"],
+        .food: ["food", "dessert", "fruit", "vegetable", "drink", "meal", "baked", "bread", "cake", "pizza",
+                "sushi", "salad", "coffee", "beverage", "breakfast", "sandwich", "pasta", "plate", "dish"],
+        .landscape: ["landscape", "mountain", "beach", "shore", "sky", "sunset", "sunrise", "desert", "lake",
+                     "ocean", "sea", "hill", "valley", "field", "horizon", "waterfall", "cloud", "snow"],
+        .city: ["cityscape", "city", "building", "skyscraper", "street", "structure", "bridge", "road",
+                "vehicle", "car", "architecture", "tower", "house", "downtown", "urban"],
+        .nature: ["plant", "flower", "tree", "foliage", "forest", "animal", "bird", "insect", "leaf",
+                  "garden", "grass", "mammal", "cat", "dog", "butterfly"],
+    ]
+
+    /// Below this total confidence the scene isn't clear, so it counts as a plain object.
+    static let minimumScore: Float = 0.3
+
+    /// Picks the scene from Vision's labels (identifier and confidence). A visible face always means people.
+    static func classify(labels: [(identifier: String, confidence: Float)], faces: [CGRect]) -> SceneType {
+        if faces.contains(where: { $0.width * $0.height > 0.02 }) { return .people }
+        var scores: [SceneType: Float] = [:]
+        for label in labels {
+            let words = Set(label.identifier.lowercased().split(whereSeparator: { $0 == "_" || $0 == " " }).map(String.init))
+            for (type, keys) in keywords where !words.isDisjoint(with: keys) {
+                scores[type, default: 0] += label.confidence
+            }
+        }
+        // Ties go to the earlier case, so the result is stable.
+        var best = SceneType.object
+        var bestScore: Float = 0
+        for type in allCases {
+            let score = scores[type] ?? 0
+            if score > bestScore {
+                best = type
+                bestScore = score
+            }
+        }
+        return bestScore >= minimumScore ? best : .object
+    }
+
+    /// The most common scene in recent frames, with ties going to the newest, so the label doesn't flip.
+    static func smoothed(_ recent: [SceneType]) -> SceneType? {
+        guard let newest = recent.last else { return nil }
+        let counts = Dictionary(recent.map { ($0, 1) }, uniquingKeysWith: +)
+        let top = counts.values.max() ?? 0
+        if counts[newest] == top { return newest }
+        return recent.reversed().first { counts[$0] == top }
+    }
+}
+
 /// Measured facts about one frame. Everything is in 0...1 unless noted.
 nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// Average brightness of the whole frame.
@@ -160,6 +237,8 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var tilt: Double?
     /// See `PhoneAttitude.shake`. Nil without motion data.
     var shake: Double? = nil
+    /// What kind of photo this looks like.
+    var scene: SceneType = .object
 
     /// The subject is clearly darker than what's behind it.
     var isBacklit: Bool {
@@ -170,6 +249,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// Short facts for the model and the debug overlay.
     var summary: String {
         var facts: [String] = []
+        if scene != .object { facts.append("this looks like a \(scene.title.lowercased()) photo") }
         facts.append("overall brightness \(Self.percent(brightness))")
         if highlightClip > 0.02 { facts.append("\(Self.percent(highlightClip)) of the frame is blown out to white") }
         if shadowClip > 0.05 { facts.append("\(Self.percent(shadowClip)) is pure black") }
@@ -187,7 +267,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         return [
             String(format: "bright %.2f  clipHi %.3f  clipLo %.3f", brightness, highlightClip, shadowClip),
             String(format: "subj %.2f  bg %.2f  sharp %.0f", subjectBrightness ?? -1, backgroundBrightness ?? -1, subjectSharpness),
-            "subject \(subjectText)  faces \(faces.count)",
+            "subject \(subjectText)  faces \(faces.count)  scene \(scene.rawValue)",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
         ].joined(separator: "\n")
@@ -211,6 +291,7 @@ extension SceneAnalysis {
         guard let gray = GrayImage(image) else { return nil }
         let subject = SubjectFinder.subject(in: image)
         let faces = detectFaces(in: image)
+        let scene = SceneType.classify(labels: classify(image), faces: faces)
 
         // Without a subject, judge sharpness and brightness in the middle of the frame.
         let region = subject ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
@@ -229,15 +310,24 @@ extension SceneAnalysis {
             readings: readings,
             pitch: pitch,
             tilt: tilt,
-            shake: shake
+            shake: shake,
+            scene: scene
         )
+    }
+
+    /// Vision's on-device labels for the frame, keeping only ones it is reasonably sure of.
+    private nonisolated static func classify(_ image: CGImage) -> [(identifier: String, confidence: Float)] {
+        let request = VNClassifyImageRequest()
+        request.runOnCPUInSimulator()
+        guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return [] }
+        return (request.results ?? [])
+            .filter { $0.confidence >= 0.3 }
+            .map { ($0.identifier, $0.confidence) }
     }
 
     private nonisolated static func detectFaces(in image: CGImage) -> [CGRect] {
         let request = VNDetectFaceRectanglesRequest()
-        #if targetEnvironment(simulator)
-        request.usesCPUOnly = true
-        #endif
+        request.runOnCPUInSimulator()
         guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return [] }
         // Vision measures from the bottom left, the screen from the top left.
         return (request.results ?? []).map {

@@ -214,4 +214,48 @@ struct CoachRulesTests {
         #expect(memory.reordered(issues, keeping: .clutteredBackground) == issues)
         #expect(CoachIssue.clutteredBackground.alternativeAdvice(for: .composition) != nil)
     }
+
+    @Test func sceneTypeFromVisionLabels() {
+        let face = CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.2)
+        // A visible face always means people, whatever the labels say.
+        #expect(SceneType.classify(labels: [("food", 0.9)], faces: [face]) == .people)
+        #expect(SceneType.classify(labels: [("food", 0.6), ("dessert", 0.4)], faces: []) == .food)
+        #expect(SceneType.classify(labels: [("cityscape", 0.7), ("sky", 0.4)], faces: []) == .city)
+        #expect(SceneType.classify(labels: [("mountain", 0.6), ("sky", 0.5), ("building", 0.3)], faces: []) == .landscape)
+        // "skyscraper" is a city word, not a sky word.
+        #expect(SceneType.classify(labels: [("skyscraper", 0.5)], faces: []) == .city)
+        // Unsure or unknown labels fall back to a plain object.
+        #expect(SceneType.classify(labels: [("food", 0.1)], faces: []) == .object)
+        #expect(SceneType.classify(labels: [("teapot", 0.9)], faces: []) == .object)
+    }
+
+    @Test func sceneIsSmoothedOverRecentFrames() {
+        #expect(SceneType.smoothed([.food, .food, .city]) == .food)
+        #expect(SceneType.smoothed([.food, .city]) == .city)
+        #expect(SceneType.smoothed([]) == nil)
+    }
+
+    @Test func adviceFitsTheScene() {
+        var food = scene()
+        food.scene = .food
+        #expect(CoachIssue.flatAngle.advice(for: .anglePerspective, analysis: food).action.contains("45°"))
+        var landscape = scene()
+        landscape.scene = .landscape
+        #expect(CoachIssue.horizonThroughMiddle.advice(for: .composition, analysis: landscape).action.contains("bottom third"))
+        // Other scenes keep the usual wording.
+        #expect(CoachIssue.flatAngle.advice(for: .anglePerspective, analysis: scene()) == CoachIssue.flatAngle.advice(for: .anglePerspective))
+
+        for type in SceneType.allCases {
+            var analysis = scene()
+            analysis.scene = type
+            for issue in CoachIssue.allCases {
+                let advice = issue.advice(for: .composition, analysis: analysis)
+                #expect(advice.action.split(separator: " ").count <= 10, "\(issue) for \(type) is too long")
+                #expect(!advice.why.isEmpty)
+            }
+            #expect(!type.coachingHint.isEmpty)
+            #expect(!type.suitedStyles.isEmpty)
+        }
+        #expect(SceneType.food.suitedStyles.first == .tableTop45)
+    }
 }

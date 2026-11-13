@@ -332,6 +332,8 @@ final class PhotoCoach {
     private(set) var debugText = ""
     /// What has been done so far, kept across topics and photos.
     private(set) var memory = CoachMemory()
+    /// What kind of photo the camera is looking at, smoothed over the last few checks.
+    private(set) var scene: SceneType?
 
     var isReady: Bool { feedback?.isGoodEnough ?? false }
 
@@ -341,6 +343,9 @@ final class PhotoCoach {
     private static let measureInterval: Duration = .seconds(1)
 
     private let attitude = PhoneAttitude()
+    /// Raw scene labels from the last few checks, so one odd frame doesn't change the advice.
+    private var recentScenes: [SceneType] = []
+    private static let sceneHistory = 3
 
     /// A session made ahead of time so the first judgement is quick. Used once, then dropped.
     private var session: LanguageModelSession?
@@ -393,9 +398,14 @@ final class PhotoCoach {
             guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
 
             let readings = CameraReadings.read(from: camera)
-            guard let analysis = await SceneAnalysis.analyze(
+            guard var analysis = await SceneAnalysis.analyze(
                 frame, readings: readings, pitch: attitude.pitch, tilt: attitude.tilt, shake: attitude.shake
             ), !Task.isCancelled else { continue }
+            recentScenes = Array((recentScenes + [analysis.scene]).suffix(Self.sceneHistory))
+            if let smoothed = SceneType.smoothed(recentScenes) {
+                analysis.scene = smoothed
+                scene = smoothed
+            }
 
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
@@ -585,7 +595,8 @@ final class PhotoCoach {
         from candidates: [CompositionGuide]
     ) -> CompositionGuide? {
         guard !candidates.isEmpty else { return nil }
-        var preferred: [CompositionGuide] = []
+        // Styles that suit this kind of scene come first.
+        var preferred = analysis.scene.suitedStyles
         if !analysis.faces.isEmpty { preferred.append(.halfBodyPortrait) }
         if let pitch = analysis.pitch {
             if pitch < -55 { preferred.append(.tableTop90) }
@@ -689,6 +700,9 @@ final class PhotoCoach {
                 options: GenerationOptions(samplingMode: .greedy)
             ) {
                 "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
+                if analysis.scene != .object {
+                    analysis.scene.coachingHint
+                }
                 Attachment(frame)
             }
             return response.content
