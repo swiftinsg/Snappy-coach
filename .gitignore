@@ -1,0 +1,9 @@
+# Local agent/assistant instructions
+CLAUDE.md
+
+# Xcode user-specific settings
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
