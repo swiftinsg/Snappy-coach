@@ -229,6 +229,8 @@ struct PhotoFeedback: Equatable {
 final class PhotoCoach {
     /// The latest feedback shown on screen, or nil while the coach has nothing to say yet.
     private(set) var feedback: PhotoFeedback?
+    /// Composition styles that don't suit the current scene, with the reason why.
+    private(set) var unavailableCompositions: [CompositionGuide: String] = [:]
     /// A message for when the coach can't run at all.
     private(set) var notice: String?
     /// Raw measurements and model output, for the hidden debug overlay.
@@ -259,8 +261,8 @@ final class PhotoCoach {
     private var candidate: CoachIssue??
     private var candidateCount = 0
 
-    /// Runs until the task is cancelled. Restart it (with a new topic) when the dropdown changes.
-    func run(camera: CameraManager, topic: AdviceTopic, style: CompositionGuide, guide: SubjectGuide) async {
+    /// Runs until the task is cancelled. Restart it (with a new topic or selection) when the pickers change.
+    func run(camera: CameraManager, topic: AdviceTopic, styles: Set<CompositionGuide>, guide: SubjectGuide) async {
         feedback = nil
         notice = nil
         candidate = nil
@@ -270,29 +272,35 @@ final class PhotoCoach {
         attitude.start()
         defer { attitude.stop() }
 
-        if CoachRules.usesModel(topic), SystemLanguageModel.default.isAvailable {
-            session = makeSession(for: topic)
+        let usesModel = CoachRules.usesModel(topic) && SystemLanguageModel.default.isAvailable
+        if usesModel {
+            session = makeSession(for: topic, styles: styles)
             session?.prewarm()
         }
 
-        // Checks twice a second, so the coach reacts as soon as the green box has a subject.
+        var isFirstPass = true
         while !Task.isCancelled {
-            // Where the subject sits is geometry, so the green box decides while it's off target.
-            let usesBox = topic == .subjectPosition || (topic == .composition && style.subjectPlacement != nil)
-            if usesBox, let target = guide.target, !target.isAligned {
-                feedback = Self.positionFeedback(for: target)
-                try? await Task.sleep(for: .milliseconds(500))
-                continue
+            if !isFirstPass {
+                try? await Task.sleep(for: usesModel ? Self.modelInterval : Self.measureInterval)
             }
-
-            let usesModel = CoachRules.usesModel(topic) && SystemLanguageModel.default.isAvailable
-            try? await Task.sleep(for: usesModel ? Self.modelInterval : Self.measureInterval)
+            isFirstPass = false
             guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
 
             let readings = CameraReadings.read(from: camera)
             guard let analysis = await SceneAnalysis.analyze(
                 frame, readings: readings, pitch: attitude.pitch, tilt: attitude.tilt
             ), !Task.isCancelled else { continue }
+
+            // Tell the picker which styles don't suit the scene.
+            unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
+
+            // Where the subject sits is geometry, so the green box decides while it's off target.
+            let usesBox = topic == .subjectPosition
+                || (topic == .composition && styles.contains { $0.subjectPlacement != nil })
+            if usesBox, let target = guide.target, !target.isAligned {
+                feedback = Self.positionFeedback(for: target)
+                continue
+            }
 
             var issues = CoachRules.issues(for: topic, in: analysis)
             var good = CoachRules.strengths(for: topic, in: analysis)
@@ -303,7 +311,8 @@ final class PhotoCoach {
             // The model is only asked when the measurements found nothing, which saves battery
             // and keeps it to what it's good at: judging the look of the scene.
             var modelNote = "model: not asked"
-            if usesModel, issues.isEmpty, let judgement = await judge(frame, topic: topic, analysis: analysis) {
+            if usesModel, issues.isEmpty,
+               let judgement = await judge(frame, topic: topic, styles: styles, analysis: analysis) {
                 guard !Task.isCancelled else { break }
                 modelNote = "model: \(judgement.issue.rawValue) / \(judgement.strength)"
                 if CoachRules.allows(judgement.issue, for: topic), let issue = judgement.issue.coachIssue {
@@ -375,10 +384,10 @@ final class PhotoCoach {
 
     // MARK: - The model
 
-    private func makeSession(for topic: AdviceTopic) -> LanguageModelSession {
+    private func makeSession(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> LanguageModelSession {
         LanguageModelSession(instructions: """
             You are a photography teacher looking at a beginner's live camera view. \
-            Judge only \(focus(for: topic)). \
+            Judge only \(focus(for: topic, styles: styles)). \
             Pick the single biggest problem from the list, or none if this part of the photo already works. \
             Also name one thing that already works, in 2 to 5 words. \
             The camera's measurements are given with each photo and are always correct.
@@ -392,19 +401,37 @@ final class PhotoCoach {
     }
 
     /// What the model should look at for each topic it judges.
-    private func focus(for topic: AdviceTopic) -> String {
+    private func focus(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> String {
         switch topic {
+        case .composition:
+            let selected = CompositionGuide.allCases.filter(styles.contains)
+            guard !selected.isEmpty else {
+                return "the framing: the background, the edges, whether the subject is cut off, and empty space"
+            }
+            let criteria = selected
+                .map { "- \($0.title): \($0.coachingFocus)" }
+                .joined(separator: "\n")
+            return """
+                how well the photo follows the selected composition styles. If several are picked, \
+                judge the biggest problem that applies to any of them:
+                \(criteria)
+                """
         case .anglePerspective:
-            "the camera angle: whether the height and viewpoint make the scene interesting"
+            return "the camera angle: whether the height and viewpoint make the scene interesting"
         default:
-            "the framing: the background, the edges, whether the subject is cut off, and empty space"
+            return "the framing: the background, the edges, whether the subject is cut off, and empty space"
         }
     }
 
     /// Asks the model about the frame. Returns nil if it couldn't answer.
-    private func judge(_ frame: CGImage, topic: AdviceTopic, analysis: SceneAnalysis) async -> CoachJudgement? {
+    private func judge(
+        _ frame: CGImage,
+        topic: AdviceTopic,
+        styles: Set<CompositionGuide>,
+        analysis: SceneAnalysis
+    ) async -> CoachJudgement? {
         if session == nil || sessionTurns >= Self.maxTurnsPerSession {
-            session = makeSession(for: topic)
+            session = makeSession(for: topic, styles: styles)
             sessionTurns = 0
         }
         guard let session else { return nil }

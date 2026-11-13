@@ -16,13 +16,31 @@ struct AutoRenderingView: View {
     @State private var isGalleryPresented = false
     /// Remembered between launches.
     @AppStorage("adviceTopic") private var adviceTopic: AdviceTopic = .composition
-    @AppStorage("compositionGuide") private var compositionGuide: CompositionGuide = .ruleOfThirdsOne
+    /// Raw values of the selected composition styles, joined with commas, so the selection persists.
+    @AppStorage("compositionGuides") private var compositionGuidesRaw = CompositionGuide.ruleOfThirdsOne.rawValue
     @State private var activeAdjustment: PhotoControl?
     @State private var statusMessage: String?
     /// Briefly blacks out the screen when a photo is taken, like the Camera app.
     @State private var isShutterBlinking = false
     /// Shows the coach's raw measurements over the card, for tuning the advice.
     @State private var isCoachDebugOn = false
+
+    /// The composition styles the person is practising. At least one is always selected.
+    private var compositionGuides: Set<CompositionGuide> {
+        Set(compositionGuidesRaw.split(separator: ",").compactMap { CompositionGuide(rawValue: String($0)) })
+    }
+
+    /// Persists the selection in a stable order and never lets it become empty.
+    private func setCompositionGuides(_ newValue: Set<CompositionGuide>) {
+        let ordered = CompositionGuide.allCases.filter(newValue.contains)
+        let kept = ordered.isEmpty ? [CompositionGuide.ruleOfThirdsOne] : ordered
+        compositionGuidesRaw = kept.map(\.rawValue).joined(separator: ",")
+    }
+
+    /// A stable description of the selection, used to restart the coach when it changes.
+    private var compositionSelectionID: String {
+        CompositionGuide.allCases.filter(compositionGuides.contains).map(\.rawValue).joined(separator: ",")
+    }
 
     /// The green box only appears for topics and styles about where the subject sits.
     private var showsSubjectBox: Bool {
@@ -32,9 +50,15 @@ struct AutoRenderingView: View {
     /// Where the green box puts the subject for the chosen topic and style, if it has a box at all.
     private var subjectPlacement: SubjectPlacement? {
         switch adviceTopic {
-        case .subjectPosition: .thirdsPoint
-        case .composition: compositionGuide.subjectPlacement
-        default: nil
+        case .subjectPosition:
+            .thirdsPoint
+        case .composition:
+            // With several styles picked, the first one that defines a subject position leads.
+            CompositionGuide.allCases
+                .first { compositionGuides.contains($0) && $0.subjectPlacement != nil }?
+                .subjectPlacement
+        default:
+            nil
         }
     }
 
@@ -71,6 +95,12 @@ struct AutoRenderingView: View {
             // around it, so what you see matches the photo that's saved.
             CameraPreview(session: camera.session)
                 .aspectRatio(camera.aspectRatio.portraitAspect, contentMode: .fit)
+                // Grids help line the scene up while composing.
+                .overlay {
+                    if adviceTopic == .composition {
+                        CompositionGrid(styles: compositionGuides)
+                    }
+                }
                 // The green box shows where the subject should be.
                 .overlay {
                     if showsSubjectBox, let target = subjectGuide.target {
@@ -137,7 +167,10 @@ struct AutoRenderingView: View {
 
                             // Composition styles, only while the Composition topic is chosen.
                             if adviceTopic == .composition {
-                                CompositionPicker(selection: $compositionGuide)
+                                CompositionPicker(
+                                    selection: Binding(get: { compositionGuides }, set: { setCompositionGuides($0) }),
+                                    unavailable: coach.unavailableCompositions
+                                )
                                     // Undo the picker's leading bleed so chips don't scroll under the zoom buttons.
                                     .padding(.leading, 16)
                                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -183,12 +216,12 @@ struct AutoRenderingView: View {
         .task {
             await camera.start()
         }
-        // Restarts whenever the advice topic or composition style changes, so the tips follow the pickers.
-        .task(id: "\(adviceTopic.rawValue)-\(compositionGuide.rawValue)") {
-            await coach.run(camera: camera, topic: adviceTopic, style: compositionGuide, guide: subjectGuide)
+        // Restarts whenever the advice topic or composition selection changes, so the tips follow the pickers.
+        .task(id: "\(adviceTopic.rawValue)-\(compositionSelectionID)") {
+            await coach.run(camera: camera, topic: adviceTopic, styles: compositionGuides, guide: subjectGuide)
         }
         // The box follows the topic, and each style puts it in a different place.
-        .task(id: "\(adviceTopic.rawValue)-\(compositionGuide.rawValue)") {
+        .task(id: "\(adviceTopic.rawValue)-\(compositionSelectionID)") {
             await subjectGuide.run(camera: camera, placement: subjectPlacement)
         }
         .task {
