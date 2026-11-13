@@ -27,6 +27,12 @@ struct Critique {
     @Guide(description: "The biggest visual problem, or none")
     var issue: VisualIssue
 
+    @Guide(description: "Where in the frame the problem is. Use whole if it is everywhere or the issue is none")
+    var region: FrameRegion
+
+    @Guide(description: "The thing causing the problem, 1 to 3 plain words like \"the lamp post\". Call any person the subject. Empty if the issue is none")
+    var thing: String
+
     @Guide(description: "One concrete thing to try on the next shot, under 15 words")
     var nextTime: String
 }
@@ -42,7 +48,8 @@ final class PhotoCritique {
     var isThinking: Bool { state == .thinking }
 
     /// Measures `image`, asks the model about it, and publishes the answer in `state`.
-    func requestFeedback(for image: UIImage, topic: AdviceTopic) async {
+    /// `memory` is the live coach's sentence about what was already done, so the review doesn't repeat it.
+    func requestFeedback(for image: UIImage, topic: AdviceTopic, memory: String? = nil) async {
         guard state != .thinking else { return }
         state = .thinking
 
@@ -56,7 +63,7 @@ final class PhotoCritique {
         // Without Apple Intelligence the measurements still give useful feedback.
         guard SystemLanguageModel.default.isAvailable else {
             state = .finished(Self.text(strength: CoachRules.strengths(for: topic, in: analysis).first,
-                                        issue: measured.first, nextTime: nil, topic: topic, analysis: analysis))
+                                        issue: measured.first, detail: nil, nextTime: nil, topic: topic, analysis: analysis))
             return
         }
 
@@ -66,6 +73,7 @@ final class PhotoCritique {
             They were practising \(topic.title.lowercased()). \
             Be specific to what is actually visible. Never name or describe people; say "the subject". \
             The camera's measurements are always correct, so don't contradict them.
+            \(memory.map { "While shooting: \($0) Build on that rather than repeating it." } ?? "")
             """
         )
 
@@ -82,7 +90,9 @@ final class PhotoCritique {
             let critique = response.content
             // A measured problem beats the model's guess.
             let issue = measured.first ?? critique.issue.coachIssue
-            state = .finished(Self.text(strength: critique.strength, issue: issue,
+            // Where the model saw the problem only applies to its own issue.
+            let detail = measured.isEmpty ? IssueDetail(region: critique.region, rawThing: critique.thing) : nil
+            state = .finished(Self.text(strength: critique.strength, issue: issue, detail: detail,
                                         nextTime: critique.nextTime, topic: topic, analysis: analysis))
         } catch {
             guard !Task.isCancelled else { return }
@@ -97,13 +107,20 @@ final class PhotoCritique {
     }
 
     /// One thing that works, one fix with the reason behind it, and one idea for next time.
-    private static func text(strength: String?, issue: CoachIssue?, nextTime: String?, topic: AdviceTopic, analysis: SceneAnalysis) -> String {
+    private static func text(
+        strength: String?,
+        issue: CoachIssue?,
+        detail: IssueDetail?,
+        nextTime: String?,
+        topic: AdviceTopic,
+        analysis: SceneAnalysis
+    ) -> String {
         var parts: [String] = []
         if let strength, !strength.isEmpty {
             parts.append("What works: \(strength.trimmingCharacters(in: .punctuationCharacters)).")
         }
         if let issue {
-            let advice = issue.advice(for: topic, analysis: analysis)
+            let advice = issue.advice(for: topic, analysis: analysis, detail: detail)
             parts.append("To improve: \(advice.action). \(advice.why)")
         } else {
             parts.append("Nothing to fix for \(topic.title.lowercased()). Nice shot!")

@@ -23,6 +23,8 @@ struct PhotoReviewView: View {
     let gallery: PhotoGallery
     /// The advice topic the person was practising, so feedback focuses on it.
     var topic: AdviceTopic = .composition
+    /// What the live coach saw the person do, from `CoachMemory.sentence`, so feedback builds on it.
+    var coachMemory: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var critique = PhotoCritique()
@@ -216,7 +218,7 @@ struct PhotoReviewView: View {
         guard let image else { return }
         feedbackTask?.cancel()
         feedbackTask = Task {
-            await critique.requestFeedback(for: image, topic: topic)
+            await critique.requestFeedback(for: image, topic: topic, memory: coachMemory)
         }
     }
 }

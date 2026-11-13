@@ -32,33 +32,107 @@ nonisolated struct CameraReadings: Sendable, Equatable {
     }
 }
 
-/// Reads how the phone is held, like the level in the Camera app.
-final class PhoneAttitude {
+/// Reads how the phone is held, like the level in the Camera app. Gravity is smoothed so
+/// normal hand jitter doesn't make the advice flicker.
+nonisolated final class PhoneAttitude: @unchecked Sendable {
     private let manager = CMMotionManager()
+    private let queue = OperationQueue()
+    private let lock = NSLock()
+    private var gravity: CMAcceleration?
+    private var recentRotation: [Double] = []
+    private var users = 0
 
+    /// How far each new sample moves the smoothed gravity, 0...1. Lower is steadier but slower.
+    private static let smoothing = 0.15
+    /// Samples the shake reading averages: about half a second at 30 updates a second.
+    private static let shakeWindow = 15
+
+    init() {
+        queue.maxConcurrentOperationCount = 1
+    }
+
+    /// Starts updates. Each call must be balanced by `stop()`. Updates only stop with the last
+    /// user, so a coach task that is restarting can't switch motion off for the one replacing it.
     func start() {
-        guard manager.isDeviceMotionAvailable, !manager.isDeviceMotionActive else { return }
-        manager.deviceMotionUpdateInterval = 0.2
-        manager.startDeviceMotionUpdates()
+        lock.lock()
+        users += 1
+        let isFirst = users == 1
+        lock.unlock()
+        guard isFirst, manager.isDeviceMotionAvailable else { return }
+        manager.deviceMotionUpdateInterval = 1.0 / 30
+        manager.startDeviceMotionUpdates(to: queue) { [weak self] motion, _ in
+            guard let self, let motion else { return }
+            self.add(motion)
+        }
     }
 
     func stop() {
-        manager.stopDeviceMotionUpdates()
+        lock.lock()
+        users = max(0, users - 1)
+        let isLast = users == 0
+        if isLast {
+            gravity = nil
+            recentRotation = []
+        }
+        lock.unlock()
+        if isLast { manager.stopDeviceMotionUpdates() }
+    }
+
+    private func add(_ motion: CMDeviceMotion) {
+        let rate = motion.rotationRate
+        let speed = (rate.x * rate.x + rate.y * rate.y + rate.z * rate.z).squareRoot()
+        let new = motion.gravity
+        lock.lock()
+        defer { lock.unlock() }
+        if let old = gravity {
+            let a = Self.smoothing
+            gravity = CMAcceleration(
+                x: old.x + (new.x - old.x) * a,
+                y: old.y + (new.y - old.y) * a,
+                z: old.z + (new.z - old.z) * a
+            )
+        } else {
+            gravity = new
+        }
+        recentRotation.append(speed)
+        if recentRotation.count > Self.shakeWindow { recentRotation.removeFirst() }
+    }
+
+    private var smoothedGravity: CMAcceleration? {
+        lock.lock()
+        defer { lock.unlock() }
+        return gravity
     }
 
     /// Degrees the back camera points above (+) or below (-) the horizon.
     var pitch: Double? {
-        guard let gravity = manager.deviceMotion?.gravity else { return nil }
-        // The back camera looks along the phone's -z axis, so its elevation is asin(gravity.z).
-        return asin(min(max(gravity.z, -1), 1)) * 180 / .pi
+        smoothedGravity.map { Self.pitch(gravityZ: $0.z) }
     }
 
     /// Degrees the phone is rotated away from level, in portrait or landscape.
     var tilt: Double? {
-        guard let gravity = manager.deviceMotion?.gravity else { return nil }
+        smoothedGravity.flatMap { Self.tilt(x: $0.x, y: $0.y, z: $0.z) }
+    }
+
+    /// How much the phone has been turning over the last half second, in radians a second.
+    /// Near 0 when held still; above `CoachRules.shakeThreshold` the photo is likely to blur.
+    var shake: Double? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !recentRotation.isEmpty else { return nil }
+        return recentRotation.reduce(0, +) / Double(recentRotation.count)
+    }
+
+    static func pitch(gravityZ z: Double) -> Double {
+        // The back camera looks along the phone's -z axis, so its elevation is asin(gravity.z).
+        asin(min(max(z, -1), 1)) * 180 / .pi
+    }
+
+    static func tilt(x: Double, y: Double, z: Double) -> Double? {
         // A phone pointing almost straight up or down has no meaningful level.
-        guard abs(gravity.z) < 0.8 else { return nil }
-        let roll = atan2(gravity.x, -gravity.y) * 180 / .pi
+        guard abs(z) < 0.8 else { return nil }
+        // Positive when the phone is turned clockwise.
+        let roll = atan2(x, -y) * 180 / .pi
         // Measure from the nearest of portrait or landscape.
         return roll - (roll / 90).rounded() * 90
     }
@@ -84,6 +158,8 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// See `PhoneAttitude`. Nil when there is no motion data, e.g. on a still photo.
     var pitch: Double?
     var tilt: Double?
+    /// See `PhoneAttitude.shake`. Nil without motion data.
+    var shake: Double? = nil
 
     /// The subject is clearly darker than what's behind it.
     var isBacklit: Bool {
@@ -101,6 +177,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         facts.append(subjectSharpness < CoachRules.softThreshold ? "the subject looks soft" : "the subject is sharp")
         if !faces.isEmpty { facts.append("\(faces.count) face\(faces.count == 1 ? "" : "s")") }
         if let tilt, abs(tilt) >= CoachRules.tiltThreshold { facts.append("the phone is tilted \(Int(abs(tilt).rounded()))°") }
+        if let shake, shake >= CoachRules.shakeThreshold { facts.append("the phone is moving") }
         return facts.joined(separator: "; ")
     }
 
@@ -112,7 +189,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             String(format: "subj %.2f  bg %.2f  sharp %.0f", subjectBrightness ?? -1, backgroundBrightness ?? -1, subjectSharpness),
             "subject \(subjectText)  faces \(faces.count)",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
-            String(format: "pitch %.0f°  tilt %.1f°", pitch ?? 0, tilt ?? 0),
+            String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
         ].joined(separator: "\n")
     }
 
@@ -128,7 +205,8 @@ extension SceneAnalysis {
         _ image: CGImage,
         readings: CameraReadings = CameraReadings(),
         pitch: Double? = nil,
-        tilt: Double? = nil
+        tilt: Double? = nil,
+        shake: Double? = nil
     ) async -> SceneAnalysis? {
         guard let gray = GrayImage(image) else { return nil }
         let subject = SubjectFinder.subject(in: image)
@@ -150,7 +228,8 @@ extension SceneAnalysis {
             faces: faces,
             readings: readings,
             pitch: pitch,
-            tilt: tilt
+            tilt: tilt,
+            shake: shake
         )
     }
 
