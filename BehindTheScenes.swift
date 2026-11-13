@@ -233,6 +233,8 @@ final class PhotoCoach {
     private(set) var feedback: PhotoFeedback?
     /// Composition styles that don't suit the current scene, with the reason why.
     private(set) var unavailableCompositions: [CompositionGuide: String] = [:]
+    /// The composition style the coach thinks suits the current scene best. Only a suggestion.
+    private(set) var recommendedComposition: CompositionGuide?
     /// How much of the current section is done, 0...1, for the shutter's progress ring.
     private(set) var sectionProgress: Double = 0
     /// A message for when the coach can't run at all.
@@ -303,6 +305,12 @@ final class PhotoCoach {
 
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
+            // The model's suggestion: the best style for this scene that still fits what's picked.
+            recommendedComposition = Self.recommendation(
+                for: analysis,
+                unavailable: unavailableCompositions,
+                selected: styles
+            )
 
             // Where the subject sits is geometry, so the green box decides while it's off target.
             let usesBox = topic == .subjectPosition
@@ -476,6 +484,19 @@ final class PhotoCoach {
             .ruleOfThirdsTwo, .ruleOfThirdsOne,
         ]
         return preferred.first(where: candidates.contains)
+    }
+
+    /// The style to point the person at: the best fit for the scene that also fits the
+    /// styles already selected, so the suggestion is always something they can tap.
+    private static func recommendation(
+        for analysis: SceneAnalysis,
+        unavailable: [CompositionGuide: String],
+        selected: Set<CompositionGuide>
+    ) -> CompositionGuide? {
+        let candidates = CompositionGuide.allCases.filter { guide in
+            unavailable[guide] == nil && !selected.contains(where: { $0.conflicts(with: guide) })
+        }
+        return preferredNextStyle(for: analysis, from: candidates)
     }
 
     // MARK: - The model

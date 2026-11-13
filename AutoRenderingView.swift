@@ -25,14 +25,18 @@ struct AutoRenderingView: View {
     /// Shows the coach's raw measurements over the card, for tuning the advice.
     @State private var isCoachDebugOn = false
 
-    /// The composition styles the person is practising. At least one is always selected.
+    /// The composition styles the person is practising. At least one is always selected,
+    /// and only styles that can work together are kept.
     private var compositionGuides: Set<CompositionGuide> {
-        Set(compositionGuidesRaw.split(separator: ",").compactMap { CompositionGuide(rawValue: String($0)) })
+        let stored = Set(compositionGuidesRaw.split(separator: ",").compactMap { CompositionGuide(rawValue: String($0)) })
+        let compatible = CompositionGuide.compatibleSelection(stored)
+        return compatible.isEmpty ? [CompositionGuide.ruleOfThirdsOne] : compatible
     }
 
-    /// Persists the selection in a stable order and never lets it become empty.
+    /// Persists the selection in a stable order, never empty and never self-contradictory.
     private func setCompositionGuides(_ newValue: Set<CompositionGuide>) {
-        let ordered = CompositionGuide.allCases.filter(newValue.contains)
+        let compatible = CompositionGuide.compatibleSelection(newValue)
+        let ordered = CompositionGuide.allCases.filter(compatible.contains)
         let kept = ordered.isEmpty ? [CompositionGuide.ruleOfThirdsOne] : ordered
         compositionGuidesRaw = kept.map(\.rawValue).joined(separator: ",")
     }
@@ -169,7 +173,9 @@ struct AutoRenderingView: View {
                             if adviceTopic == .composition {
                                 CompositionPicker(
                                     selection: Binding(get: { compositionGuides }, set: { setCompositionGuides($0) }),
-                                    unavailable: coach.unavailableCompositions
+                                    unavailable: coach.unavailableCompositions,
+                                    recommended: coach.recommendedComposition,
+                                    onMessage: { statusMessage = $0 }
                                 )
                                     // Undo the picker's leading bleed so chips don't scroll under the zoom buttons.
                                     .padding(.leading, 16)

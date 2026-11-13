@@ -67,6 +67,45 @@ extension CompositionGuide {
 
         return unavailable
     }
+
+    /// Styles that ask for incompatible subject positions or camera angles can't be practised together.
+    func conflicts(with other: CompositionGuide) -> Bool {
+        guard self != other else { return false }
+        let pair: Set<CompositionGuide> = [self, other]
+
+        // Only one subject placement makes sense at a time.
+        let placements: Set<CompositionGuide> = [.ruleOfThirdsOne, .ruleOfThirdsTwo, .ruleOfThirdsCorner, .centre]
+        if pair.isSubset(of: placements) { return true }
+        // Two camera-angle styles can't both be right.
+        if pair.isSubset(of: [.tableTop45, .tableTop90]) { return true }
+        // One focal point or two, not both.
+        if pair.isSubset(of: [.singleVertex, .doubleVertex]) { return true }
+        // Filling the frame and leaving lots of empty space pull opposite ways.
+        if pair.isSubset(of: [.negativeSpace, .compression]) { return true }
+
+        // Symmetry wants the subject centred, so it can't sit on a thirds style.
+        let thirds: Set<CompositionGuide> = [.ruleOfThirdsOne, .ruleOfThirdsTwo, .ruleOfThirdsCorner]
+        if pair.contains(.symmetry), !pair.isDisjoint(with: thirds) { return true }
+        // Negative space deliberately puts the subject off centre.
+        if pair.contains(.negativeSpace), !pair.isDisjoint(with: [.centre, .symmetry]) { return true }
+        // Table-top shots look down, which rules out a level portrait or one-point view.
+        if !pair.isDisjoint(with: [.tableTop45, .tableTop90]),
+           !pair.isDisjoint(with: [.halfBodyPortrait, .onePointPerspective]) {
+            return true
+        }
+        return false
+    }
+
+    /// Keeps the first style of each conflicting group, in picker order.
+    static func compatibleSelection(_ styles: Set<CompositionGuide>) -> Set<CompositionGuide> {
+        var kept: Set<CompositionGuide> = []
+        for guide in allCases where styles.contains(guide) {
+            if !kept.contains(where: { $0.conflicts(with: guide) }) {
+                kept.insert(guide)
+            }
+        }
+        return kept
+    }
 }
 
 // MARK: - Viewfinder grid
@@ -135,11 +174,16 @@ struct CompositionGrid: View {
 // MARK: - Picker
 
 /// Horizontally scrolling row of composition styles, shown above the shutter.
-/// Several styles can be selected at once; styles that don't suit the scene are dimmed.
+/// Several styles can be selected at once, but only ones that can work together.
+/// Styles that don't suit the scene are dark; tapping one explains why.
 struct CompositionPicker: View {
     @Binding var selection: Set<CompositionGuide>
     /// Styles that don't suit the current scene, with the reason to show.
     let unavailable: [CompositionGuide: String]
+    /// The style the coach thinks suits this scene best. Only a suggestion — any style can be picked.
+    var recommended: CompositionGuide?
+    /// Called with an explanation when a style can't be used.
+    var onMessage: (String) -> Void = { _ in }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -176,42 +220,83 @@ struct CompositionPicker: View {
     private func chip(for guide: CompositionGuide) -> some View {
         let isSelected = selection.contains(guide)
         let reason = unavailable[guide]
-        // A style the person picked stays usable, even if the scene no longer suits it.
-        let isDisabled = reason != nil && !isSelected
+        let isUnavailable = reason != nil
+        let isRecommended = guide == recommended
         return Button {
             toggle(guide)
         } label: {
             HStack(spacing: 4) {
-                if isDisabled {
+                if isUnavailable {
                     Image(systemName: "slash.circle")
                         .font(.caption2)
+                } else if isRecommended {
+                    Image(systemName: "sparkles")
+                        .font(.caption2)
+                        .foregroundStyle(isSelected ? .black : .yellow)
                 }
                 Text(guide.title)
             }
             .font(.footnote.weight(.semibold))
-            .foregroundStyle(isSelected ? .black : .white)
+            .foregroundStyle(isSelected ? .black : .white.opacity(isUnavailable ? 0.45 : 1))
             .shadow(color: .black.opacity(isSelected ? 0 : 0.5), radius: 2)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .glassEffect(
-                isSelected ? .regular.tint(.yellow) : .regular.tint(.black.opacity(0.35)),
+                isSelected
+                    ? .regular.tint(.yellow)
+                    : .regular.tint(.black.opacity(isUnavailable ? 0.7 : 0.35)),
                 in: .capsule
             )
+            .overlay {
+                // The coach's pick gets a thin yellow ring so it stands out without being pushy.
+                if isRecommended, !isSelected {
+                    Capsule()
+                        .strokeBorder(.yellow.opacity(0.8), lineWidth: 1)
+                }
+            }
         }
         .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .opacity(isDisabled ? 0.4 : 1)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .accessibilityHint(reason ?? "")
+        .accessibilityHint(accessibilityHint(for: guide, isUnavailable: isUnavailable, isRecommended: isRecommended))
+    }
+
+    private func accessibilityHint(for guide: CompositionGuide, isUnavailable: Bool, isRecommended: Bool) -> String {
+        if let reason = unavailable[guide] { return "Does not work for this scene. \(reason)" }
+        var parts: [String] = []
+        if isRecommended { parts.append("Recommended for this scene") }
+        let conflicts = selection.filter { $0.conflicts(with: guide) }
+        if !conflicts.isEmpty {
+            let names = CompositionGuide.allCases.filter(conflicts.contains).map(\.title)
+            parts.append("Doesn't work with \(names.formatted(.list(type: .and)))")
+        }
+        return parts.joined(separator: ". ")
     }
 
     private func toggle(_ guide: CompositionGuide) {
         if selection.contains(guide) {
             // Keep at least one style selected so the coach always has a goal.
-            guard selection.count > 1 else { return }
+            guard selection.count > 1 else {
+                onMessage("Keep at least one style selected.")
+                return
+            }
             selection.remove(guide)
-        } else {
-            selection.insert(guide)
+            return
         }
+
+        // The style is looked at through a dark, usable chip rather than being disabled.
+        if let reason = unavailable[guide] {
+            onMessage("\(guide.title) does not work for this scene. \(reason).")
+            return
+        }
+
+        // Multi-select only combines styles that can be true at the same time.
+        let conflicts = selection.filter { $0.conflicts(with: guide) }
+        guard conflicts.isEmpty else {
+            let names = CompositionGuide.allCases.filter(conflicts.contains).map(\.title)
+            onMessage("\(guide.title) doesn't work with \(names.formatted(.list(type: .and))).")
+            return
+        }
+
+        selection.insert(guide)
     }
 }
