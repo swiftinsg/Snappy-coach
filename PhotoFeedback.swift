@@ -21,7 +21,7 @@ enum FeedbackState: Equatable {
 /// The model's review of a finished photo.
 @Generable
 struct Critique {
-    @Guide(description: "One specific thing that works well in the photo, under 12 words. Call any person the subject")
+    @Guide(description: "One specific thing that works well in the photo, under 12 words. Call one person the subject and several people the subjects")
     var strength: String
 
     @Guide(description: "The biggest visual problem, or none")
@@ -30,7 +30,7 @@ struct Critique {
     @Guide(description: "Where in the frame the problem is. Use whole if it is everywhere or the issue is none")
     var region: FrameRegion
 
-    @Guide(description: "The thing causing the problem, 1 to 3 plain words like \"the lamp post\". Call any person the subject. Empty if the issue is none")
+    @Guide(description: "The thing causing the problem, 1 to 3 plain words like \"the lamp post\". Call one person the subject and several people the subjects. Empty if the issue is none")
     var thing: String
 
     @Guide(description: "One concrete thing to try on the next shot, under 15 words")
@@ -71,7 +71,7 @@ final class PhotoCritique {
             instructions: """
             You are a friendly photography teacher reviewing a photo a beginner just took. \
             They were practising \(topic.title.lowercased()). \
-            Be specific to what is actually visible. Never name or describe people; say "the subject". \
+            Be specific to what is actually visible. Never name or describe people; say "the subject", or "the subjects" for several people. \
             The camera's measurements are always correct, so don't contradict them.
             \(memory.map { "While shooting: \($0) Build on that rather than repeating it." } ?? "")
             """

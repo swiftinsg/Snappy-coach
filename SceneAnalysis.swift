@@ -238,7 +238,8 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var highlightClip: Double
     /// Share of the frame that is pure black (detail lost in the shadows).
     var shadowClip: Double
-    /// The most eye-catching thing in the frame, from the top left.
+    /// The subject, from the top left: the whole group when there are people,
+    /// otherwise the most eye-catching thing.
     var subject: CGRect?
     var subjectBrightness: Double?
     var backgroundBrightness: Double?
@@ -254,9 +255,33 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var shake: Double? = nil
     /// What kind of photo this looks like.
     var scene: SceneType = .object
+    /// Everyone found in the frame by their whole body, so people facing away count too.
+    var people: [CGRect] = []
+    /// Brightness of an 8×8 grid over the frame, row by row. Compared between checks to tell
+    /// whether the camera has been reframed.
+    var layout: [Double] = []
     /// What's behind the people in a people photo, like a landscape or a city, so both kinds
     /// of advice apply. Nil when there's no person or the backdrop isn't clear.
     var backdrop: SceneType? = nil
+
+    /// How many people are in the frame, whether their faces or only their bodies show.
+    var personCount: Int {
+        max(faces.count, people.count)
+    }
+
+    /// Whether the subject (or the group) runs off an edge of the frame.
+    var subjectTouchesEdge: Bool {
+        guard let subject else { return false }
+        let margin = 0.02
+        return subject.minX < margin || subject.minY < margin || subject.maxX > 1 - margin || subject.maxY > 1 - margin
+    }
+
+    /// How different two layouts are, 0...1. Near 0 for the same view; a clear reframe
+    /// (moving, turning or zooming the camera) is well above `CoachRules.reframeThreshold`.
+    static func reframeAmount(from start: [Double], to now: [Double]) -> Double {
+        guard start.count == now.count, !start.isEmpty else { return 0 }
+        return zip(start, now).map { abs($0 - $1) }.reduce(0, +) / Double(start.count)
+    }
 
     /// The main scene, then the backdrop if there is one.
     var scenes: [SceneType] {
@@ -288,7 +313,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         if shadowClip > 0.05 { facts.append("\(Self.percent(shadowClip)) is pure black") }
         if isBacklit { facts.append("the subject is darker than the background (backlit)") }
         facts.append(subjectSharpness < CoachRules.softThreshold ? "the subject looks soft" : "the subject is sharp")
-        if !faces.isEmpty { facts.append("\(faces.count) face\(faces.count == 1 ? "" : "s")") }
+        if personCount > 0 { facts.append("\(personCount) \(personCount == 1 ? "person" : "people")") }
         if let tilt, abs(tilt) >= CoachRules.tiltThreshold { facts.append("the phone is tilted \(Int(abs(tilt).rounded()))°") }
         if let shake, shake >= CoachRules.shakeThreshold { facts.append("the phone is moving") }
         return facts.joined(separator: "; ")
@@ -300,7 +325,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         return [
             String(format: "bright %.2f  clipHi %.3f  clipLo %.3f", brightness, highlightClip, shadowClip),
             String(format: "subj %.2f  bg %.2f  sharp %.0f", subjectBrightness ?? -1, backgroundBrightness ?? -1, subjectSharpness),
-            "subject \(subjectText)  faces \(faces.count)  scene \(scenes.map(\.rawValue).joined(separator: "+"))",
+            "subject \(subjectText)  faces \(faces.count)  people \(people.count)  scene \(scenes.map(\.rawValue).joined(separator: "+"))",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
         ].joined(separator: "\n")
@@ -322,10 +347,13 @@ extension SceneAnalysis {
         shake: Double? = nil
     ) async -> SceneAnalysis? {
         guard let gray = GrayImage(image) else { return nil }
-        let subject = SubjectFinder.subject(in: image)
+        let found = SubjectFinder.find(in: image)
+        let subject = found.subject
         let faces = detectFaces(in: image)
         let labels = classify(image)
-        let scene = SceneType.classify(labels: labels, faces: faces)
+        // A clearly visible body means people too, even when the face is turned away.
+        let bodies = found.people.filter { $0.width * $0.height >= 0.06 }
+        let scene = SceneType.classify(labels: labels, faces: faces + bodies)
         // What the labels alone say, so a person in front of a landscape keeps the landscape too.
         let behind = SceneType.classify(labels: labels, faces: [])
         let backdrop = scene == .people && behind != .object && behind != .people ? behind : nil
@@ -349,6 +377,10 @@ extension SceneAnalysis {
             tilt: tilt,
             shake: shake,
             scene: scene,
+            people: found.people,
+            layout: (0..<64).map { cell in
+                gray.mean(in: CGRect(x: Double(cell % 8) / 8, y: Double(cell / 8) / 8, width: 1.0 / 8, height: 1.0 / 8))
+            },
             backdrop: backdrop
         )
     }

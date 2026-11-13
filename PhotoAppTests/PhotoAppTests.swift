@@ -104,7 +104,7 @@ struct CoachRulesTests {
     }
 
     @Test func steppingCloserOrBackIsMeasuredBySubjectSize() {
-        #expect(CoachIssue.tooMuchEmptySpace.asksToMove == .closer)
+        #expect(CoachIssue.subjectTooSmall.asksToMove == .closer)
         #expect(CoachIssue.subjectCutOff.asksToMove == .back)
         #expect(CoachIssue.clutteredBackground.asksToMove == nil)
         // Closer (or zoomed in): the subject fills half as much again.
@@ -170,6 +170,58 @@ struct CoachRulesTests {
         let sunk = CGRect(x: 0.4, y: 0.5, width: 0.2, height: 0.2)
         #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [cutOff])).first == .headCutOff)
         #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [sunk])).first == .tooMuchHeadroom)
+    }
+
+    @Test func groupsAreCheckedForEveryone() {
+        let fine = CGRect(x: 0.2, y: 0.15, width: 0.1, height: 0.12)
+        let cutOff = CGRect(x: 0.6, y: 0.0, width: 0.1, height: 0.1)
+        // Someone's head at the top edge is cut off, even if it isn't the biggest face.
+        let bigFine = CGRect(x: 0.3, y: 0.2, width: 0.2, height: 0.2)
+        #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [bigFine, cutOff])).contains(.headCutOff))
+        // Headroom is measured above the highest head, so it works with several people.
+        let low1 = CGRect(x: 0.2, y: 0.4, width: 0.1, height: 0.1)
+        let low2 = CGRect(x: 0.6, y: 0.45, width: 0.1, height: 0.1)
+        #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [low1, low2])).contains(.tooMuchHeadroom))
+        #expect(!CoachRules.issues(for: .subjectPosition, in: scene(faces: [fine, low2])).contains(.tooMuchHeadroom))
+        // People facing away (bodies, no faces) still count.
+        var backs = scene(faces: [])
+        backs.people = [CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.6), CGRect(x: 0.5, y: 0.2, width: 0.2, height: 0.6)]
+        #expect(backs.personCount == 2)
+        #expect(backs.summary.contains("2 people"))
+        #expect(SceneType.classify(labels: [], faces: backs.people) == .people)
+    }
+
+    @Test func unverifiableGetCloserTipsAreGone() {
+        let all = Set(CompositionGuide.allCases)
+        for topic in AdviceTopic.allCases {
+            #expect(!CoachRules.allows(.noClearSubject, for: topic, styles: all))
+            #expect(!CoachRules.allows(.tooMuchEmptySpace, for: topic, styles: all))
+            #expect(!CoachRules.allows(.subjectTooBig, for: topic, styles: all))
+        }
+    }
+
+    @Test func negativeSpaceSizeIsMeasured() {
+        let big = scene(subject: CGRect(x: 0.2, y: 0.2, width: 0.5, height: 0.5))
+        #expect(CoachRules.issues(for: .composition, in: big, styles: [.negativeSpace]).contains(.subjectTooBig))
+        #expect(!CoachRules.issues(for: .composition, in: big).contains(.subjectTooBig))
+        let small = scene(subject: CGRect(x: 0.6, y: 0.6, width: 0.15, height: 0.15))
+        #expect(!CoachRules.issues(for: .composition, in: small, styles: [.negativeSpace]).contains(.subjectTooBig))
+    }
+
+    @Test func reframingIsMeasuredFromTheLayout() {
+        let view = (0..<64).map { Double($0 % 8) / 8 }
+        #expect(SceneAnalysis.reframeAmount(from: view, to: view) == 0)
+        let turned = view.map { 1 - $0 }
+        #expect(SceneAnalysis.reframeAmount(from: view, to: turned) > CoachRules.reframeThreshold)
+        let jitter = view.map { $0 + 0.02 }
+        #expect(SceneAnalysis.reframeAmount(from: view, to: jitter) < CoachRules.reframeThreshold)
+        #expect(CoachIssue.clutteredBackground.isModelOnly)
+        #expect(!CoachIssue.phoneTilted.isModelOnly)
+    }
+
+    @Test func subjectCutOffNeedsAnEdge() {
+        #expect(scene(subject: CGRect(x: 0, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
+        #expect(!scene(subject: CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
     }
 
     @Test func tinySubjectNeedsToFillTheFrame() {
@@ -282,6 +334,7 @@ struct CoachRulesTests {
 
     @Test func peopleAreAlwaysTheSubject() {
         #expect(IssueDetail.cleanedThing("the woman") == "the subject")
+        #expect(IssueDetail.cleanedThing("two friends") == "the subjects")
         #expect(IssueDetail.cleanedThing("none") == nil)
         #expect(IssueDetail.cleanedThing("") == nil)
     }

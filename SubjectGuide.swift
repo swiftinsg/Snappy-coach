@@ -11,24 +11,49 @@ import Vision
 import CoreML
 import SwiftUI
 
-/// Finds the most eye-catching thing in a frame.
+/// Finds the subject in a frame: the people if there are any, otherwise the most eye-catching thing.
 nonisolated enum SubjectFinder {
+    /// Everyone in the frame, and the subject box. All in 0...1 coordinates from the top left.
+    struct Found {
+        /// The whole group when there are people, so several people are one subject.
+        var subject: CGRect?
+        var people: [CGRect]
+    }
+
     /// The main subject's box, in 0...1 coordinates with the origin at the top left.
     static func subject(in buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) -> CGRect? {
-        find(with: VNImageRequestHandler(cvPixelBuffer: buffer, orientation: orientation))
+        find(with: VNImageRequestHandler(cvPixelBuffer: buffer, orientation: orientation)).subject
     }
 
     static func subject(in image: CGImage) -> CGRect? {
+        find(in: image).subject
+    }
+
+    static func find(in image: CGImage) -> Found {
         find(with: VNImageRequestHandler(cgImage: image))
     }
 
-    private static func find(with handler: VNImageRequestHandler) -> CGRect? {
-        let request = VNGenerateAttentionBasedSaliencyImageRequest()
-        request.runOnCPUInSimulator()
-        guard (try? handler.perform([request])) != nil,
-              let box = request.results?.first?.salientObjects?.first?.boundingBox else { return nil }
-        // Vision measures from the bottom left, the screen from the top left.
-        return CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+    private static func find(with handler: VNImageRequestHandler) -> Found {
+        let saliency = VNGenerateAttentionBasedSaliencyImageRequest()
+        // Whole bodies, so people facing away (with no visible face) still count.
+        let humans = VNDetectHumanRectanglesRequest()
+        humans.upperBodyOnly = false
+        saliency.runOnCPUInSimulator()
+        humans.runOnCPUInSimulator()
+        guard (try? handler.perform([saliency, humans])) != nil else { return Found(subject: nil, people: []) }
+
+        let people = (humans.results ?? [])
+            .filter { $0.confidence >= 0.5 }
+            .map { topLeft($0.boundingBox) }
+        // A group of people is one subject, so the box wraps them all.
+        let group = people.reduce(nil as CGRect?) { box, person in box?.union(person) ?? person }
+        let salient = saliency.results?.first?.salientObjects?.first.map { topLeft($0.boundingBox) }
+        return Found(subject: group ?? salient, people: people)
+    }
+
+    /// Vision measures from the bottom left, the screen from the top left.
+    private static func topLeft(_ box: CGRect) -> CGRect {
+        CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
     }
 }
 

@@ -59,7 +59,7 @@ extension CompositionGuide {
         var unavailable: [CompositionGuide: String] = [:]
 
         // A half-body portrait needs a person in the frame.
-        if analysis.faces.isEmpty {
+        if analysis.personCount == 0 {
             unavailable[.halfBodyPortrait] = "Point the camera at a person"
         }
 

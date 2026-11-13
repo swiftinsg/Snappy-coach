@@ -53,7 +53,11 @@ struct IssueDetail: Equatable {
 
     /// Words that describe a person. The coach never describes people, so these become "the subject".
     private static let personWords: Set<String> = [
-        "man", "woman", "boy", "girl", "person", "people", "guy", "lady", "child", "kid", "baby",
+        "man", "woman", "boy", "girl", "person", "guy", "lady", "child", "kid", "baby",
+    ]
+    /// Words for several people, which become "the subjects".
+    private static let groupWords: Set<String> = [
+        "people", "group", "friends", "family", "men", "women", "kids", "children", "couple", "crowd",
     ]
 
     /// Keeps the model's object name to a few plain words, or drops it.
@@ -68,6 +72,7 @@ struct IssueDetail: Equatable {
             words.removeFirst()
         }
         guard (1...3).contains(words.count), !["none", "nothing"].contains(words[0]) else { return nil }
+        if words.contains(where: groupWords.contains) { return "the subjects" }
         if words.contains(where: personWords.contains) { return "the subject" }
         return "the " + words.joined(separator: " ")
     }
@@ -211,7 +216,7 @@ extension CoachIssue {
     /// Advice that uses what the model saw, or nil when the detail doesn't help for this issue.
     private func specificAction(_ detail: IssueDetail) -> (text: String, symbol: String?)? {
         // "The subject" can't be a distraction in the background or at the edge.
-        let object = detail.thing == "the subject" ? nil : detail.thing
+        let object = ["the subject", "the subjects"].contains(detail.thing) ? nil : detail.thing
         switch self {
         case .clutteredBackground:
             return object.map { ("Step sideways so \($0) isn't behind the subject", "arrow.left.and.right") }
@@ -306,9 +311,22 @@ extension CoachIssue {
     /// stepping closer or zooming in makes the subject bigger in the frame, stepping back smaller.
     var asksToMove: DistanceMove? {
         switch self {
-        case .tooMuchEmptySpace, .noClearSubject, .subjectTooSmall: .closer
+        case .subjectTooSmall: .closer
         case .subjectCutOff, .subjectTooBig: .back
         default: nil
+        }
+    }
+
+    /// Tips only the model can judge. The camera can't check the fix itself, so these clear
+    /// once the person has clearly reframed after the tip appeared.
+    var isModelOnly: Bool {
+        switch self {
+        case .clutteredBackground, .distractingEdges, .subjectCutOff, .horizonThroughMiddle,
+             .linesDontLead, .notSymmetric, .vanishingPointOffCentre, .noTriangle, .noClearVertex,
+             .layersNotStacked, .jointsCropped:
+            true
+        default:
+            false
         }
     }
 
@@ -397,10 +415,10 @@ struct CoachJudgement {
     @Guide(description: "Where in the frame the problem is. Use whole if it is everywhere or the issue is none")
     var region: FrameRegion
 
-    @Guide(description: "The thing causing the problem, 1 to 3 plain words like \"the lamp post\". Call any person the subject. Empty if the issue is none")
+    @Guide(description: "The thing causing the problem, 1 to 3 plain words like \"the lamp post\". Call one person the subject and several people the subjects. Empty if the issue is none")
     var thing: String
 
-    @Guide(description: "One thing that already works in the photo, 2 to 5 words. Call any person the subject. Empty if nothing stands out")
+    @Guide(description: "One thing that already works in the photo, 2 to 5 words. Call one person the subject and several people the subjects. Empty if nothing stands out")
     var strength: String
 }
 
@@ -414,6 +432,13 @@ nonisolated enum CoachRules {
     static let tiltFixedThreshold = 3.0
     /// Average turning speed, in radians a second, above which hand shake is likely to blur the photo.
     static let shakeThreshold = 0.25
+    /// How much the view must change (see `SceneAnalysis.reframeAmount`) to count as a reframe.
+    static let reframeThreshold = 0.12
+    /// Share of the frame above which the subject is too big for the Negative Space style.
+    static let negativeSpaceLimit = 0.12
+    /// Model issues the coach never uses: "get closer" tips it can't check (getting closer is
+    /// measured instead), and the Negative Space size, which is measured too.
+    static let unusedModelIssues: Set<VisualIssue> = [.noClearSubject, .tooMuchEmptySpace, .subjectTooBig]
 
     /// Topics where the model adds judgement the measurements can't give.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
@@ -423,6 +448,7 @@ nonisolated enum CoachRules {
     /// Visual issues that make sense to report for a topic and the chosen composition styles.
     @MainActor
     static func allows(_ issue: VisualIssue, for topic: AdviceTopic, styles: Set<CompositionGuide> = []) -> Bool {
+        guard !unusedModelIssues.contains(issue) else { return false }
         switch topic {
         case .composition:
             // Composition is about framing; rotating or angling the phone belongs to Angle & Perspective.
@@ -445,7 +471,12 @@ nonisolated enum CoachRules {
 
     /// Measured issues for a topic, most important first. `tiltShown` keeps a tilt warning on screen
     /// until the phone is clearly level.
-    static func issues(for topic: AdviceTopic, in a: SceneAnalysis, tiltShown: Bool = false) -> [CoachIssue] {
+    static func issues(
+        for topic: AdviceTopic,
+        in a: SceneAnalysis,
+        tiltShown: Bool = false,
+        styles: Set<CompositionGuide> = []
+    ) -> [CoachIssue] {
         var found: [CoachIssue] = []
         let offset = a.readings.exposureOffset ?? 0
         let iso = a.readings.iso ?? 0
@@ -487,18 +518,23 @@ nonisolated enum CoachRules {
             if isTilted(a.tilt, alreadyShown: tiltShown) { found.append(.phoneTilted) }
             if let pitch = a.pitch {
                 // Wide limits, so holding the phone near one doesn't flick the tip on and off.
-                if pitch < -35, !a.faces.isEmpty { found.append(.shootingDown) }
+                if pitch < -35, a.personCount > 0 { found.append(.shootingDown) }
                 if pitch > 25 { found.append(.pointingUp) }
             }
         case .composition:
             if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
+            // Negative Space wants a small subject in lots of empty space.
+            if styles.contains(.negativeSpace), let subject = a.subject,
+               Double(subject.width * subject.height) > negativeSpaceLimit {
+                found.append(.subjectTooBig)
+            }
         case .subjectPosition:
-            if let face = a.faces.max(by: { $0.width * $0.height < $1.width * $1.height }) {
-                if face.minY < 0.02 {
-                    found.append(.headCutOff)
-                } else if a.faces.count == 1, face.minY > 0.35 {
-                    found.append(.tooMuchHeadroom)
-                }
+            // Everyone counts: any head at the top edge is cut off, and headroom is
+            // measured above the highest head, so it works for groups too.
+            if a.faces.contains(where: { $0.minY < 0.02 }) {
+                found.append(.headCutOff)
+            } else if let topmost = a.faces.min(by: { $0.minY < $1.minY }), topmost.minY > 0.35 {
+                found.append(.tooMuchHeadroom)
             }
             if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
         }

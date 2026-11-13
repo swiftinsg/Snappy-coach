@@ -377,6 +377,15 @@ final class PhotoCoach {
     private var moveStartSize: Double?
     /// Checks in a row the subject has been the asked-for size, so one jumpy frame doesn't count.
     private var movePasses = 0
+    // Tips only the model can judge clear once the view has clearly changed since they appeared.
+    /// The frame's layout, and the zoom, when a model-only tip appeared.
+    private var reframeStart: (layout: [Double], zoom: CGFloat)?
+    /// Checks in a row the view has been clearly different, so one jumpy frame doesn't count.
+    private var reframePasses = 0
+    /// How much the view has changed since the tip appeared, for the debug overlay.
+    private var reframeAmount = 0.0
+    /// Model-only tips done during this topic, so the model can't ask for them again.
+    private var reframedDone: Set<CoachIssue> = []
     /// Moves done during this topic. Once someone has stepped closer, no tip asks again.
     private var movesDone: Set<DistanceMove> = []
     /// Recent backdrops (nil for none), smoothed like the scene so it doesn't flicker.
@@ -389,6 +398,7 @@ final class PhotoCoach {
         candidate = nil
         candidateCount = 0
         movesDone = []
+        reframedDone = []
         sectionProgress = 0
         sectionRecommendation = nil
         // A new topic is a new section; the memory sentence carries what was done before.
@@ -445,6 +455,19 @@ final class PhotoCoach {
                 continue
             }
 
+            if let shownIssue, shownIssue.isModelOnly {
+                let zoom = camera.zoomLevel
+                if let start = reframeStart {
+                    let zoomChange = max(zoom, start.zoom) / max(min(zoom, start.zoom), 0.1)
+                    reframeAmount = SceneAnalysis.reframeAmount(from: start.layout, to: analysis.layout)
+                    let reframed = reframeAmount >= CoachRules.reframeThreshold || zoomChange >= 1.3
+                    reframePasses = reframed ? reframePasses + 1 : 0
+                    if reframePasses >= 2 { reframedDone.insert(shownIssue) }
+                } else {
+                    reframeStart = (analysis.layout, zoom)
+                }
+            }
+
             if let shownIssue, let move = shownIssue.asksToMove, let size = Self.subjectSize(in: analysis) {
                 if let start = moveStartSize {
                     movePasses = move.isDone(from: start, to: size) ? movePasses + 1 : 0
@@ -455,7 +478,7 @@ final class PhotoCoach {
             }
 
             let tiltShown = shownIssue == .phoneTilted
-            var issues = CoachRules.issues(for: topic, in: analysis, tiltShown: tiltShown)
+            var issues = CoachRules.issues(for: topic, in: analysis, tiltShown: tiltShown, styles: styles)
             issues.removeAll { $0.asksToMove.map(movesDone.contains) ?? false }
             var good = CoachRules.strengths(for: topic, in: analysis, tiltShown: tiltShown)
             if usesBox, guide.target?.isAligned == true {
@@ -473,7 +496,10 @@ final class PhotoCoach {
                 if CoachRules.allows(judgement.issue, for: topic, styles: styles),
                    let issue = judgement.issue.coachIssue,
                    !(issue.asksToMove.map(movesDone.contains) ?? false),
-                   !(issue.asksToMove == .closer && analysis.isWideScene) {
+                   !(issue.asksToMove == .closer && analysis.isWideScene),
+                   !reframedDone.contains(issue),
+                   // "Cut off" is only believed when the subject really runs off an edge.
+                   issue != .subjectCutOff || analysis.subjectTouchesEdge {
                     // What the model saw is more specific than a minor measurement, so it leads.
                     issues.removeAll { $0 == issue }
                     issues.insert(issue, at: 0)
@@ -486,7 +512,9 @@ final class PhotoCoach {
             }
             issues = memory.reordered(issues, keeping: shownIssue)
 
-            debugText = analysis.debugDescription + "\n" + modelNote + "\ndone: " + memory.sentence
+            debugText = analysis.debugDescription + "\n" + modelNote
+                + String(format: "\nreframe %.2f (needs %.2f)", reframeAmount, CoachRules.reframeThreshold)
+                + "\ndone: " + memory.sentence
             publish(
                 top: issues.first,
                 next: issues.dropFirst().first,
@@ -523,6 +551,9 @@ final class PhotoCoach {
         sectionProgress = 0
         sectionIssueCount = 1
         moveStartSize = nil
+        reframeStart = nil
+        reframePasses = 0
+        reframeAmount = 0
         movePasses = 0
     }
 
@@ -632,7 +663,7 @@ final class PhotoCoach {
         guard !candidates.isEmpty else { return nil }
         // Styles that suit this kind of scene come first.
         var preferred = analysis.scenes.flatMap(\.suitedStyles)
-        if !analysis.faces.isEmpty { preferred.append(.halfBodyPortrait) }
+        if analysis.personCount > 0 { preferred.append(.halfBodyPortrait) }
         if let pitch = analysis.pitch {
             if pitch < -55 { preferred.append(.tableTop90) }
             if pitch < -20 { preferred.append(.tableTop45) }
@@ -689,6 +720,7 @@ final class PhotoCoach {
             using only these issues: \(allowed.map(\.rawValue).joined(separator: ", ")). \
             If the photo is close to right, pick none.
             Say where in the frame the problem is, and name the thing causing it in 1 to 3 plain words.
+            Never describe people: call one person the subject and several people the subjects.
             Also name one thing that already works, in 2 to 5 words.\(praised)
             Brightness, sharpness and tilt are measured by the camera and handled separately, so never report them. \
             The measurements given with each photo are always correct.
