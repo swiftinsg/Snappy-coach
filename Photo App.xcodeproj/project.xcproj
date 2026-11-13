@@ -31,8 +31,6 @@
     { "path": "SubjectGuide.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     { "path": "CompositionGuide.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     { "path": "ZoomPicker.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
-    { "path": "PhotoReviewView.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
-    { "path": "PhotoFeedback.swift", "target-membership": [ "Grp 6pm Photo App/compile-sources" ] },
     {
       "kind": "group",
       "name": "Products",

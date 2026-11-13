@@ -14,8 +14,6 @@ struct AutoRenderingView: View {
     @State private var subjectGuide = SubjectGuide()
     @State private var gallery = PhotoGallery()
     @State private var isGalleryPresented = false
-    /// The photo just taken, which opens the review screen once it has been saved.
-    @State private var capturedPhoto: CapturedPhoto?
     /// Remembered between launches.
     @AppStorage("adviceTopic") private var adviceTopic: AdviceTopic = .composition
     @AppStorage("compositionGuide") private var compositionGuide: CompositionGuide = .ruleOfThirdsOne
@@ -169,17 +167,13 @@ struct AutoRenderingView: View {
         .task {
             await gallery.load()
         }
-        // Add each newly saved photo to the in-app gallery, then show it for review.
+        // Add each newly saved photo to the in-app gallery.
         .onChange(of: camera.lastSavedAssetIdentifier) {
             guard let identifier = camera.lastSavedAssetIdentifier else { return }
             Task { await gallery.add(identifier) }
-            capturedPhoto = CapturedPhoto(assetIdentifier: identifier)
         }
         .fullScreenCover(isPresented: $isGalleryPresented) {
             GalleryView(gallery: gallery)
-        }
-        .fullScreenCover(item: $capturedPhoto) { photo in
-            PhotoReviewView(photo: photo, gallery: gallery)
         }
         .task(id: statusMessage) {
             guard statusMessage != nil else { return }
