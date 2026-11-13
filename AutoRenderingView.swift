@@ -66,8 +66,11 @@ struct AutoRenderingView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
                     VStack(spacing: 16) {
-                        if let tip = coach.tip {
-                            CoachTipView(text: tip)
+                        if let notice = coach.notice {
+                            CoachTipView(text: notice)
+                                .transition(.opacity)
+                        } else if let feedback = coach.feedback {
+                            CoachFeedbackView(feedback: feedback)
                                 .transition(.opacity)
                         }
 
@@ -166,7 +169,8 @@ struct AutoRenderingView: View {
         .animation(.snappy, value: activeAdjustment)
         .animation(.snappy, value: adviceTopic)
         .animation(.easeInOut, value: statusMessage)
-        .animation(.easeInOut, value: coach.tip)
+        .animation(.easeInOut, value: coach.feedback)
+        .sensoryFeedback(.success, trigger: coach.isReady) { _, isReady in isReady }
         .animation(.snappy, value: camera.countdown)
         .sensoryFeedback(.impact(weight: .medium), trigger: camera.shutterCount)
         .sensoryFeedback(.impact, trigger: controls.draft)

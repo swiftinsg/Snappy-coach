@@ -53,11 +53,97 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 }
 
-/// The auto-rendering coach: every few seconds it looks at the camera and updates `tip`.
+/// Plain measurements of a frame, so the coach doesn't have to guess brightness or sharpness.
+struct FrameStats {
+    /// Average brightness, 0 (black) to 1 (white).
+    let brightness: Double
+    /// How much fine detail there is. Low values mean blurry or flat.
+    let sharpness: Double
+
+    var brightnessLabel: String {
+        switch brightness {
+        case ..<0.2: "very dark"
+        case ..<0.35: "dark"
+        case ..<0.7: "well balanced"
+        case ..<0.85: "bright"
+        default: "very bright"
+        }
+    }
+
+    var sharpnessLabel: String {
+        switch sharpness {
+        case ..<15: "very blurry"
+        case ..<60: "a little soft"
+        default: "sharp"
+        }
+    }
+
+    /// True when the exposure is clearly wrong, whatever the model thinks.
+    var isBadlyExposed: Bool { brightness < 0.2 || brightness > 0.85 }
+
+    var summary: String {
+        "the picture is \(brightnessLabel) overall and \(sharpnessLabel)"
+    }
+
+    /// Measures a small grayscale copy of the frame.
+    static func measure(_ image: CGImage) -> FrameStats? {
+        let width = 256
+        let height = max(1, Int(Double(width) * Double(image.height) / Double(image.width)))
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn, height > 2 else { return nil }
+
+        let mean = pixels.reduce(0) { $0 + Double($1) } / Double(pixels.count) / 255
+
+        // Variance of the Laplacian: a standard sharpness measure.
+        var sum = 0.0
+        var sumOfSquares = 0.0
+        var count = 0.0
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                let center = Double(pixels[y * width + x])
+                let laplacian = Double(pixels[(y - 1) * width + x]) + Double(pixels[(y + 1) * width + x])
+                    + Double(pixels[y * width + x - 1]) + Double(pixels[y * width + x + 1]) - 4 * center
+                sum += laplacian
+                sumOfSquares += laplacian * laplacian
+                count += 1
+            }
+        }
+        let average = sum / count
+        return FrameStats(brightness: mean, sharpness: sumOfSquares / count - average * average)
+    }
+}
+
+/// What the coach says about the current frame.
+@Generable
+struct PhotoFeedback: Equatable {
+    @Guide(description: "Things that are already good for the chosen topic, each 2 to 5 words", .maximumCount(2))
+    var good: [String]
+
+    @Guide(description: "Exact actions that would improve the photo, each 4 to 10 words. Empty when the photo is good enough", .maximumCount(3))
+    var improve: [String]
+
+    @Guide(description: "True only when the photo is already good enough for the chosen topic that the user should take it now")
+    var isGoodEnough: Bool
+}
+
+/// The auto-rendering coach: every few seconds it looks at the camera and updates `feedback`.
 @Observable
 final class PhotoCoach {
-    /// The latest tip shown on screen, or nil while the coach has nothing to say yet.
-    private(set) var tip: String?
+    /// The latest feedback shown on screen, or nil while the coach has nothing to say yet.
+    private(set) var feedback: PhotoFeedback?
+    /// A message for when the coach can't run at all, such as no Apple Intelligence.
+    private(set) var notice: String?
+
+    var isReady: Bool { feedback?.isGoodEnough ?? false }
 
     private static let interval: Duration = .seconds(4)
 
@@ -73,16 +159,17 @@ final class PhotoCoach {
 
     /// Runs until the task is cancelled. Restart it (with a new topic) when the dropdown changes.
     func run(camera: CameraManager, topic: AdviceTopic) async {
-        tip = nil
+        feedback = nil
+        notice = nil
         if case .unavailable = SystemLanguageModel.default.availability {
-            tip = "The coach needs Apple Intelligence"
+            notice = "The coach needs Apple Intelligence"
             return
         }
         while !Task.isCancelled {
             try? await Task.sleep(for: Self.interval)
             guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
             if let answer = await ask(about: topic, image: frame), !Task.isCancelled {
-                tip = answer
+                feedback = answer
             }
         }
     }
@@ -114,7 +201,7 @@ final class PhotoCoach {
     private func focus(for topic: AdviceTopic) -> String {
         switch topic {
         case .composition:
-            "how the scene is framed. Tools: move the camera, or tap one style button in the Composition row (Thirds, Leading Lines, Symmetry, Negative Space, Centre) to show its guide lines. Never drag it"
+            "how the scene is framed. Tools: move the camera up, down, left or right, step closer or back, or tilt it, to line the subject up with the guide lines on screen"
         case .subjectPosition:
             "where the main subject sits in the frame. Tools: move the camera or the subject left, right, up or down, step closer or back, or tap a zoom button"
         case .anglePerspective:
@@ -128,26 +215,94 @@ final class PhotoCoach {
         }
     }
 
-    /// Asks the model for one short action. Returns nil if it couldn't answer.
-    func ask(about topic: AdviceTopic, image: CGImage) async -> String? {
+    /// Removes repeats, and never says "take it" when the exposure is clearly wrong.
+    private func cleaned(_ feedback: PhotoFeedback, stats: FrameStats?, topic: AdviceTopic) -> PhotoFeedback {
+        var result = feedback
+        // The model sometimes quotes numbers or slider percentages, which mean nothing on screen.
+        result.good = unique(result.good.filter { !$0.contains(where: \.isNumber) })
+        result.improve = unique(result.improve.map {
+            $0.replacingOccurrences(of: #"\s*\d+\s*%"#, with: "", options: .regularExpression)
+        })
+        if stats?.isBadlyExposed == true {
+            result.isGoodEnough = false
+        }
+        // Brightness is measured, so for the Exposure topic the measurement decides.
+        if topic == .exposure, let stats {
+            if stats.brightness < 0.3 {
+                result.isGoodEnough = false
+                result.good = []
+                result.improve = ["Drag the Exposure slider right"]
+            } else if stats.brightness > 0.75 {
+                result.isGoodEnough = false
+                result.good = []
+                result.improve = ["Drag the Exposure slider left"]
+            } else {
+                result.isGoodEnough = true
+                result.good = ["Balanced brightness"]
+            }
+        }
+        // A clearly dark or bright frame has an obvious lighting fix.
+        if topic == .light, let stats {
+            if stats.brightness < 0.3 {
+                result.isGoodEnough = false
+                result.good = []
+                result.improve = ["Tap Night Mode", "Move toward the light"]
+            } else if stats.brightness > 0.75 {
+                result.isGoodEnough = false
+                result.good = []
+                result.improve = ["Move away from the light"]
+            }
+        }
+        // Sharpness is measured too, so for the Focus topic the measurement decides.
+        if topic == .focus, let stats {
+            let isSharp = stats.sharpness >= 60
+            result.isGoodEnough = isSharp
+            result.good = isSharp ? ["Sharp focus"] : []
+            if !isSharp {
+                result.improve = ["Drag the Focus slider until sharp", "Hold the phone steady"]
+            }
+        }
+        if result.isGoodEnough {
+            result.improve = []
+        }
+        return result
+    }
+
+    private func unique(_ items: [String]) -> [String] {
+        var seen = Set<String>()
+        return items.filter { seen.insert($0.lowercased()).inserted }
+    }
+
+    /// Asks the model what is good and what to improve. Returns nil if it couldn't answer.
+    func ask(about topic: AdviceTopic, image: CGImage) async -> PhotoFeedback? {
         let session = LanguageModelSession(
             instructions: """
             You are a photography coach looking at what the user's camera sees right now. \
-            Reply with one instruction of 4 to 10 words that tells the user exactly what to do and \
-            which way to do it. When one of the listed tools applies, use its exact name and say \
-            which way to drag or tap. Otherwise say which way to move the camera and roughly how far. \
-            Base it on what you actually see. \
+            Judge only \(focus(for: topic)). \
+            List up to 2 things that are already good. \
+            List up to 3 improvements. Each improvement tells the user exactly what to do and \
+            which way to do it: when one of the listed tools applies, use its exact name and say \
+            which way to drag or tap, otherwise say which way to move the camera and roughly how far. \
+            Set isGoodEnough to true only when the photo is already good for this topic and the user \
+            should take it now, and then list no improvements. \
+            Base everything on what you actually see. \
+            Only list something as good if it is clearly true. An empty list is fine. \
+            Never repeat an item. Never quote the measured values or any numbers about the picture. \
+            Only sliders are dragged, and buttons are tapped. Never give numbers for how far to move a slider. \
             Never name or describe what is in the photo: if you must refer to it, say "the subject". \
-            Do not write a full sentence. Do not explain why. \
-            Only consider \(focus(for: topic)).
+            Do not write full sentences. Do not explain why.
             """
         )
+        let stats = FrameStats.measure(image)
         do {
-            let response = try await session.respond {
-                "What is the one action to improve the \(topic.title.lowercased()) of this photo?"
+            let response = try await session.respond(generating: PhotoFeedback.self) {
+                "Review this photo for \(topic.title.lowercased())."
+                if let stats {
+                    "Measured by the camera, and always correct, so trust it over your own impression: \(stats.summary)."
+                }
                 Attachment(image)
             }
-            return response.content
+            return cleaned(response.content, stats: stats, topic: topic)
         } catch {
             if !Task.isCancelled {
                 print("Coach error: \(error)")
@@ -170,5 +325,52 @@ struct CoachTipView: View {
             .padding(.vertical, 10)
             .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
             .accessibilityLabel("Tip: \(text)")
+    }
+}
+
+/// Glass card listing what is good and what to improve, or telling the user to take the shot.
+struct CoachFeedbackView: View {
+    let feedback: PhotoFeedback
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if feedback.isGoodEnough {
+                Label("Looks good, take it!", systemImage: "checkmark.circle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.green)
+            }
+
+            if !feedback.good.isEmpty {
+                section(title: "Good", items: feedback.good, systemImage: "checkmark", tint: .green)
+            }
+
+            if !feedback.isGoodEnough, !feedback.improve.isEmpty {
+                section(title: "Improve", items: feedback.improve, systemImage: "arrow.right", tint: .yellow)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 22))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func section(title: String, items: [String], systemImage: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(tint)
+                .textCase(.uppercase)
+
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                Label {
+                    Text(item)
+                        .foregroundStyle(.white)
+                } icon: {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(tint)
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+        }
     }
 }
