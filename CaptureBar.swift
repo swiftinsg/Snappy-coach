@@ -9,6 +9,8 @@ import SwiftUI
 struct CaptureBar: View {
     let camera: CameraManager
     let gallery: PhotoGallery
+    /// How much of the coach's current section is done, 0...1, drawn around the shutter.
+    var sectionProgress: Double = 0
     var onOpenGallery: () -> Void = {}
     /// Called with a message to show, e.g. when saving fails or the timer is cancelled.
     var onStatus: (String) -> Void = { _ in }
@@ -19,7 +21,11 @@ struct CaptureBar: View {
         HStack {
             galleryButton
             Spacer()
-            ShutterButton(isCountingDown: camera.countdown != nil, isBusy: camera.isCapturing) {
+            ShutterButton(
+                isCountingDown: camera.countdown != nil,
+                isBusy: camera.isCapturing,
+                sectionProgress: sectionProgress
+            ) {
                 Task {
                     if let message = await camera.shutterTapped() {
                         onStatus(message)
@@ -86,14 +92,40 @@ struct CaptureBar: View {
 
 /// The iOS photo shutter: a white ring around a solid white disc. During a timer
 /// countdown the disc shows an X (tap again to cancel); it dims while a photo is saving.
+/// A progress ring around it shows how much of the coach's section is done.
 struct ShutterButton: View {
     let isCountingDown: Bool
     let isBusy: Bool
+    /// 0...1. Yellow while work remains, green and complete when the shot is ready.
+    let sectionProgress: Double
     let action: () -> Void
+
+    private var progress: Double {
+        min(max(sectionProgress, 0), 1)
+    }
+
+    private var isComplete: Bool {
+        progress >= 1
+    }
 
     var body: some View {
         Button(action: action) {
             ZStack {
+                // Track, then the filled part of the section progress.
+                Circle()
+                    .stroke(.white.opacity(0.18), lineWidth: 5)
+                    .frame(width: 88, height: 88)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        isComplete ? Color.green : Color.yellow,
+                        style: StrokeStyle(lineWidth: 5, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 88, height: 88)
+                    .shadow(color: (isComplete ? Color.green : Color.yellow).opacity(0.6), radius: 5)
+                    .animation(.snappy, value: progress)
+
                 Circle()
                     .strokeBorder(.white, lineWidth: 4)
                     .frame(width: 78, height: 78)
@@ -110,10 +142,14 @@ struct ShutterButton: View {
             }
             .shadow(color: .black.opacity(0.4), radius: 4)
             .animation(.snappy, value: isCountingDown)
+            .animation(.snappy, value: isComplete)
         }
         .buttonStyle(ShutterPressStyle())
         .disabled(isBusy)
         .accessibilityLabel(isCountingDown ? "Cancel timer" : "Take photo")
+        .accessibilityValue(
+            isComplete ? "Section complete" : "Section \(Int(progress * 100)) percent complete"
+        )
     }
 }
 

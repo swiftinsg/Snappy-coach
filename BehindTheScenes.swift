@@ -216,6 +216,8 @@ struct PhotoFeedback: Equatable {
     var why: String?
     /// True when the shot is ready to take.
     var isGoodEnough: Bool
+    /// What to practise next, shown once the current section is complete.
+    var nextSection: String? = nil
 }
 
 /// The auto-rendering coach. It measures the frame, asks the model only about what can't be
@@ -231,6 +233,8 @@ final class PhotoCoach {
     private(set) var feedback: PhotoFeedback?
     /// Composition styles that don't suit the current scene, with the reason why.
     private(set) var unavailableCompositions: [CompositionGuide: String] = [:]
+    /// How much of the current section is done, 0...1, for the shutter's progress ring.
+    private(set) var sectionProgress: Double = 0
     /// A message for when the coach can't run at all.
     private(set) var notice: String?
     /// Raw measurements and model output, for the hidden debug overlay.
@@ -256,6 +260,10 @@ final class PhotoCoach {
     private var accomplished: [String] = []
     /// The issue being worked on in the current section, nil when the shot is good.
     private var shownIssue: CoachIssue?
+    /// How many issues the section started with, so progress can be measured against it.
+    private var sectionIssueCount = 1
+    /// The suggestion for what to practise after the current section, kept while it's complete.
+    private var sectionRecommendation: String?
 
     // Hysteresis: a new verdict must repeat before it replaces what's on screen.
     private var candidate: CoachIssue??
@@ -267,6 +275,8 @@ final class PhotoCoach {
         notice = nil
         candidate = nil
         candidateCount = 0
+        sectionProgress = 0
+        sectionRecommendation = nil
         // A new topic is a new section.
         endSection()
         attitude.start()
@@ -299,6 +309,7 @@ final class PhotoCoach {
                 || (topic == .composition && styles.contains { $0.subjectPlacement != nil })
             if usesBox, let target = guide.target, !target.isAligned {
                 feedback = Self.positionFeedback(for: target)
+                sectionProgress = target.progress
                 continue
             }
 
@@ -324,7 +335,15 @@ final class PhotoCoach {
             }
 
             debugText = analysis.debugDescription + "\n" + modelNote + "\ndone: " + memorySentence
-            publish(top: issues.first, next: issues.dropFirst().first, good: good, topic: topic, analysis: analysis)
+            publish(
+                top: issues.first,
+                next: issues.dropFirst().first,
+                remaining: issues.count,
+                good: good,
+                topic: topic,
+                styles: styles,
+                analysis: analysis
+            )
         }
     }
 
@@ -351,10 +370,20 @@ final class PhotoCoach {
         session = nil
         sessionTurns = 0
         shownIssue = nil
+        sectionProgress = 0
+        sectionIssueCount = 1
     }
 
     /// Shows a verdict once it has been seen twice in a row, so the card doesn't flicker.
-    private func publish(top: CoachIssue?, next: CoachIssue?, good: [String], topic: AdviceTopic, analysis: SceneAnalysis) {
+    private func publish(
+        top: CoachIssue?,
+        next: CoachIssue?,
+        remaining: Int,
+        good: [String],
+        topic: AdviceTopic,
+        styles: Set<CompositionGuide>,
+        analysis: SceneAnalysis
+    ) {
         if candidate == .some(top) {
             candidateCount += 1
         } else {
@@ -364,6 +393,7 @@ final class PhotoCoach {
         let isFirstVerdict = feedback == nil
         guard candidateCount >= 2 || isFirstVerdict else { return }
 
+        let isNewSection = shownIssue != top
         // The issue being worked on has gone: that section is done.
         if let shownIssue, shownIssue != top {
             endSection(fixed: shownIssue)
@@ -371,15 +401,81 @@ final class PhotoCoach {
         shownIssue = top
 
         guard let top else {
-            feedback = PhotoFeedback(good: Array(good.prefix(2)), improve: [], why: nil, isGoodEnough: true)
+            sectionProgress = 1
+            if sectionRecommendation == nil {
+                sectionRecommendation = nextSectionSuggestion(topic: topic, styles: styles, analysis: analysis)
+            }
+            feedback = PhotoFeedback(
+                good: Array(good.prefix(2)),
+                improve: [],
+                why: nil,
+                isGoodEnough: true,
+                nextSection: sectionRecommendation
+            )
             return
         }
+
+        sectionRecommendation = nil
+        if isNewSection {
+            sectionIssueCount = max(remaining, 1)
+        }
+        // The ring fills as the issues in the section are cleared.
+        sectionProgress = max(
+            0.1,
+            1 - Double(remaining) / Double(max(sectionIssueCount, remaining, 1))
+        )
+
         let advice = top.advice(for: topic, analysis: analysis)
         var improve = [advice.action]
         if let next {
             improve.append(next.advice(for: topic, analysis: analysis).action)
         }
         feedback = PhotoFeedback(good: Array(good.prefix(2)), improve: improve, why: advice.why, isGoodEnough: false)
+    }
+
+    /// Suggests what to practise once the current section is complete.
+    private func nextSectionSuggestion(
+        topic: AdviceTopic,
+        styles: Set<CompositionGuide>,
+        analysis: SceneAnalysis
+    ) -> String? {
+        if topic == .composition {
+            let unavailable = CompositionGuide.unavailableStyles(in: analysis)
+            let candidates = CompositionGuide.allCases.filter {
+                !styles.contains($0) && unavailable[$0] == nil
+            }
+            if let next = Self.preferredNextStyle(for: analysis, from: candidates) {
+                return "Section complete. Try the \(next.title) style next."
+            }
+            return "Section complete. Try another topic from the menu."
+        }
+
+        let topics = AdviceTopic.allCases
+        guard topics.count > 1, let index = topics.firstIndex(of: topic) else { return nil }
+        let next = topics[(index + 1) % topics.count]
+        return "Section complete. Try the \(next.title) topic next."
+    }
+
+    /// Picks the style that best matches the scene, falling back to the first available one.
+    private static func preferredNextStyle(
+        for analysis: SceneAnalysis,
+        from candidates: [CompositionGuide]
+    ) -> CompositionGuide? {
+        guard !candidates.isEmpty else { return nil }
+        var preferred: [CompositionGuide] = []
+        if !analysis.faces.isEmpty { preferred.append(.halfBodyPortrait) }
+        if let pitch = analysis.pitch {
+            if pitch < -55 { preferred.append(.tableTop90) }
+            if pitch < -20 { preferred.append(.tableTop45) }
+        }
+        if analysis.subject != nil { preferred.append(.negativeSpace) }
+        preferred += [
+            .ruleOfThirdsCorner, .symmetry, .leadingLines, .centre,
+            .leadingLinesAligning, .triangle, .onePointPerspective,
+            .singleVertex, .doubleVertex, .compression,
+            .ruleOfThirdsTwo, .ruleOfThirdsOne,
+        ]
+        return preferred.first(where: candidates.contains)
     }
 
     // MARK: - The model
@@ -542,6 +638,14 @@ struct CoachFeedbackView: View {
                 Label(why, systemImage: "graduationcap.fill")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.8))
+            }
+
+            // Once the section is done, point at what to practise next.
+            if feedback.isGoodEnough, let nextSection = feedback.nextSection {
+                Label(nextSection, systemImage: "arrow.forward.circle.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.top, 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

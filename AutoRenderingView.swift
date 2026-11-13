@@ -183,7 +183,11 @@ struct AutoRenderingView: View {
                             coachCard
                                 .alignmentGuide(.top) { $0[.bottom] + 12 }
                         }
-                        CaptureBar(camera: camera, gallery: gallery) {
+                        CaptureBar(
+                            camera: camera,
+                            gallery: gallery,
+                            sectionProgress: coach.sectionProgress
+                        ) {
                             isGalleryPresented = true
                         } onStatus: { message in
                             statusMessage = message

@@ -58,6 +58,12 @@ struct SubjectTarget: Equatable {
 
     var isAligned: Bool { hypot(dx, dy) < Self.tolerance }
 
+    /// How close the subject is to the target box, 0...1. Reaches 1 once aligned.
+    var progress: Double {
+        guard !isAligned else { return 1 }
+        return max(0.1, 1 - Double(hypot(dx, dy)) / 0.4)
+    }
+
     /// How far the subject has to move inside the frame. Positive is right or down.
     private var dx: CGFloat { target.midX - subject.midX }
     private var dy: CGFloat { target.midY - subject.midY }
