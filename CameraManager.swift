@@ -109,8 +109,7 @@ class CameraManager {
             session.addOutput(photoOutput)
             // Pipeline-level features must be enabled before the session starts running.
             photoOutput.maxPhotoQualityPrioritization = .quality
-            photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
-            photoOutput.isAppleProRAWEnabled = photoOutput.isAppleProRAWSupported
+            configurePhotoPipeline()
         }
         // Frames from this output feed the histogram.
         if session.canAddOutput(videoOutput) {
@@ -158,6 +157,12 @@ class CameraManager {
     /// telephoto's native zoom uses the telephoto, and everything else zooms the main lens.
     func setZoom(_ level: CGFloat) -> String? {
         guard videoInput != nil, var target = device else { return "The camera isn't available" }
+        // The two-lens depth camera handles its own lens switching.
+        if target.isVirtualDevice {
+            zoomLevel = level
+            applyZoomOnCurrentDevice(level)
+            return nil
+        }
         var lensZoom = level
         if !isUsingFrontCamera, let wide = Self.backCamera(.builtInWideAngleCamera) {
             if level < 1, let ultraWide = Self.backCamera(.builtInUltraWideCamera) {
@@ -183,8 +188,22 @@ class CameraManager {
         return nil
     }
 
+    /// Zooms a multi-lens (virtual) camera, where zoom factor 1 is its widest lens, so
+    /// "1×" sits at the first lens switch-over point.
+    private func applyZoomOnCurrentDevice(_ level: CGFloat) {
+        configureDevice { device in
+            let oneX = device.virtualDeviceSwitchOverVideoZoomFactors.first.map { CGFloat(truncating: $0) } ?? 1
+            let factor = min(max(level * oneX, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+            device.ramp(toVideoZoomFactor: factor, withRate: 16)
+        }
+    }
+
     /// Works out which zoom buttons this camera can offer.
     private func refreshZoomStops() {
+        if device?.isVirtualDevice == true {
+            zoomStops = [1, 2]
+            return
+        }
         guard !isUsingFrontCamera, let wide = Self.backCamera(.builtInWideAngleCamera) else {
             zoomStops = [1, 2]
             return
@@ -229,18 +248,16 @@ class CameraManager {
         device = newDevice
 
         // Photo features depend on the camera, so re-check what this one supports.
-        photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
-        photoOutput.isAppleProRAWEnabled = photoOutput.isAppleProRAWSupported
+        if format == .proRAW && !photoOutput.isAppleProRAWSupported {
+            format = .heif
+        }
+        configurePhotoPipeline()
         let keepDepth = isDepthOn && photoOutput.isDepthDataDeliverySupported
         photoOutput.isDepthDataDeliveryEnabled = keepDepth
         photoOutput.isPortraitEffectsMatteDeliveryEnabled = keepDepth && photoOutput.isPortraitEffectsMatteDeliverySupported
         session.commitConfiguration()
 
         isDepthOn = keepDepth
-        isLivePhotoOn = isLivePhotoOn && photoOutput.isLivePhotoCaptureEnabled
-        if format == .proRAW && !photoOutput.isAppleProRAWEnabled {
-            format = .heif
-        }
         isCenterStageOn = newDevice.activeFormat.isCenterStageSupported && AVCaptureDevice.isCenterStageEnabled
         // Manual values belonged to the old lens, so hand them back to auto.
         exposureBias = 0
@@ -253,6 +270,19 @@ class CameraManager {
         return true
     }
 
+    /// Turns on the photo output features for the current format. iOS can't shoot Apple
+    /// ProRAW and Live Photos together, so ProRAW is only enabled while RAW is chosen.
+    /// Call inside begin/commitConfiguration.
+    private func configurePhotoPipeline() {
+        photoOutput.isAppleProRAWEnabled = format == .proRAW && photoOutput.isAppleProRAWSupported
+        photoOutput.isLivePhotoCaptureEnabled = !photoOutput.isAppleProRAWEnabled && photoOutput.isLivePhotoCaptureSupported
+    }
+
+    /// Live Photos are recorded only when the person wants them and the pipeline allows it.
+    var isLivePhotoActive: Bool {
+        isLivePhotoOn && photoOutput.isLivePhotoCaptureEnabled
+    }
+
     // MARK: - Tap controls
 
     /// Handles a tap on a toggle or multi-option control and returns a short status message.
@@ -262,7 +292,8 @@ class CameraManager {
             flash = flash.next
             return "Flash \(flash.title)"
         case .live:
-            guard photoOutput.isLivePhotoCaptureEnabled else { return "Live Photos aren't available" }
+            if format == .proRAW { return "Live Photos are off while shooting RAW" }
+            guard photoOutput.isLivePhotoCaptureEnabled else { return "Live Photos aren't available on this camera" }
             isLivePhotoOn.toggle()
             return isLivePhotoOn ? "Live On" : "Live Off"
         case .aspect:
@@ -281,12 +312,19 @@ class CameraManager {
         case .centerStage:
             return setCenterStage(!isCenterStageOn)
         case .format:
+            let wasRAW = format == .proRAW
             format = format.next
             // Skip ProRAW on cameras that can't shoot it.
-            if format == .proRAW && !photoOutput.isAppleProRAWEnabled {
+            if format == .proRAW && !photoOutput.isAppleProRAWSupported {
                 format = format.next
             }
-            return "Format: \(format.title)"
+            // Entering or leaving RAW swaps ProRAW and Live Photos in the pipeline.
+            if wasRAW != (format == .proRAW) {
+                session.beginConfiguration()
+                configurePhotoPipeline()
+                session.commitConfiguration()
+            }
+            return format == .proRAW ? "Format: RAW (Live off)" : "Format: \(format.title)"
         case .histogram:
             return setHistogram(!isHistogramOn)
         case .exposure, .focus, .shutterSpeed, .whiteBalance, .lensAperture:
@@ -296,6 +334,25 @@ class CameraManager {
     }
 
     private func setDepth(_ on: Bool) -> String {
+        guard videoInput != nil else { return "The camera isn't available" }
+        if on && !isUsingFrontCamera && !photoOutput.isDepthDataDeliverySupported {
+            // A single lens can't measure depth, so switch to the two-lens back camera.
+            guard let depthCamera = Self.backCamera(.builtInDualWideCamera) ?? Self.backCamera(.builtInDualCamera),
+                  use(depthCamera) else {
+                return "Depth isn't available on this camera"
+            }
+            zoomLevel = 1
+            refreshZoomStops()
+            applyZoomOnCurrentDevice(1)
+        } else if !on && device?.isVirtualDevice == true {
+            // Back to the main lens, which allows full manual control.
+            if let wide = Self.backCamera(.builtInWideAngleCamera), use(wide) {
+                zoomLevel = 1
+                refreshZoomStops()
+            }
+            isDepthOn = false
+            return "Depth Off"
+        }
         guard photoOutput.isDepthDataDeliverySupported else { return "Depth isn't available on this camera" }
         session.beginConfiguration()
         photoOutput.isDepthDataDeliveryEnabled = on
@@ -305,12 +362,21 @@ class CameraManager {
         return on ? "Depth On" : "Depth Off"
     }
 
-    /// Night mode lets the camera boost low light and use multi-frame fusion at capture.
+    /// Night mode lets auto-exposure use much longer shutter times (brighter in the dark,
+    /// visible in the viewfinder), boosts low light where supported, and uses
+    /// multi-frame fusion at capture.
     private func setNightMode(_ on: Bool) -> String {
         isNightModeOn = on
         configureDevice { device in
             if device.isLowLightBoostSupported {
                 device.automaticallyEnablesLowLightBoostWhenAvailable = on
+            }
+            if on {
+                let longest = CMTime(seconds: 1.0 / 4, preferredTimescale: 1_000_000)
+                device.activeMaxExposureDuration = min(longest, device.activeFormat.maxExposureDuration)
+            } else {
+                // .invalid restores the camera's normal limit.
+                device.activeMaxExposureDuration = .invalid
             }
         }
         return on ? "Night Mode On" : "Night Mode Off"
@@ -532,7 +598,7 @@ class CameraManager {
         if photoOutput.supportedFlashModes.contains(flash.avMode) {
             settings.flashMode = flash.avMode
         }
-        if isLivePhotoOn && photoOutput.isLivePhotoCaptureEnabled && format != .proRAW {
+        if isLivePhotoActive {
             settings.livePhotoMovieFileURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("mov")
@@ -616,6 +682,7 @@ class CameraManager {
             }
             let processor = PhotoCaptureProcessor(
                 aspectRatio: aspectRatio,
+                style: style,
                 encodeAsJPEG: format == .jpeg,
                 willCapture: { Task { @MainActor in onWillCapture() } },
                 completion: { result in Task { @MainActor in onFinish(result) } }
@@ -646,7 +713,7 @@ extension CameraManager {
     func systemImage(for control: PhotoControl) -> String {
         switch control {
         case .flash: flash.systemImage
-        case .live: isLivePhotoOn ? "livephoto" : "livephoto.slash"
+        case .live: isLivePhotoActive ? "livephoto" : "livephoto.slash"
         case .nightMode: isNightModeOn ? "moon.fill" : "moon"
         default: control.systemImage
         }
@@ -666,7 +733,7 @@ extension CameraManager {
     func isActive(_ control: PhotoControl) -> Bool {
         switch control {
         case .flash: flash == .on
-        case .live: isLivePhotoOn
+        case .live: isLivePhotoActive
         case .timer: timer != .off
         case .styles: style != .standard
         case .depth: isDepthOn

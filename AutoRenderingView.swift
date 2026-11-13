@@ -22,8 +22,16 @@ struct AutoRenderingView: View {
 
     var body: some View {
         ZStack {
-            CameraPreview(session: camera.session)
+            Color.black
                 .ignoresSafeArea()
+
+            // The viewfinder takes the shape of the chosen aspect ratio, with black bars
+            // around it, so what you see matches the photo that's saved.
+            CameraPreview(session: camera.session)
+                .aspectRatio(camera.aspectRatio.portraitAspect, contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+                .animation(.snappy, value: camera.aspectRatio)
 
             VStack(spacing: 12) {
                 // Top bar: advice topic dropdown on the left, camera controls on the right.

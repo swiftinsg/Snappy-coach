@@ -3,13 +3,15 @@
 //  Grp 6pm Photo App
 //
 //  Handles one photo capture from start to finish: collects the image (plus RAW and
-//  Live Photo movie when enabled), crops to the chosen aspect ratio, and saves to Photos.
+//  Live Photo movie when enabled), crops to the chosen aspect ratio, applies the style,
+//  and saves to Photos.
 //
 
 import UIKit
 @preconcurrency import AVFoundation
 import Photos
 import CoreImage
+import CoreImage.CIFilterBuiltins
 
 enum CaptureError: LocalizedError {
     case noPhotoData
@@ -21,6 +23,7 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
     private static let context = CIContext()
 
     private let aspectRatio: AspectRatio
+    private let style: PhotoStyle
     private let encodeAsJPEG: Bool
     private let willCapture: @Sendable () -> Void
     private let completion: @Sendable (Result<String?, Error>) -> Void
@@ -33,10 +36,12 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
     ///   - willCapture: Called the moment the sensor fires, for the shutter blink.
     ///   - completion: Called once the photo is saved, with its Photos library identifier.
     init(aspectRatio: AspectRatio,
+         style: PhotoStyle,
          encodeAsJPEG: Bool,
          willCapture: @escaping @Sendable () -> Void,
          completion: @escaping @Sendable (Result<String?, Error>) -> Void) {
         self.aspectRatio = aspectRatio
+        self.style = style
         self.encodeAsJPEG = encodeAsJPEG
         self.willCapture = willCapture
         self.completion = completion
@@ -81,11 +86,11 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         }
 
         var movieURL = livePhotoMovieURL
-        // The sensor shoots 4:3, so other ratios are a centre crop of the processed image.
-        // RAW files are left uncropped.
-        if aspectRatio != .fourByThree, photoData != nil,
-           let cropped = Self.crop(mainData, to: aspectRatio, asJPEG: encodeAsJPEG) {
-            mainData = cropped
+        // The sensor shoots 4:3, so other ratios are a centre crop; styles are a colour grade.
+        // Both edit the processed image only; RAW files are left untouched.
+        if aspectRatio != .fourByThree || style != .standard, photoData != nil,
+           let edited = Self.edit(mainData, ratio: aspectRatio, style: style, asJPEG: encodeAsJPEG) {
+            mainData = edited
             // A re-encoded still no longer pairs with its Live Photo movie, so save it as a still.
             movieURL = nil
         }
@@ -129,10 +134,50 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         return createdIdentifier.value
     }
 
-    /// Centre-crops the image to `ratio`, keeping it upright, and re-encodes it.
-    private static func crop(_ data: Data, to ratio: AspectRatio, asJPEG: Bool) -> Data? {
+    /// Centre-crops the image to `ratio`, applies the style, keeps it upright, and re-encodes it.
+    private static func edit(_ data: Data, ratio: AspectRatio, style: PhotoStyle, asJPEG: Bool) -> Data? {
         guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]),
               let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let cropped = crop(image, to: ratio)
+        let styled = apply(style, to: cropped)
+
+        if asJPEG {
+            return context.jpegRepresentation(of: styled, colorSpace: colorSpace)
+        }
+        return context.heifRepresentation(of: styled, format: .RGBA8, colorSpace: colorSpace)
+    }
+
+    /// Approximates the iPhone's Photographic Styles with a simple colour grade.
+    private static func apply(_ style: PhotoStyle, to image: CIImage) -> CIImage {
+        switch style {
+        case .standard:
+            return image
+        case .richContrast:
+            let filter = CIFilter.colorControls()
+            filter.inputImage = image
+            filter.contrast = 1.15
+            filter.saturation = 1.05
+            filter.brightness = -0.02
+            return filter.outputImage ?? image
+        case .vibrant:
+            let filter = CIFilter.vibrance()
+            filter.inputImage = image
+            filter.amount = 0.6
+            return filter.outputImage ?? image
+        case .warm, .cool:
+            // Nudge red up and blue down for warm, the reverse for cool.
+            let shift: CGFloat = style == .warm ? 0.06 : -0.06
+            let filter = CIFilter.colorMatrix()
+            filter.inputImage = image
+            filter.rVector = CIVector(x: 1 + shift, y: 0, z: 0, w: 0)
+            filter.bVector = CIVector(x: 0, y: 0, z: 1 - shift, w: 0)
+            return filter.outputImage ?? image
+        }
+    }
+
+    /// Centre-crops an upright image to `ratio`. 4:3 is returned unchanged.
+    private static func crop(_ image: CIImage, to ratio: AspectRatio) -> CIImage {
+        guard ratio != .fourByThree else { return image }
 
         let extent = image.extent
         // Width ÷ height of the result, matching the photo's own orientation.
@@ -147,14 +192,9 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         rect.origin.y = extent.midY - rect.height / 2
         rect = rect.integral
 
-        let cropped = image
+        return image
             .cropped(to: rect)
             .transformed(by: CGAffineTransform(translationX: -rect.origin.x, y: -rect.origin.y))
-
-        if asJPEG {
-            return context.jpegRepresentation(of: cropped, colorSpace: colorSpace)
-        }
-        return context.heifRepresentation(of: cropped, format: .RGBA8, colorSpace: colorSpace)
     }
 }
 

@@ -9,6 +9,38 @@
 import SwiftUI
 import Photos
 import Observation
+import UniformTypeIdentifiers
+
+/// A photo to share. The image data is only loaded when the share sheet asks for it,
+/// so selecting many photos stays fast.
+nonisolated struct SharedPhoto: Transferable {
+    let assetIdentifier: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .jpeg) { photo in
+            try await photo.jpegData()
+        }
+    }
+
+    private func jpegData() async throws -> Data {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetIdentifier], options: nil).firstObject else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+        let data: Data? = await withCheckedContinuation { continuation in
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+                continuation.resume(returning: data)
+            }
+        }
+        // Re-encode as JPEG so any app can open it (originals may be HEIF).
+        guard let data, let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.9) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return jpeg
+    }
+}
 
 @Observable
 final class PhotoGallery {
@@ -62,13 +94,13 @@ final class PhotoGallery {
         }
     }
 
-    /// Deletes the photo from the Photos library. iOS asks the person to confirm.
-    func delete(_ asset: PHAsset) async throws {
-        let ids = [asset.localIdentifier]
+    /// Deletes photos from the Photos library in one go. iOS asks the person to confirm once.
+    func delete(_ assets: [PHAsset]) async throws {
+        let ids = assets.map(\.localIdentifier)
         try await PHPhotoLibrary.shared().performChanges {
             PHAssetChangeRequest.deleteAssets(PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil))
         }
-        identifiers.removeAll { $0 == asset.localIdentifier }
+        identifiers.removeAll { ids.contains($0) }
         await load()
     }
 

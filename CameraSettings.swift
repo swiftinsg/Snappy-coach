@@ -56,6 +56,9 @@ nonisolated enum AspectRatio: CaseIterable {
         }
     }
 
+    /// Width ÷ height of the viewfinder when the phone is upright.
+    var portraitAspect: CGFloat { 1 / longToShort }
+
     /// Long side ÷ short side, used to crop captured photos.
     var longToShort: CGFloat {
         switch self {
@@ -80,8 +83,9 @@ enum TimerSetting: CaseIterable {
     var title: String { self == .off ? "Off" : "\(seconds)s" }
 }
 
-/// Mirrors the iPhone's Photographic Styles presets.
-enum PhotoStyle: CaseIterable {
+/// Mirrors the iPhone's Photographic Styles presets. `nonisolated` so the photo
+/// processor can read it off the main thread.
+nonisolated enum PhotoStyle: CaseIterable {
     case standard, richContrast, vibrant, warm, cool
 
     var title: String {
