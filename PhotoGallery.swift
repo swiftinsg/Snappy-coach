@@ -104,6 +104,14 @@ final class PhotoGallery {
         await load()
     }
 
+    /// Loads the photo with this library identifier, e.g. for the screen shown after a capture.
+    func image(forIdentifier identifier: String, size: CGSize, contentMode: PHImageContentMode = .aspectFill) async -> UIImage? {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
+            return nil
+        }
+        return await image(for: asset, size: size, contentMode: contentMode)
+    }
+
     /// Loads an image of the photo at roughly `size` points.
     func image(for asset: PHAsset, size: CGSize, contentMode: PHImageContentMode = .aspectFill) async -> UIImage? {
         let options = PHImageRequestOptions()
