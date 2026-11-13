@@ -14,8 +14,6 @@ struct AutoRenderingView: View {
     @State private var subjectGuide = SubjectGuide()
     @State private var gallery = PhotoGallery()
     @State private var isGalleryPresented = false
-    /// The photo just taken, which opens the review screen once it has been saved.
-    @State private var capturedPhoto: CapturedPhoto?
     /// Remembered between launches.
     @AppStorage("adviceTopic") private var adviceTopic: AdviceTopic = .composition
     @AppStorage("compositionGuide") private var compositionGuide: CompositionGuide = .ruleOfThirdsOne
@@ -26,9 +24,18 @@ struct AutoRenderingView: View {
     /// Shows the coach's raw measurements over the card, for tuning the advice.
     @State private var isCoachDebugOn = false
 
-    /// The green box is only useful when the topic is about where things sit in the frame.
+    /// The green box only appears for topics and styles about where the subject sits.
     private var showsSubjectBox: Bool {
-        adviceTopic == .subjectPosition || adviceTopic == .composition
+        subjectPlacement != nil
+    }
+
+    /// Where the green box puts the subject for the chosen topic and style, if it has a box at all.
+    private var subjectPlacement: SubjectPlacement? {
+        switch adviceTopic {
+        case .subjectPosition: .thirdsPoint
+        case .composition: compositionGuide.subjectPlacement
+        default: nil
+        }
     }
 
     /// The auto-rendering coach's latest feedback, or a notice when it can't run.
@@ -174,28 +181,24 @@ struct AutoRenderingView: View {
         .task {
             await camera.start()
         }
-        // Restarts whenever the advice topic changes, so the tips follow the dropdown.
-        .task(id: adviceTopic) {
-            await coach.run(camera: camera, topic: adviceTopic, guide: subjectGuide)
-        }
-        // The box follows the topic, and the Centre style moves it to the middle.
+        // Restarts whenever the advice topic or composition style changes, so the tips follow the pickers.
         .task(id: "\(adviceTopic.rawValue)-\(compositionGuide.rawValue)") {
-            await subjectGuide.run(camera: camera, enabled: showsSubjectBox, centred: compositionGuide == .centre)
+            await coach.run(camera: camera, topic: adviceTopic, style: compositionGuide, guide: subjectGuide)
+        }
+        // The box follows the topic, and each style puts it in a different place.
+        .task(id: "\(adviceTopic.rawValue)-\(compositionGuide.rawValue)") {
+            await subjectGuide.run(camera: camera, placement: subjectPlacement)
         }
         .task {
             await gallery.load()
         }
-        // Add each newly saved photo to the in-app gallery, then show it for review.
+        // Add each newly saved photo to the in-app gallery.
         .onChange(of: camera.lastSavedAssetIdentifier) {
             guard let identifier = camera.lastSavedAssetIdentifier else { return }
             Task { await gallery.add(identifier) }
-            capturedPhoto = CapturedPhoto(assetIdentifier: identifier)
         }
         .fullScreenCover(isPresented: $isGalleryPresented) {
             GalleryView(gallery: gallery)
-        }
-        .fullScreenCover(item: $capturedPhoto) { photo in
-            PhotoReviewView(photo: photo, gallery: gallery, topic: adviceTopic)
         }
         .task(id: statusMessage) {
             guard statusMessage != nil else { return }

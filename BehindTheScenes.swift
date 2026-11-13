@@ -81,6 +81,131 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 }
 
+/// Plain measurements of a frame, so the coach doesn't have to guess brightness or sharpness.
+struct FrameStats {
+    /// Average brightness, 0 (black) to 1 (white).
+    let brightness: Double
+    /// How much fine detail there is. Low values mean blurry or flat.
+    let sharpness: Double
+
+    var brightnessLabel: String {
+        switch brightness {
+        case ..<0.2: "very dark"
+        case ..<0.35: "dark"
+        case ..<0.7: "well balanced"
+        case ..<0.85: "bright"
+        default: "very bright"
+        }
+    }
+
+    var sharpnessLabel: String {
+        switch sharpness {
+        case ..<15: "very blurry"
+        case ..<60: "a little soft"
+        default: "sharp"
+        }
+    }
+
+    /// True when the exposure is clearly wrong, whatever the model thinks.
+    var isBadlyExposed: Bool { brightness < 0.2 || brightness > 0.85 }
+
+    var summary: String {
+        "the picture is \(brightnessLabel) overall and \(sharpnessLabel)"
+    }
+
+    /// Measures a small grayscale copy of the frame.
+    static func measure(_ image: CGImage) -> FrameStats? {
+        let width = 256
+        let height = max(1, Int(Double(width) * Double(image.height) / Double(image.width)))
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn, height > 2 else { return nil }
+
+        let mean = pixels.reduce(0) { $0 + Double($1) } / Double(pixels.count) / 255
+
+        // Variance of the Laplacian: a standard sharpness measure.
+        var sum = 0.0
+        var sumOfSquares = 0.0
+        var count = 0.0
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                let center = Double(pixels[y * width + x])
+                let laplacian = Double(pixels[(y - 1) * width + x]) + Double(pixels[(y + 1) * width + x])
+                    + Double(pixels[y * width + x - 1]) + Double(pixels[y * width + x + 1]) - 4 * center
+                sum += laplacian
+                sumOfSquares += laplacian * laplacian
+                count += 1
+            }
+        }
+        let average = sum / count
+        return FrameStats(brightness: mean, sharpness: sumOfSquares / count - average * average)
+    }
+}
+
+/// What the coach needs to know about each composition style in the picker.
+extension CompositionGuide {
+    /// Where the green box puts the subject, or nil when the style isn't about subject position.
+    var subjectPlacement: SubjectPlacement? {
+        switch self {
+        case .ruleOfThirdsOne: .thirdsLine(1.0 / 3)
+        case .ruleOfThirdsTwo: .thirdsLine(2.0 / 3)
+        case .ruleOfThirdsCorner, .negativeSpace: .thirdsPoint
+        case .centre: .centre
+        case .symmetry: .centreLine
+        default: nil
+        }
+    }
+
+    /// What a good photo in this style looks like, for the model to judge against.
+    var coachingFocus: String {
+        let tools = "Tools: move the camera, step closer or back, tilt it up or down, or tap a zoom button"
+        let judged: String
+        switch self {
+        case .ruleOfThirdsOne:
+            judged = "the Thirds 1/3 style: the main subject should sit on the left vertical third line of the frame"
+        case .ruleOfThirdsTwo:
+            judged = "the Thirds 2/3 style: the main subject should sit on the right vertical third line of the frame"
+        case .ruleOfThirdsCorner:
+            judged = "the Thirds Corner style: the main subject should sit on one of the four points where the third lines cross"
+        case .centre:
+            judged = "the Centre style: the main subject should be in the middle of the frame with even space around it"
+        case .onePointPerspective:
+            judged = "the One-Point Perspective style: lines such as a road, hallway or railway should run toward a single vanishing point, ideally near the middle of the frame, with the camera level and square-on so both sides look balanced"
+        case .tableTop45:
+            judged = "the Table-Top 45 degree style: a tabletop scene shot from about 45 degrees above, with the whole arrangement in frame, the table edge level and nothing cropped awkwardly"
+        case .tableTop90:
+            judged = "the Table-Top 90 degree aerial style: shooting straight down onto a flat surface, with the camera parallel to the surface, items arranged neatly and the frame filled evenly"
+        case .leadingLines:
+            judged = "the Leading Lines style: lines such as paths, edges or rails should be visible, point toward the main subject and not be cut off, so they guide the eye to it"
+        case .singleVertex:
+            judged = "the Single Vertex style: one point where two lines meet should be a clear focal point, near a third position, with the lines leading away from it"
+        case .doubleVertex:
+            judged = "the Double Vertex style: two points where lines meet should both be visible and balanced across the frame, leading the eye between them"
+        case .triangle:
+            judged = "the Triangle style: three key elements, or the lines between them, should form a triangle, with all three in frame and well spaced"
+        case .leadingLinesAligning:
+            judged = "the Aligning Lines style: strong straight lines such as horizons, walls and edges should be perfectly level or perfectly vertical, and parallel lines should line up with the frame edges"
+        case .symmetry:
+            judged = "the Symmetry style: the subject should be centred so the left and right halves mirror each other, with the camera square-on and level"
+        case .halfBodyPortrait:
+            judged = "the Half-Body Portrait style: a person framed from about the waist up, with the head in the upper third, a little space above the head, and no joints cropped awkwardly"
+        case .compression:
+            judged = "the Compression style: the subject and background should look stacked close together, as with a long lens, which needs more zoom and standing farther back, with layered elements overlapping"
+        case .negativeSpace:
+            judged = "the Negative Space style: a small subject should sit off-centre, surrounded by plenty of empty, uncluttered space"
+        }
+        return "how well the photo follows \(judged). \(tools)"
+    }
+}
+
 /// What the coach shows for the current frame.
 struct PhotoFeedback: Equatable {
     /// Things that already work, each a few words.
@@ -135,7 +260,7 @@ final class PhotoCoach {
     private var candidateCount = 0
 
     /// Runs until the task is cancelled. Restart it (with a new topic) when the dropdown changes.
-    func run(camera: CameraManager, topic: AdviceTopic, guide: SubjectGuide) async {
+    func run(camera: CameraManager, topic: AdviceTopic, style: CompositionGuide, guide: SubjectGuide) async {
         feedback = nil
         notice = nil
         candidate = nil
@@ -150,9 +275,10 @@ final class PhotoCoach {
             session?.prewarm()
         }
 
+        // Checks twice a second, so the coach reacts as soon as the green box has a subject.
         while !Task.isCancelled {
             // Where the subject sits is geometry, so the green box decides while it's off target.
-            let usesBox = topic == .subjectPosition || topic == .composition
+            let usesBox = topic == .subjectPosition || (topic == .composition && style.subjectPlacement != nil)
             if usesBox, let target = guide.target, !target.isAligned {
                 feedback = Self.positionFeedback(for: target)
                 try? await Task.sleep(for: .milliseconds(500))
