@@ -20,7 +20,7 @@ nonisolated enum CoachIssue: String, CaseIterable, Sendable {
     case headCutOff, tooMuchHeadroom, subjectTooSmall
     // Judged by the model, because they can't be measured.
     case clutteredBackground, distractingEdges, subjectCutOff, noClearSubject
-    case tooMuchEmptySpace, horizonThroughMiddle, flatAngle
+    case tooMuchEmptySpace, horizonThroughMiddle
     // Judged by the model against a chosen composition style.
     case linesDontLead, notSymmetric, vanishingPointOffCentre, linesNotStraight
     case noTriangle, noClearVertex, notOverhead, layersNotStacked, subjectTooBig, jointsCropped
@@ -85,13 +85,13 @@ extension FrameRegion {
         }
     }
 
-    /// How to point the camera at this side of the frame.
+    /// How to move the camera toward this side of the frame. Framing only: no turning or tilting.
     nonisolated var turnToward: (text: String, symbol: String)? {
         switch self {
-        case .left: ("Turn slightly left", "arrow.left")
-        case .right: ("Turn slightly right", "arrow.right")
-        case .top: ("Tilt up a little", "arrow.up")
-        case .bottom: ("Tilt down a little", "arrow.down")
+        case .left: ("Move the camera slightly left", "arrow.left")
+        case .right: ("Move the camera slightly right", "arrow.right")
+        case .top: ("Move the camera up a little", "arrow.up")
+        case .bottom: ("Move the camera down a little", "arrow.down")
         default: nil
         }
     }
@@ -144,7 +144,7 @@ extension CoachIssue {
         case .phoneTilted:
             tiltAdvice(analysis?.tilt)
         case .shootingDown:
-            Advice(action: "Crouch to the subject's eye level", why: "Shooting down makes people and pets look small.", symbol: "arrow.down")
+            Advice(action: "Lower the phone to the subject's eye level", why: "Shooting down makes people and pets look small.", symbol: "arrow.down")
         case .pointingUp:
             Advice(action: "Hold the phone upright to keep lines straight", why: "Tilting up makes buildings look like they're falling back.")
         case .headCutOff:
@@ -164,13 +164,11 @@ extension CoachIssue {
         case .tooMuchEmptySpace:
             Advice(action: "Step closer to fill the frame", why: "Empty space only helps when it gives the subject room to breathe.")
         case .horizonThroughMiddle:
-            Advice(action: "Tilt so the horizon sits on a third line", why: "A horizon across the middle splits the photo in two.")
-        case .flatAngle:
-            Advice(action: "Try crouching low or holding the phone higher", why: "A new height makes everyday scenes look fresh.")
+            Advice(action: "Reframe so the horizon sits on a third line", why: "A horizon across the middle splits the photo in two.")
         case .linesDontLead:
             Advice(action: "Move so the lines run toward the subject", why: "Lines pull the eye along them, so they should end at what matters.")
         case .notSymmetric:
-            Advice(action: "Step sideways until both halves mirror each other", why: "Symmetry only works when it's exact; nearly is a mistake.")
+            Advice(action: "Step sideways until both halves mirror each other", why: "Symmetry works when both halves closely match.")
         case .vanishingPointOffCentre:
             Advice(action: "Move until the lines meet in the middle", why: "Lines meeting near the centre give the deepest look.")
         case .linesNotStraight:
@@ -195,10 +193,6 @@ extension CoachIssue {
         switch (self, scene) {
         case (.clutteredBackground, .food):
             Advice(action: "Move the plate so only the table is behind it", why: "A plain surface keeps the eye on the food.")
-        case (.flatAngle, .food):
-            Advice(action: "Shoot from 45° or straight above", why: "Food looks most appetising from a high angle.", symbol: "arrow.up")
-        case (.flatAngle, .city):
-            Advice(action: "Crouch low to make the buildings tower", why: "A low angle makes buildings look tall and grand.", symbol: "arrow.down")
         case (.horizonThroughMiddle, .landscape):
             Advice(action: "Put the horizon on the bottom third for more sky", why: "Giving the sky or the land two thirds makes a clear choice.")
         case (.subjectTooSmall, .nature):
@@ -241,26 +235,31 @@ extension CoachIssue {
     /// A different way to fix the same problem, shown once the usual tip has been ignored a few times.
     func alternativeAdvice(for topic: AdviceTopic) -> Advice? {
         switch self {
+        // The Shutter slider is only in the Exposure topic's bar. Slower speeds are to the right.
         case .underexposed, .backlitSubject:
-            Advice(action: "Tap the subject, then drag the sun up", why: "Exposure follows what you tap, so the subject gets brighter.", symbol: "arrow.up")
+            topic == .exposure
+                ? Advice(action: "Drag the Shutter slider right for more light", why: "A slower shutter lets in more light, so the subject gets brighter.", symbol: "arrow.right")
+                : nil
         case .overexposed, .highlightsClipped:
-            Advice(action: "Tap the bright area, then drag the sun down", why: "Exposing for the brightest part keeps its detail.", symbol: "arrow.down")
+            topic == .exposure
+                ? Advice(action: "Drag the Shutter slider left for less light", why: "A faster shutter lets in less light, keeping bright detail.", symbol: "arrow.left")
+                : nil
         case .tooDark, .highISO:
             Advice(action: "Turn on Flash for a close subject", why: "Flash adds light where there isn't enough, keeping the photo clean.")
         case .cameraShaking, .slowShutter:
             Advice(action: "Lean on a wall or rest the phone on something", why: "A steady support stops blur better than steady hands.")
         case .subjectSoft:
-            Advice(action: "Tap the subject on screen to focus on it", why: "Focus goes where you tap, so the subject turns crisp.")
+            Advice(action: "Step back a little so the camera can focus", why: "Phones can't focus on things that are very close.")
         case .phoneTilted, .linesNotStraight:
-            Advice(action: "Line the horizon up with a grid line", why: "The grid gives you a straight edge to match.")
+            Advice(action: "Turn the phone until the level line turns green", why: "The level shows when the camera is straight.")
         case .subjectTooSmall, .tooMuchEmptySpace:
-            Advice(action: "Tap 2× to zoom in on the subject", why: "Zooming in fills the frame without moving.")
+            Advice(action: "Tap a zoom button to zoom in", why: "Zooming in fills the frame without moving.")
         case .clutteredBackground:
-            Advice(action: "Tap Depth to blur the background", why: "A blurred background makes the subject stand out.")
+            Advice(action: "Move closer so the subject hides the clutter", why: "The closer you are, the less background fits around the subject.")
         case .distractingEdges:
             Advice(action: "Step closer so the subject fills the edges", why: "Moving closer pushes distractions out of the frame.")
         case .noClearSubject:
-            Advice(action: "Tap the thing you care about, then move closer", why: "Choosing one thing tells the viewer where to look.")
+            Advice(action: "Get close to one thing so it fills the middle", why: "Choosing one thing tells the viewer where to look.")
         case .shootingDown:
             Advice(action: "Hold the phone at chest height, level", why: "A lower camera treats the subject as an equal.")
         default:
@@ -288,7 +287,6 @@ extension CoachIssue {
         case .subjectCutOff: "fitted the whole subject in"
         case .noClearSubject: "picked a clear subject"
         case .horizonThroughMiddle: "moved the horizon off centre"
-        case .flatAngle: "tried a fresh angle"
         case .linesDontLead: "made the lines lead to the subject"
         case .notSymmetric: "balanced both halves"
         case .vanishingPointOffCentre: "centred the vanishing point"
@@ -328,7 +326,6 @@ enum VisualIssue: String, CaseIterable {
     case noClearSubject
     case tooMuchEmptySpace
     case horizonThroughMiddle
-    case flatAngle
     case linesDontLead
     case notSymmetric
     case vanishingPointOffCentre
@@ -399,12 +396,13 @@ nonisolated enum CoachRules {
     static func allows(_ issue: VisualIssue, for topic: AdviceTopic, styles: Set<CompositionGuide> = []) -> Bool {
         switch topic {
         case .composition:
-            guard issue != .flatAngle else { return false }
+            // Composition is about framing; rotating or angling the phone belongs to Angle & Perspective.
+            guard ![.linesNotStraight, .notOverhead].contains(issue) else { return false }
             // Style issues only count when one of their styles is being practised.
             guard let owners = issue.styles else { return true }
             return !owners.isDisjoint(with: styles)
         case .anglePerspective:
-            return issue == .flatAngle || issue == .clutteredBackground || issue == .none
+            return issue == .clutteredBackground || issue == .none
         default:
             return false
         }
@@ -429,18 +427,31 @@ nonisolated enum CoachRules {
             } else if offset > 0.7 || a.brightness > 0.8 {
                 found.append(.overexposed)
             }
-            if a.highlightClip > 0.04, !found.contains(.overexposed) { found.append(.highlightsClipped) }
-            if a.isBacklit { found.append(.backlitSubject) }
+            // Once Exposure has been pulled down a full stop, what's still white is a lamp or the
+            // sun, which no setting can fix, so the tip counts as done.
+            if a.highlightClip > 0.04, !found.contains(.overexposed), a.readings.exposureBias > -1 {
+                found.append(.highlightsClipped)
+            }
+            // Brightening lifts the background too, so the gap never closes. The fix is done
+            // once the subject itself is bright enough.
+            if a.isBacklit, (a.subjectBrightness ?? 0) < 0.4 { found.append(.backlitSubject) }
         case .light:
-            if a.brightness < 0.2 || iso > 1600 { found.append(.tooDark) }
+            // Night Mode and Flash mostly change the saved photo, not the preview, so turning
+            // them on counts as following the tip.
+            let addsLight = a.readings.isNightModeOn || a.readings.isFlashOn
+            if a.brightness < 0.2 || iso > 1600, !addsLight { found.append(.tooDark) }
             if a.isBacklit { found.append(.backlitSubject) }
             if a.highlightClip > 0.04, a.shadowClip > 0.1 { found.append(.harshContrast) }
-            if iso > 800, !found.contains(.tooDark) { found.append(.highISO) }
+            if iso > 800, !found.contains(.tooDark), !addsLight { found.append(.highISO) }
         case .focus:
             // Shake blurs everything, so fix it before blaming the focus.
             if let shake = a.shake, shake >= shakeThreshold { found.append(.cameraShaking) }
             if a.subjectSharpness < softThreshold { found.append(.subjectSoft) }
-            if let seconds = a.readings.exposureSeconds, seconds > 1.0 / 30, !found.contains(.cameraShaking) {
+            // A slow shutter is only a problem while the phone moves. The tip is to hold still,
+            // and holding still is what clears it; the shutter speed itself can't be changed by hand.
+            let isSteady = a.shake.map { $0 < shakeThreshold / 2 } ?? false
+            if let seconds = a.readings.exposureSeconds, seconds > 1.0 / 30,
+               !found.contains(.cameraShaking), !isSteady {
                 found.append(.slowShutter)
             }
         case .anglePerspective:
@@ -451,7 +462,6 @@ nonisolated enum CoachRules {
                 if pitch > 25 { found.append(.pointingUp) }
             }
         case .composition:
-            if isTilted(a.tilt, alreadyShown: tiltShown) { found.append(.phoneTilted) }
             if let subject = a.subject, subject.width * subject.height < 0.02 { found.append(.subjectTooSmall) }
         case .subjectPosition:
             if let face = a.faces.max(by: { $0.width * $0.height < $1.width * $1.height }) {
@@ -480,8 +490,11 @@ nonisolated enum CoachRules {
         case .focus:
             if a.subjectSharpness >= softThreshold { good.append("Subject is sharp") }
             if let shake = a.shake, shake < shakeThreshold / 2 { good.append("Steady hands") }
-        case .anglePerspective, .composition:
+        case .anglePerspective:
             if a.tilt != nil, !problems.contains(.phoneTilted) { good.append("Phone is level") }
+        case .composition:
+            // Framing strengths come from the model and the green box, not from how the phone is held.
+            break
         case .subjectPosition:
             if !a.faces.isEmpty, !problems.contains(.headCutOff), !problems.contains(.tooMuchHeadroom) {
                 good.append("Good headroom")

@@ -129,10 +129,10 @@ struct SubjectTarget: Equatable {
     var cameraAdvice: [String] {
         var steps: [String] = []
         if abs(dx) >= Self.axisThreshold {
-            steps.append("Pan the camera\(amount(dx)) \(dx > 0 ? "left" : "right")")
+            steps.append("Move the camera\(amount(dx)) \(dx > 0 ? "left" : "right")")
         }
         if abs(dy) >= Self.axisThreshold {
-            steps.append("Tilt the camera\(amount(dy)) \(dy > 0 ? "up" : "down")")
+            steps.append("Move the camera\(amount(dy)) \(dy > 0 ? "up" : "down")")
         }
         return steps
     }

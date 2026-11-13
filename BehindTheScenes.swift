@@ -181,7 +181,7 @@ extension CompositionGuide {
 
     /// What a good photo in this style looks like, for the model to judge against.
     var coachingFocus: String {
-        let tools = "Tools: move the camera, step closer or back, tilt it up or down, or tap a zoom button"
+        let tools = "Tools: move the camera, step closer or back, or tap a zoom button. Never suggest rotating, tilting or angling the phone"
         let judged: String
         switch self {
         case .ruleOfThirdsOne:
@@ -637,7 +637,6 @@ final class PhotoCoach {
         (.distractingEdges, #"A bright sign at the right edge: issue distractingEdges, region right, thing "the sign", strength "Clear subject"."#),
         (.linesDontLead, #"A road running off the left side instead of toward the house: issue linesDontLead, region left, thing "the road", strength "Strong lines"."#),
         (.subjectCutOff, #"A tree cut off at the top: issue subjectCutOff, region top, thing "the tree", strength "Rich colours"."#),
-        (.flatAngle, #"A flower shot from standing height: issue flatAngle, region whole, thing "the flower", strength "Bright colours"."#),
     ]
     private static let noneExample = """
         A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background".
@@ -684,7 +683,7 @@ final class PhotoCoach {
                 \(criteria)
                 """
         case .anglePerspective:
-            return "the camera angle: whether the height and viewpoint make the scene interesting"
+            return "the background: whether anything behind the subject distracts from it"
         default:
             return "the framing: the background, the edges, whether the subject is cut off, and empty space"
         }

@@ -20,6 +20,12 @@ nonisolated struct CameraReadings: Sendable, Equatable {
     /// Shutter speed in seconds.
     var exposureSeconds: Double?
     var iso: Double?
+    // The app's own settings, so the coach can tell a tip was followed even when the change
+    // only shows up in the saved photo (Flash) or can't fully fix the frame (a lamp stays white).
+    /// The Exposure slider, in EV stops.
+    var exposureBias: Double = 0
+    var isNightModeOn = false
+    var isFlashOn = false
 
     @MainActor
     static func read(from camera: CameraManager) -> CameraReadings {
@@ -27,7 +33,10 @@ nonisolated struct CameraReadings: Sendable, Equatable {
         return CameraReadings(
             exposureOffset: Double(device.exposureTargetOffset),
             exposureSeconds: device.exposureDuration.seconds,
-            iso: Double(device.iso)
+            iso: Double(device.iso),
+            exposureBias: Double(camera.exposureBias),
+            isNightModeOn: camera.isNightModeOn,
+            isFlashOn: camera.flash == .on
         )
     }
 }

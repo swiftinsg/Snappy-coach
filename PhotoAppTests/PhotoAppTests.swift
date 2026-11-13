@@ -73,7 +73,47 @@ struct CoachRulesTests {
 
     @Test func slowShutterWarnsAboutShake() {
         let readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 10, iso: 400)
-        #expect(CoachRules.issues(for: .focus, in: scene(readings: readings)).contains(.slowShutter))
+        #expect(CoachRules.issues(for: .focus, in: scene(readings: readings, shake: 0.15)).contains(.slowShutter))
+        // The tip is to hold still, so holding still clears it.
+        #expect(!CoachRules.issues(for: .focus, in: scene(readings: readings, shake: 0.05)).contains(.slowShutter))
+    }
+
+    // Each tip must clear once the person does what it says, or the section never finishes.
+
+    @Test func nightModeOrFlashClearsTheDarkTip() {
+        var readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 15, iso: 3200)
+        readings.isNightModeOn = true
+        #expect(!CoachRules.issues(for: .light, in: scene(readings: readings)).contains(.tooDark))
+        readings.isNightModeOn = false
+        readings.isFlashOn = true
+        let issues = CoachRules.issues(for: .light, in: scene(readings: readings))
+        #expect(!issues.contains(.tooDark))
+        #expect(!issues.contains(.highISO))
+    }
+
+    @Test func brighteningABacklitSubjectClearsTheExposureTip() {
+        #expect(CoachRules.issues(for: .exposure, in: scene(subjectBrightness: 0.2, backgroundBrightness: 0.8)).contains(.backlitSubject))
+        // After dragging Exposure right the background is still brighter, but the subject is fine.
+        #expect(!CoachRules.issues(for: .exposure, in: scene(subjectBrightness: 0.5, backgroundBrightness: 0.95)).contains(.backlitSubject))
+    }
+
+    @Test func lowerExposureClearsTheHighlightsTipEvenWithALampInFrame() {
+        var readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 120, iso: 100)
+        readings.exposureBias = -1
+        #expect(!CoachRules.issues(for: .exposure, in: scene(highlightClip: 0.1, readings: readings)).contains(.highlightsClipped))
+    }
+
+    @Test func noTipAsksForATapOnTheViewfinder() {
+        // The viewfinder has no tap-to-focus, so tips can only name controls that exist.
+        for issue in CoachIssue.allCases {
+            for topic in AdviceTopic.allCases {
+                for advice in [issue.advice(for: topic), issue.alternativeAdvice(for: topic)].compactMap(\.self) {
+                    #expect(!advice.action.contains("Tap the subject"), "\(issue) asks for a tap")
+                    #expect(!advice.action.contains("sun"), "\(issue) mentions a sun handle")
+                    #expect(!advice.action.contains("Depth"), "\(issue) relies on Depth, which the preview doesn't show")
+                }
+            }
+        }
     }
 
     @Test func tiltedPhoneIsReportedWithDirection() {
@@ -103,8 +143,7 @@ struct CoachRulesTests {
 
     @Test func modelIssuesAreFilteredByTopic() {
         #expect(CoachRules.allows(.clutteredBackground, for: .composition))
-        #expect(!CoachRules.allows(.flatAngle, for: .composition))
-        #expect(CoachRules.allows(.flatAngle, for: .anglePerspective))
+        #expect(CoachRules.allows(.clutteredBackground, for: .anglePerspective))
         #expect(!CoachRules.allows(.subjectCutOff, for: .exposure))
     }
 
@@ -118,13 +157,23 @@ struct CoachRulesTests {
     }
 
     @Test func tiltWarningStaysUntilClearlyLevel() {
-        #expect(CoachRules.issues(for: .composition, in: scene(tilt: 5)).contains(.phoneTilted))
+        #expect(CoachRules.issues(for: .anglePerspective, in: scene(tilt: 5)).contains(.phoneTilted))
         // 3.5° is too small to start a warning, but not level enough to clear one.
-        #expect(!CoachRules.issues(for: .composition, in: scene(tilt: 3.5)).contains(.phoneTilted))
-        #expect(CoachRules.issues(for: .composition, in: scene(tilt: 3.5), tiltShown: true).contains(.phoneTilted))
+        #expect(!CoachRules.issues(for: .anglePerspective, in: scene(tilt: 3.5)).contains(.phoneTilted))
+        #expect(CoachRules.issues(for: .anglePerspective, in: scene(tilt: 3.5), tiltShown: true).contains(.phoneTilted))
         // Close enough by hand counts as level; it never asks for a perfect 1°.
-        #expect(!CoachRules.issues(for: .composition, in: scene(tilt: 2.5), tiltShown: true).contains(.phoneTilted))
-        #expect(!CoachRules.strengths(for: .composition, in: scene(tilt: 3.5), tiltShown: true).contains("Phone is level"))
+        #expect(!CoachRules.issues(for: .anglePerspective, in: scene(tilt: 2.5), tiltShown: true).contains(.phoneTilted))
+        #expect(!CoachRules.strengths(for: .anglePerspective, in: scene(tilt: 3.5), tiltShown: true).contains("Phone is level"))
+    }
+
+    @Test func compositionNeverAsksToRotateOrAngleThePhone() {
+        let tilted = scene(pitch: 40, tilt: 10)
+        #expect(!CoachRules.issues(for: .composition, in: tilted).contains(.phoneTilted))
+        #expect(!CoachRules.strengths(for: .composition, in: scene(tilt: 0)).contains("Phone is level"))
+        let allStyles = Set(CompositionGuide.allCases)
+        for issue in [VisualIssue.linesNotStraight, .notOverhead] {
+            #expect(!CoachRules.allows(issue, for: .composition, styles: allStyles))
+        }
     }
 
     @Test func subjectBoxForgivesSmallOffsetsAndHoldsOnceAligned() {
@@ -180,7 +229,7 @@ struct CoachRulesTests {
         let edge = CoachIssue.distractingEdges.advice(
             for: .composition, detail: IssueDetail(region: .right, rawThing: "Bright sign.")
         )
-        #expect(edge.action == "Turn slightly left to drop the bright sign")
+        #expect(edge.action == "Move the camera slightly left to drop the bright sign")
         #expect(edge.symbol == "arrow.left")
 
         let background = CoachIssue.clutteredBackground.advice(
@@ -254,12 +303,12 @@ struct CoachRulesTests {
     @Test func adviceFitsTheScene() {
         var food = scene()
         food.scene = .food
-        #expect(CoachIssue.flatAngle.advice(for: .anglePerspective, analysis: food).action.contains("45°"))
+        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: food).action.contains("plate"))
         var landscape = scene()
         landscape.scene = .landscape
         #expect(CoachIssue.horizonThroughMiddle.advice(for: .composition, analysis: landscape).action.contains("bottom third"))
         // Other scenes keep the usual wording.
-        #expect(CoachIssue.flatAngle.advice(for: .anglePerspective, analysis: scene()) == CoachIssue.flatAngle.advice(for: .anglePerspective))
+        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: scene()) == CoachIssue.clutteredBackground.advice(for: .composition))
 
         for type in SceneType.allCases {
             var analysis = scene()
