@@ -38,6 +38,20 @@ enum CompositionGuide: String, CaseIterable, Identifiable {
 
 // MARK: - Scene suitability
 
+extension SceneType {
+    /// Composition styles that usually suit this kind of photo, best first.
+    var suitedStyles: [CompositionGuide] {
+        switch self {
+        case .food: [.tableTop45, .tableTop90, .centre, .negativeSpace]
+        case .city: [.leadingLines, .onePointPerspective, .leadingLinesAligning, .symmetry]
+        case .landscape: [.ruleOfThirdsOne, .ruleOfThirdsTwo, .leadingLines, .negativeSpace, .compression]
+        case .nature: [.ruleOfThirdsCorner, .negativeSpace, .centre]
+        case .people: [.halfBodyPortrait, .ruleOfThirdsOne, .centre]
+        case .object: [.centre, .negativeSpace, .ruleOfThirdsCorner]
+        }
+    }
+}
+
 extension CompositionGuide {
     /// Styles that clearly can't work for what the camera currently sees, with a short reason.
     /// Only styles that are certain to be wrong are disabled; anything uncertain stays available.
@@ -271,7 +285,7 @@ struct CompositionPicker: View {
         let conflicts = selection.filter { $0.conflicts(with: guide) }
         if !conflicts.isEmpty {
             let names = CompositionGuide.allCases.filter(conflicts.contains).map(\.title)
-            parts.append("Doesn't work with \(names.formatted(.list(type: .and)))")
+            parts.append("Replaces \(names.formatted(.list(type: .and)))")
         }
         return parts.joined(separator: ". ")
     }
@@ -293,14 +307,17 @@ struct CompositionPicker: View {
             return
         }
 
-        // Multi-select only combines styles that can be true at the same time.
+        // Multi-select only combines styles that can be true at the same time, so a style that
+        // conflicts with the selection replaces the styles it conflicts with.
+        // Built up first and written once: the binding fills an empty selection back in with a
+        // default, so removing the conflicts and adding the new style separately would undo the swap.
         let conflicts = selection.filter { $0.conflicts(with: guide) }
-        guard conflicts.isEmpty else {
+        var updated = selection.subtracting(conflicts)
+        updated.insert(guide)
+        selection = updated
+        if !conflicts.isEmpty {
             let names = CompositionGuide.allCases.filter(conflicts.contains).map(\.title)
-            onMessage("\(guide.title) doesn't work with \(names.formatted(.list(type: .and))).")
-            return
+            onMessage("Swapped \(names.formatted(.list(type: .and))) for \(guide.title).")
         }
-
-        selection.insert(guide)
     }
 }

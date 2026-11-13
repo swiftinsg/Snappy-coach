@@ -17,7 +17,8 @@ import UIKit
 nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     let output = AVCaptureVideoDataOutput()
 
-    private static let longestSide: CGFloat = 1024
+    /// Small enough for the model to read quickly and keep its context window free.
+    private static let longestSide: CGFloat = 768
     private let queue = DispatchQueue(label: "FrameGrabber.video")
     private let lock = NSLock()
     private let context = CIContext()
@@ -64,8 +65,9 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         return subject
     }
 
-    /// The newest frame, turned upright and shrunk so the model can read it quickly.
-    func latestImage() -> CGImage? {
+    /// The newest frame, turned upright, cropped to the viewfinder's `portraitAspect` (width ÷ height)
+    /// so the coach only judges what the person can see, and shrunk so the model can read it quickly.
+    func latestImage(portraitAspect: CGFloat? = nil) -> CGImage? {
         lock.lock()
         let buffer = latest
         lock.unlock()
@@ -73,6 +75,19 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
 
         // The back camera delivers frames rotated by 90°, so turn them upright.
         var image = CIImage(cvPixelBuffer: buffer).oriented(.right)
+        if let portraitAspect, portraitAspect > 0 {
+            // The preview fills its frame, so it shows the centre of the sensor image.
+            let extent = image.extent
+            let crop: CGRect
+            if extent.width / extent.height > portraitAspect {
+                let width = extent.height * portraitAspect
+                crop = CGRect(x: extent.midX - width / 2, y: extent.minY, width: width, height: extent.height)
+            } else {
+                let height = extent.width / portraitAspect
+                crop = CGRect(x: extent.minX, y: extent.midY - height / 2, width: extent.width, height: height)
+            }
+            image = image.cropped(to: crop)
+        }
         let scale = Self.longestSide / max(image.extent.width, image.extent.height)
         if scale < 1 {
             image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
@@ -214,19 +229,93 @@ struct PhotoFeedback: Equatable {
     var improve: [String]
     /// The photography idea behind the first improvement.
     var why: String?
+    /// An arrow for the first improvement, when it has a direction.
+    var symbol: String? = nil
     /// True when the shot is ready to take.
     var isGoodEnough: Bool
     /// What to practise next, shown once the current section is complete.
     var nextSection: String? = nil
 }
 
+/// What the coach remembers between sections. Every model session starts empty, so this is
+/// turned into one short sentence that keeps the coach from repeating itself.
+struct CoachMemory: Equatable {
+    /// Issues the person fixed, oldest first.
+    private(set) var fixed: [CoachIssue] = []
+    /// How many sections each unfixed issue has been shown in.
+    private(set) var shownCounts: [CoachIssue: Int] = [:]
+    /// Topics practised, oldest first. The current topic is last.
+    private(set) var practised: [String] = []
+    /// What the model praised in earlier sections, so it can find something new.
+    private(set) var recentStrengths: [String] = []
+
+    private static let length = 4
+    /// Once an issue has been shown in this many sections without being fixed, the coach tries another way.
+    static let repeatLimit = 2
+
+    mutating func noteFixed(_ issue: CoachIssue) {
+        fixed.removeAll { $0 == issue }
+        fixed = Array((fixed + [issue]).suffix(Self.length))
+        shownCounts[issue] = nil
+    }
+
+    mutating func noteShown(_ issue: CoachIssue) {
+        shownCounts[issue, default: 0] += 1
+    }
+
+    func timesShown(_ issue: CoachIssue) -> Int {
+        shownCounts[issue] ?? 0
+    }
+
+    mutating func notePractising(_ topic: AdviceTopic, styles: Set<CompositionGuide>) {
+        var name = topic.title
+        if topic == .composition {
+            let titles = CompositionGuide.allCases.filter(styles.contains).map(\.title)
+            if !titles.isEmpty { name += " (\(titles.formatted(.list(type: .and))))" }
+        }
+        practised.removeAll { $0 == name }
+        practised = Array((practised + [name]).suffix(3))
+    }
+
+    mutating func noteStrength(_ strength: String) {
+        recentStrengths.removeAll { $0 == strength }
+        recentStrengths = Array((recentStrengths + [strength]).suffix(Self.length))
+    }
+
+    /// Issues shown often without being fixed go last, so another problem gets a turn.
+    /// The issue already on screen keeps its place, so the card doesn't jump.
+    func reordered(_ issues: [CoachIssue], keeping current: CoachIssue?) -> [CoachIssue] {
+        let stale = issues.filter { $0 != current && timesShown($0) >= Self.repeatLimit }
+        return issues.filter { !stale.contains($0) } + stale
+    }
+
+    /// One short sentence about what has been done so far, for the next model session.
+    var sentence: String {
+        var parts: [String] = []
+        if practised.count > 1 {
+            parts.append("Earlier the user practised \(Array(practised.dropLast()).formatted(.list(type: .and)))")
+        }
+        if !fixed.isEmpty {
+            parts.append("They have already \(fixed.map(\.accomplishment).formatted(.list(type: .and)))")
+        }
+        let told = shownCounts
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key.rawValue < $1.key.rawValue }
+            .prefix(3)
+            .map(\.key.rawValue)
+        if !told.isEmpty {
+            parts.append("Already pointed out but not fixed yet: \(told.joined(separator: ", "))")
+        }
+        return parts.isEmpty ? "Nothing yet." : parts.joined(separator: ". ") + "."
+    }
+}
+
 /// The auto-rendering coach. It measures the frame, asks the model only about what can't be
 /// measured, and turns the result into advice from `AdviceLibrary`.
 ///
 /// Advice is grouped into sections: a section is the time spent on one issue. When the issue is
-/// fixed (or the topic changes, or a photo is taken) the section ends, the model's context is
-/// thrown away, and the next session starts with one sentence about what has been done so far,
-/// so the coach doesn't repeat itself.
+/// fixed (or the topic changes, or a photo is taken) the section ends. Every model judgement uses a
+/// fresh session, so no old context carries over; instead each session starts with one sentence
+/// from `CoachMemory` about what has been done so far, so the coach doesn't repeat itself.
 @Observable
 final class PhotoCoach {
     /// The latest feedback shown on screen, or nil while the coach has nothing to say yet.
@@ -241,6 +330,10 @@ final class PhotoCoach {
     private(set) var notice: String?
     /// Raw measurements and model output, for the hidden debug overlay.
     private(set) var debugText = ""
+    /// What has been done so far, kept across topics and photos.
+    private(set) var memory = CoachMemory()
+    /// What kind of photo the camera is looking at, smoothed over the last few checks.
+    private(set) var scene: SceneType?
 
     var isReady: Bool { feedback?.isGoodEnough ?? false }
 
@@ -248,20 +341,24 @@ final class PhotoCoach {
     private static let modelInterval: Duration = .seconds(2)
     /// How often measured-only topics refresh. Measuring is cheap, so it can be quicker.
     private static let measureInterval: Duration = .seconds(1)
-    /// Each turn carries an image, which fills the on-device model's small context window fast,
-    /// so a session is renewed after a few turns even within one section.
-    private static let maxTurnsPerSession = 3
-    /// How many accomplishments the one-line memory keeps.
-    private static let memoryLength = 4
 
     private let attitude = PhoneAttitude()
+    /// Raw scene labels from the last few checks, so one odd frame doesn't change the advice.
+    private var recentScenes: [SceneType] = []
+    private static let sceneHistory = 3
 
-    // Section memory.
+    /// A session made ahead of time so the first judgement is quick. Used once, then dropped.
     private var session: LanguageModelSession?
-    private var sessionTurns = 0
-    private var accomplished: [String] = []
-    /// The issue being worked on in the current section, nil when the shot is good.
+
+    // The current section.
+    /// The issue being worked on, nil when the shot is good.
     private var shownIssue: CoachIssue?
+    /// Where the model saw the issue, kept for the section so the wording doesn't change every pass.
+    private var sectionDetail: IssueDetail?
+    /// True when the section shows the issue's other tip, because the usual one was ignored before.
+    private var usesAlternative = false
+    /// What the model last praised, remembered when the section ends.
+    private var sectionStrength: String?
     /// How many issues the section started with, so progress can be measured against it.
     private var sectionIssueCount = 1
     /// The suggestion for what to practise after the current section, kept while it's complete.
@@ -279,8 +376,10 @@ final class PhotoCoach {
         candidateCount = 0
         sectionProgress = 0
         sectionRecommendation = nil
-        // A new topic is a new section.
+        // A new topic is a new section; the memory sentence carries what was done before.
         endSection()
+        memory.notePractising(topic, styles: styles)
+        // Counted, so the task being replaced can't switch motion off for this one.
         attitude.start()
         defer { attitude.stop() }
 
@@ -299,9 +398,14 @@ final class PhotoCoach {
             guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
 
             let readings = CameraReadings.read(from: camera)
-            guard let analysis = await SceneAnalysis.analyze(
-                frame, readings: readings, pitch: attitude.pitch, tilt: attitude.tilt
+            guard var analysis = await SceneAnalysis.analyze(
+                frame, readings: readings, pitch: attitude.pitch, tilt: attitude.tilt, shake: attitude.shake
             ), !Task.isCancelled else { continue }
+            recentScenes = Array((recentScenes + [analysis.scene]).suffix(Self.sceneHistory))
+            if let smoothed = SceneType.smoothed(recentScenes) {
+                analysis.scene = smoothed
+                scene = smoothed
+            }
 
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
@@ -321,33 +425,41 @@ final class PhotoCoach {
                 continue
             }
 
-            var issues = CoachRules.issues(for: topic, in: analysis)
-            var good = CoachRules.strengths(for: topic, in: analysis)
+            let tiltShown = shownIssue == .phoneTilted
+            var issues = CoachRules.issues(for: topic, in: analysis, tiltShown: tiltShown)
+            var good = CoachRules.strengths(for: topic, in: analysis, tiltShown: tiltShown)
             if usesBox, guide.target?.isAligned == true {
                 good.insert("Subject in the green box", at: 0)
             }
 
-            // The model is only asked when the measurements found nothing, which saves battery
-            // and keeps it to what it's good at: judging the look of the scene.
+            // The model is only asked when nothing it can't see past was measured, which saves
+            // battery and keeps it to what it's good at: judging the look of the scene.
+            var details: [CoachIssue: IssueDetail] = [:]
             var modelNote = "model: not asked"
-            if usesModel, issues.isEmpty,
+            if usesModel, !issues.contains(where: \.blocksModel),
                let judgement = await judge(frame, topic: topic, styles: styles, analysis: analysis) {
                 guard !Task.isCancelled else { break }
-                modelNote = "model: \(judgement.issue.rawValue) / \(judgement.strength)"
-                if CoachRules.allows(judgement.issue, for: topic), let issue = judgement.issue.coachIssue {
-                    issues.append(issue)
+                modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
+                if CoachRules.allows(judgement.issue, for: topic, styles: styles), let issue = judgement.issue.coachIssue {
+                    // What the model saw is more specific than a minor measurement, so it leads.
+                    issues.removeAll { $0 == issue }
+                    issues.insert(issue, at: 0)
+                    details[issue] = IssueDetail(region: judgement.region, rawThing: judgement.thing)
                 }
-                if let strength = Self.cleanedStrength(judgement.strength), !good.contains(strength) {
-                    good.append(strength)
+                if let strength = Self.cleanedStrength(judgement.strength) {
+                    sectionStrength = strength
+                    if !good.contains(strength) { good.append(strength) }
                 }
             }
+            issues = memory.reordered(issues, keeping: shownIssue)
 
-            debugText = analysis.debugDescription + "\n" + modelNote + "\ndone: " + memorySentence
+            debugText = analysis.debugDescription + "\n" + modelNote + "\ndone: " + memory.sentence
             publish(
                 top: issues.first,
                 next: issues.dropFirst().first,
                 remaining: issues.count,
                 good: good,
+                details: details,
                 topic: topic,
                 styles: styles,
                 analysis: analysis
@@ -362,22 +474,19 @@ final class PhotoCoach {
 
     // MARK: - Sections and memory
 
-    /// One short sentence about what the user has already fixed.
-    private var memorySentence: String {
-        guard !accomplished.isEmpty else { return "nothing yet" }
-        return "the user has already " + accomplished.formatted(.list(type: .and))
-    }
-
-    /// Ends the current section: remembers what was fixed and throws the model's context away.
+    /// Ends the current section: remembers what was done, so the next session starts from there.
     private func endSection(fixed issue: CoachIssue? = nil) {
         if let issue {
-            accomplished.removeAll { $0 == issue.accomplishment }
-            accomplished.append(issue.accomplishment)
-            accomplished = Array(accomplished.suffix(Self.memoryLength))
+            memory.noteFixed(issue)
+        }
+        if let sectionStrength {
+            memory.noteStrength(sectionStrength)
         }
         session = nil
-        sessionTurns = 0
         shownIssue = nil
+        sectionDetail = nil
+        usesAlternative = false
+        sectionStrength = nil
         sectionProgress = 0
         sectionIssueCount = 1
     }
@@ -388,6 +497,7 @@ final class PhotoCoach {
         next: CoachIssue?,
         remaining: Int,
         good: [String],
+        details: [CoachIssue: IssueDetail],
         topic: AdviceTopic,
         styles: Set<CompositionGuide>,
         analysis: SceneAnalysis
@@ -426,6 +536,14 @@ final class PhotoCoach {
         sectionRecommendation = nil
         if isNewSection {
             sectionIssueCount = max(remaining, 1)
+            // The usual tip didn't work in earlier sections, so try a different one.
+            usesAlternative = memory.timesShown(top) >= CoachMemory.repeatLimit
+                && top.alternativeAdvice(for: topic) != nil
+            memory.noteShown(top)
+            sectionDetail = details[top]
+        } else if let detail = details[top], detail.region != sectionDetail?.region {
+            // The problem has moved, so the direction has to change too.
+            sectionDetail = detail
         }
         // The ring fills as the issues in the section are cleared.
         sectionProgress = max(
@@ -433,12 +551,19 @@ final class PhotoCoach {
             1 - Double(remaining) / Double(max(sectionIssueCount, remaining, 1))
         )
 
-        let advice = top.advice(for: topic, analysis: analysis)
+        let usual = top.advice(for: topic, analysis: analysis, detail: sectionDetail)
+        let advice = usesAlternative ? (top.alternativeAdvice(for: topic) ?? usual) : usual
         var improve = [advice.action]
         if let next {
-            improve.append(next.advice(for: topic, analysis: analysis).action)
+            improve.append(next.advice(for: topic, analysis: analysis, detail: details[next]).action)
         }
-        feedback = PhotoFeedback(good: Array(good.prefix(2)), improve: improve, why: advice.why, isGoodEnough: false)
+        feedback = PhotoFeedback(
+            good: Array(good.prefix(2)),
+            improve: improve,
+            why: advice.why,
+            symbol: advice.symbol,
+            isGoodEnough: false
+        )
     }
 
     /// Suggests what to practise once the current section is complete.
@@ -470,7 +595,8 @@ final class PhotoCoach {
         from candidates: [CompositionGuide]
     ) -> CompositionGuide? {
         guard !candidates.isEmpty else { return nil }
-        var preferred: [CompositionGuide] = []
+        // Styles that suit this kind of scene come first.
+        var preferred = analysis.scene.suitedStyles
         if !analysis.faces.isEmpty { preferred.append(.halfBodyPortrait) }
         if let pitch = analysis.pitch {
             if pitch < -55 { preferred.append(.tableTop90) }
@@ -501,19 +627,35 @@ final class PhotoCoach {
 
     // MARK: - The model
 
+    /// Worked answers for the model. Only those whose issue is allowed for the topic are shown,
+    /// so it isn't nudged toward an issue it can't use.
+    private static let examples: [(issue: VisualIssue, text: String)] = [
+        (.clutteredBackground, #"A person with a lamp post right behind their head: issue clutteredBackground, region background, thing "the lamp post", strength "Soft, even light"."#),
+        (.distractingEdges, #"A bright sign at the right edge: issue distractingEdges, region right, thing "the sign", strength "Clear subject"."#),
+        (.linesDontLead, #"A road running off the left side instead of toward the house: issue linesDontLead, region left, thing "the road", strength "Strong lines"."#),
+        (.subjectCutOff, #"A tree cut off at the top: issue subjectCutOff, region top, thing "the tree", strength "Rich colours"."#),
+        (.flatAngle, #"A flower shot from standing height: issue flatAngle, region whole, thing "the flower", strength "Bright colours"."#),
+    ]
+    private static let noneExample = #"A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background"."#
+
     private func makeSession(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> LanguageModelSession {
-        LanguageModelSession(instructions: """
+        let allowed = VisualIssue.allCases.filter { $0 != .none && CoachRules.allows($0, for: topic, styles: styles) }
+        let examples = Self.examples.filter { allowed.contains($0.issue) }.prefix(3).map(\.text) + [Self.noneExample]
+        let praised = memory.recentStrengths.isEmpty
+            ? ""
+            : " Already praised: \(memory.recentStrengths.joined(separator: ", ")); praise something else if you can."
+        return LanguageModelSession(instructions: """
             You are a photography teacher looking at a beginner's live camera view. \
-            Judge only \(focus(for: topic, styles: styles)). \
-            Pick the single biggest problem from the list, or none if this part of the photo already works. \
-            Also name one thing that already works, in 2 to 5 words. \
-            The camera's measurements are given with each photo and are always correct.
+            Judge only \(focus(for: topic, styles: styles)).
+            Pick the single biggest problem using only these issues: \(allowed.map(\.rawValue).joined(separator: ", ")). \
+            Pick none if this part of the photo already works.
+            Say where in the frame the problem is, and name the thing causing it in 1 to 3 plain words.
+            Also name one thing that already works, in 2 to 5 words.\(praised)
+            Brightness, sharpness and tilt are measured by the camera and handled separately, so never report them. \
+            The measurements given with each photo are always correct.
             Examples:
-            A person in front of a busy street: issue clutteredBackground, strength "Clear subject".
-            A tree cut off at the top edge: issue subjectCutOff, strength "Nice soft light".
-            A small boat in a huge empty sea: issue tooMuchEmptySpace, strength "Calm colours".
-            A tidy portrait against a plain wall: issue none, strength "Clean background".
-            Progress so far: \(memorySentence). Don't bring those up again unless they are clearly wrong now.
+            \(examples.joined(separator: "\n"))
+            So far: \(memory.sentence) Don't pick what was already fixed or pointed out unless it is clearly the biggest problem now.
             """)
     }
 
@@ -547,11 +689,10 @@ final class PhotoCoach {
         styles: Set<CompositionGuide>,
         analysis: SceneAnalysis
     ) async -> CoachJudgement? {
-        if session == nil || sessionTurns >= Self.maxTurnsPerSession {
-            session = makeSession(for: topic, styles: styles)
-            sessionTurns = 0
-        }
-        guard let session else { return nil }
+        // A fresh session every time: earlier images would only fill the small context window,
+        // and the memory sentence in the instructions carries forward what matters.
+        let session = self.session ?? makeSession(for: topic, styles: styles)
+        self.session = nil
         do {
             let response = try await session.respond(
                 generating: CoachJudgement.self,
@@ -559,13 +700,13 @@ final class PhotoCoach {
                 options: GenerationOptions(samplingMode: .greedy)
             ) {
                 "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
+                if analysis.scene != .object {
+                    analysis.scene.coachingHint
+                }
                 Attachment(frame)
             }
-            sessionTurns += 1
             return response.content
         } catch {
-            // Most often the context window is full; start a fresh session next time.
-            self.session = nil
             if !Task.isCancelled {
                 print("Coach error: \(error)")
             }
@@ -592,9 +733,10 @@ final class PhotoCoach {
         )
     }
 
-    /// The newest live camera frame. The Simulator has no camera, so it uses the test photo instead.
+    /// The newest live camera frame, cropped to the viewfinder. The Simulator has no camera,
+    /// so it uses the test photo instead.
     private func currentFrame(from camera: CameraManager) -> CGImage? {
-        if let live = camera.frameGrabber.latestImage() {
+        if let live = camera.frameGrabber.latestImage(portraitAspect: camera.aspectRatio.portraitAspect) {
             return live
         }
         #if targetEnvironment(simulator)
@@ -650,8 +792,29 @@ struct CoachFeedbackView: View {
                 section(title: "Good", items: feedback.good, systemImage: "checkmark", tint: .green)
             }
 
-            if !feedback.isGoodEnough, !feedback.improve.isEmpty {
-                section(title: "Improve", items: feedback.improve, systemImage: "arrow.right", tint: .yellow)
+            // One thing to do at a time, so a beginner isn't juggling instructions.
+            if !feedback.isGoodEnough, let action = feedback.improve.first {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Do this now")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.yellow)
+                        .textCase(.uppercase)
+
+                    Label {
+                        Text(action)
+                            .foregroundStyle(.white)
+                    } icon: {
+                        Image(systemName: feedback.symbol ?? "arrow.right")
+                            .foregroundStyle(.yellow)
+                    }
+                    .font(.headline)
+
+                    if feedback.improve.count > 1 {
+                        Text("Then: \(feedback.improve[1])")
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
             }
 
             // The photography idea behind the advice, so the user learns as they shoot.

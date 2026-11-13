@@ -32,35 +32,186 @@ nonisolated struct CameraReadings: Sendable, Equatable {
     }
 }
 
-/// Reads how the phone is held, like the level in the Camera app.
-final class PhoneAttitude {
+/// Reads how the phone is held, like the level in the Camera app. Gravity is smoothed so
+/// normal hand jitter doesn't make the advice flicker.
+nonisolated final class PhoneAttitude: @unchecked Sendable {
     private let manager = CMMotionManager()
+    private let queue = OperationQueue()
+    private let lock = NSLock()
+    private var gravity: CMAcceleration?
+    private var recentRotation: [Double] = []
+    private var users = 0
 
+    /// How far each new sample moves the smoothed gravity, 0...1. Lower is steadier but slower.
+    private static let smoothing = 0.15
+    /// Samples the shake reading averages: about half a second at 30 updates a second.
+    private static let shakeWindow = 15
+
+    init() {
+        queue.maxConcurrentOperationCount = 1
+    }
+
+    /// Starts updates. Each call must be balanced by `stop()`. Updates only stop with the last
+    /// user, so a coach task that is restarting can't switch motion off for the one replacing it.
     func start() {
-        guard manager.isDeviceMotionAvailable, !manager.isDeviceMotionActive else { return }
-        manager.deviceMotionUpdateInterval = 0.2
-        manager.startDeviceMotionUpdates()
+        lock.lock()
+        users += 1
+        let isFirst = users == 1
+        lock.unlock()
+        guard isFirst, manager.isDeviceMotionAvailable else { return }
+        manager.deviceMotionUpdateInterval = 1.0 / 30
+        manager.startDeviceMotionUpdates(to: queue) { [weak self] motion, _ in
+            guard let self, let motion else { return }
+            self.add(motion)
+        }
     }
 
     func stop() {
-        manager.stopDeviceMotionUpdates()
+        lock.lock()
+        users = max(0, users - 1)
+        let isLast = users == 0
+        if isLast {
+            gravity = nil
+            recentRotation = []
+        }
+        lock.unlock()
+        if isLast { manager.stopDeviceMotionUpdates() }
+    }
+
+    private func add(_ motion: CMDeviceMotion) {
+        let rate = motion.rotationRate
+        let speed = (rate.x * rate.x + rate.y * rate.y + rate.z * rate.z).squareRoot()
+        let new = motion.gravity
+        lock.lock()
+        defer { lock.unlock() }
+        if let old = gravity {
+            let a = Self.smoothing
+            gravity = CMAcceleration(
+                x: old.x + (new.x - old.x) * a,
+                y: old.y + (new.y - old.y) * a,
+                z: old.z + (new.z - old.z) * a
+            )
+        } else {
+            gravity = new
+        }
+        recentRotation.append(speed)
+        if recentRotation.count > Self.shakeWindow { recentRotation.removeFirst() }
+    }
+
+    private var smoothedGravity: CMAcceleration? {
+        lock.lock()
+        defer { lock.unlock() }
+        return gravity
     }
 
     /// Degrees the back camera points above (+) or below (-) the horizon.
     var pitch: Double? {
-        guard let gravity = manager.deviceMotion?.gravity else { return nil }
-        // The back camera looks along the phone's -z axis, so its elevation is asin(gravity.z).
-        return asin(min(max(gravity.z, -1), 1)) * 180 / .pi
+        smoothedGravity.map { Self.pitch(gravityZ: $0.z) }
     }
 
     /// Degrees the phone is rotated away from level, in portrait or landscape.
     var tilt: Double? {
-        guard let gravity = manager.deviceMotion?.gravity else { return nil }
+        smoothedGravity.flatMap { Self.tilt(x: $0.x, y: $0.y, z: $0.z) }
+    }
+
+    /// How much the phone has been turning over the last half second, in radians a second.
+    /// Near 0 when held still; above `CoachRules.shakeThreshold` the photo is likely to blur.
+    var shake: Double? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !recentRotation.isEmpty else { return nil }
+        return recentRotation.reduce(0, +) / Double(recentRotation.count)
+    }
+
+    static func pitch(gravityZ z: Double) -> Double {
+        // The back camera looks along the phone's -z axis, so its elevation is asin(gravity.z).
+        asin(min(max(z, -1), 1)) * 180 / .pi
+    }
+
+    static func tilt(x: Double, y: Double, z: Double) -> Double? {
         // A phone pointing almost straight up or down has no meaningful level.
-        guard abs(gravity.z) < 0.8 else { return nil }
-        let roll = atan2(gravity.x, -gravity.y) * 180 / .pi
+        guard abs(z) < 0.8 else { return nil }
+        // Positive when the phone is turned clockwise.
+        let roll = atan2(x, -y) * 180 / .pi
         // Measure from the nearest of portrait or landscape.
         return roll - (roll / 90).rounded() * 90
+    }
+}
+
+/// What kind of photo the camera is looking at. Good advice depends on it: food wants a high
+/// angle and window light, a landscape wants a level horizon on a third, and so on.
+nonisolated enum SceneType: String, CaseIterable, Sendable {
+    case people, food, landscape, city, nature, object
+
+    var title: String {
+        switch self {
+        case .people: "People"
+        case .food: "Food"
+        case .landscape: "Landscape"
+        case .city: "City"
+        case .nature: "Nature"
+        case .object: "Object"
+        }
+    }
+
+    /// One line of photography theory for the model, so it judges the photo like this kind of shot.
+    var coachingHint: String {
+        switch self {
+        case .people: "People look best shot at eye level, with the eyes sharp and a little space above the head."
+        case .food: "Food looks best from 45 degrees or straight above, in soft side light, with a clean plate edge."
+        case .landscape: "Landscapes need a level horizon on a third line, and some foreground to give depth."
+        case .city: "City shots need straight vertical lines, with streets and edges used as leading lines."
+        case .nature: "Nature shots work best close to the subject with a simple background."
+        case .object: "An object stands out against a clean background, filling the frame."
+        }
+    }
+
+    /// Words in Vision's classification labels that point to each kind of scene.
+    private static let keywords: [SceneType: Set<String>] = [
+        .people: ["people", "person", "adult", "child", "portrait", "crowd", "baby"],
+        .food: ["food", "dessert", "fruit", "vegetable", "drink", "meal", "baked", "bread", "cake", "pizza",
+                "sushi", "salad", "coffee", "beverage", "breakfast", "sandwich", "pasta", "plate", "dish"],
+        .landscape: ["landscape", "mountain", "beach", "shore", "sky", "sunset", "sunrise", "desert", "lake",
+                     "ocean", "sea", "hill", "valley", "field", "horizon", "waterfall", "cloud", "snow"],
+        .city: ["cityscape", "city", "building", "skyscraper", "street", "structure", "bridge", "road",
+                "vehicle", "car", "architecture", "tower", "house", "downtown", "urban"],
+        .nature: ["plant", "flower", "tree", "foliage", "forest", "animal", "bird", "insect", "leaf",
+                  "garden", "grass", "mammal", "cat", "dog", "butterfly"],
+    ]
+
+    /// Below this total confidence the scene isn't clear, so it counts as a plain object.
+    static let minimumScore: Float = 0.3
+
+    /// Picks the scene from Vision's labels (identifier and confidence). A visible face always means people.
+    static func classify(labels: [(identifier: String, confidence: Float)], faces: [CGRect]) -> SceneType {
+        if faces.contains(where: { $0.width * $0.height > 0.02 }) { return .people }
+        var scores: [SceneType: Float] = [:]
+        for label in labels {
+            let words = Set(label.identifier.lowercased().split(whereSeparator: { $0 == "_" || $0 == " " }).map(String.init))
+            for (type, keys) in keywords where !words.isDisjoint(with: keys) {
+                scores[type, default: 0] += label.confidence
+            }
+        }
+        // Ties go to the earlier case, so the result is stable.
+        var best = SceneType.object
+        var bestScore: Float = 0
+        for type in allCases {
+            let score = scores[type] ?? 0
+            if score > bestScore {
+                best = type
+                bestScore = score
+            }
+        }
+        return bestScore >= minimumScore ? best : .object
+    }
+
+    /// The most common scene in recent frames, with ties going to the newest, so the label doesn't flip.
+    static func smoothed(_ recent: [SceneType]) -> SceneType? {
+        guard let newest = recent.last else { return nil }
+        let counts = Dictionary(recent.map { ($0, 1) }, uniquingKeysWith: +)
+        let top = counts.values.max() ?? 0
+        if counts[newest] == top { return newest }
+        return recent.reversed().first { counts[$0] == top }
     }
 }
 
@@ -84,6 +235,10 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// See `PhoneAttitude`. Nil when there is no motion data, e.g. on a still photo.
     var pitch: Double?
     var tilt: Double?
+    /// See `PhoneAttitude.shake`. Nil without motion data.
+    var shake: Double? = nil
+    /// What kind of photo this looks like.
+    var scene: SceneType = .object
 
     /// The subject is clearly darker than what's behind it.
     var isBacklit: Bool {
@@ -94,6 +249,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// Short facts for the model and the debug overlay.
     var summary: String {
         var facts: [String] = []
+        if scene != .object { facts.append("this looks like a \(scene.title.lowercased()) photo") }
         facts.append("overall brightness \(Self.percent(brightness))")
         if highlightClip > 0.02 { facts.append("\(Self.percent(highlightClip)) of the frame is blown out to white") }
         if shadowClip > 0.05 { facts.append("\(Self.percent(shadowClip)) is pure black") }
@@ -101,6 +257,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         facts.append(subjectSharpness < CoachRules.softThreshold ? "the subject looks soft" : "the subject is sharp")
         if !faces.isEmpty { facts.append("\(faces.count) face\(faces.count == 1 ? "" : "s")") }
         if let tilt, abs(tilt) >= CoachRules.tiltThreshold { facts.append("the phone is tilted \(Int(abs(tilt).rounded()))°") }
+        if let shake, shake >= CoachRules.shakeThreshold { facts.append("the phone is moving") }
         return facts.joined(separator: "; ")
     }
 
@@ -110,9 +267,9 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         return [
             String(format: "bright %.2f  clipHi %.3f  clipLo %.3f", brightness, highlightClip, shadowClip),
             String(format: "subj %.2f  bg %.2f  sharp %.0f", subjectBrightness ?? -1, backgroundBrightness ?? -1, subjectSharpness),
-            "subject \(subjectText)  faces \(faces.count)",
+            "subject \(subjectText)  faces \(faces.count)  scene \(scene.rawValue)",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
-            String(format: "pitch %.0f°  tilt %.1f°", pitch ?? 0, tilt ?? 0),
+            String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
         ].joined(separator: "\n")
     }
 
@@ -128,11 +285,13 @@ extension SceneAnalysis {
         _ image: CGImage,
         readings: CameraReadings = CameraReadings(),
         pitch: Double? = nil,
-        tilt: Double? = nil
+        tilt: Double? = nil,
+        shake: Double? = nil
     ) async -> SceneAnalysis? {
         guard let gray = GrayImage(image) else { return nil }
         let subject = SubjectFinder.subject(in: image)
         let faces = detectFaces(in: image)
+        let scene = SceneType.classify(labels: classify(image), faces: faces)
 
         // Without a subject, judge sharpness and brightness in the middle of the frame.
         let region = subject ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
@@ -150,15 +309,25 @@ extension SceneAnalysis {
             faces: faces,
             readings: readings,
             pitch: pitch,
-            tilt: tilt
+            tilt: tilt,
+            shake: shake,
+            scene: scene
         )
+    }
+
+    /// Vision's on-device labels for the frame, keeping only ones it is reasonably sure of.
+    private nonisolated static func classify(_ image: CGImage) -> [(identifier: String, confidence: Float)] {
+        let request = VNClassifyImageRequest()
+        request.runOnCPUInSimulator()
+        guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return [] }
+        return (request.results ?? [])
+            .filter { $0.confidence >= 0.3 }
+            .map { ($0.identifier, $0.confidence) }
     }
 
     private nonisolated static func detectFaces(in image: CGImage) -> [CGRect] {
         let request = VNDetectFaceRectanglesRequest()
-        #if targetEnvironment(simulator)
-        request.usesCPUOnly = true
-        #endif
+        request.runOnCPUInSimulator()
         guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return [] }
         // Vision measures from the bottom left, the screen from the top left.
         return (request.results ?? []).map {

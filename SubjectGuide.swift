@@ -8,6 +8,7 @@
 import Foundation
 import AVFoundation
 import Vision
+import CoreML
 import SwiftUI
 
 /// Finds the most eye-catching thing in a frame.
@@ -23,14 +24,26 @@ nonisolated enum SubjectFinder {
 
     private static func find(with handler: VNImageRequestHandler) -> CGRect? {
         let request = VNGenerateAttentionBasedSaliencyImageRequest()
-        #if targetEnvironment(simulator)
-        // The Simulator can't run Vision on the Neural Engine, so use the CPU there.
-        request.usesCPUOnly = true
-        #endif
+        request.runOnCPUInSimulator()
         guard (try? handler.perform([request])) != nil,
               let box = request.results?.first?.salientObjects?.first?.boundingBox else { return nil }
         // Vision measures from the bottom left, the screen from the top left.
         return CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+    }
+}
+
+extension VNRequest {
+    /// The Simulator can't run Vision on the Neural Engine, so requests use the CPU there.
+    /// Does nothing on a device.
+    nonisolated func runOnCPUInSimulator() {
+        #if targetEnvironment(simulator)
+        let cpu = MLComputeDevice.allComputeDevices.first {
+            if case .cpu = $0 { true } else { false }
+        }
+        if let cpu {
+            setComputeDevice(cpu, for: .main)
+        }
+        #endif
     }
 }
 
