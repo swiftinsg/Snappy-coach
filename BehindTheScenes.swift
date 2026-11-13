@@ -376,9 +376,11 @@ struct CoachTipView: View {
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
             .multilineTextAlignment(.center)
+            // Two lines at most, so a long tip doesn't cover more of the viewfinder.
+            .lineLimit(2)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
+            .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 18))
             .accessibilityLabel("Tip: \(text)")
     }
 }
