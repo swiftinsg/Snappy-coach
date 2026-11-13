@@ -222,6 +222,8 @@ struct CompositionPicker: View {
         let reason = unavailable[guide]
         let isUnavailable = reason != nil
         let isRecommended = guide == recommended
+        // Greyed out like a disabled control, but still tappable so it can explain why.
+        let isGreyedOut = isUnavailable && !isSelected
         return Button {
             toggle(guide)
         } label: {
@@ -237,8 +239,8 @@ struct CompositionPicker: View {
                 Text(guide.title)
             }
             .font(.footnote.weight(.semibold))
-            .foregroundStyle(isSelected ? .black : .white.opacity(isUnavailable ? 0.45 : 1))
-            .shadow(color: .black.opacity(isSelected ? 0 : 0.5), radius: 2)
+            .foregroundStyle(isSelected ? .black : (isUnavailable ? Color.gray : .white))
+            .shadow(color: .black.opacity(isSelected || isUnavailable ? 0 : 0.5), radius: 2)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .glassEffect(
@@ -254,6 +256,8 @@ struct CompositionPicker: View {
                         .strokeBorder(.yellow.opacity(0.8), lineWidth: 1)
                 }
             }
+            .saturation(isGreyedOut ? 0 : 1)
+            .opacity(isGreyedOut ? 0.55 : (isUnavailable ? 0.7 : 1))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
