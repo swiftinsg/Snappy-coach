@@ -11,6 +11,7 @@ struct AutoRenderingView: View {
     @State private var controls = PhotoControlsModel()
     @State private var camera = CameraManager()
     @State private var coach = PhotoCoach()
+    @State private var subjectGuide = SubjectGuide()
     @State private var gallery = PhotoGallery()
     @State private var isGalleryPresented = false
     /// The photo just taken, which opens the review screen once it has been saved.
@@ -23,6 +24,11 @@ struct AutoRenderingView: View {
     /// Briefly blacks out the screen when a photo is taken, like the Camera app.
     @State private var isShutterBlinking = false
 
+    /// The green box is only useful when the topic is about where things sit in the frame.
+    private var showsSubjectBox: Bool {
+        adviceTopic == .subjectPosition || adviceTopic == .composition
+    }
+
     var body: some View {
         ZStack {
             Color.black
@@ -32,6 +38,12 @@ struct AutoRenderingView: View {
             // around it, so what you see matches the photo that's saved.
             CameraPreview(session: camera.session)
                 .aspectRatio(camera.aspectRatio.portraitAspect, contentMode: .fit)
+                // The green box shows where the subject should be.
+                .overlay {
+                    if showsSubjectBox, let target = subjectGuide.target {
+                        SubjectTargetOverlay(target: target, frameAspect: subjectGuide.frameAspect)
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea()
                 .animation(.snappy, value: camera.aspectRatio)
@@ -134,7 +146,11 @@ struct AutoRenderingView: View {
         }
         // Restarts whenever the advice topic changes, so the tips follow the dropdown.
         .task(id: adviceTopic) {
-            await coach.run(camera: camera, topic: adviceTopic)
+            await coach.run(camera: camera, topic: adviceTopic, guide: subjectGuide)
+        }
+        // The box follows the topic, and the Centre style moves it to the middle.
+        .task(id: "\(adviceTopic.rawValue)-\(compositionGuide.rawValue)") {
+            await subjectGuide.run(camera: camera, enabled: showsSubjectBox, centred: compositionGuide == .centre)
         }
         .task {
             await gallery.load()

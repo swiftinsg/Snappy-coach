@@ -22,6 +22,9 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     private let lock = NSLock()
     private let context = CIContext()
     private var latest: CVPixelBuffer?
+    private var tracksSubject = false
+    private var subject: (box: CGRect, aspect: CGFloat)?
+    private var lastDetection = Date.distantPast
 
     override init() {
         super.init()
@@ -33,7 +36,32 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         guard let buffer = sampleBuffer.imageBuffer else { return }
         lock.lock()
         latest = buffer
+        let tracking = tracksSubject
         lock.unlock()
+
+        // Looking for the subject costs a little, so only do it when the green box is on.
+        guard tracking, Date().timeIntervalSince(lastDetection) > 0.3 else { return }
+        lastDetection = Date()
+        // Frames arrive rotated by 90°, so the upright aspect is height over width.
+        let aspect = CGFloat(CVPixelBufferGetHeight(buffer)) / CGFloat(CVPixelBufferGetWidth(buffer))
+        guard let box = SubjectFinder.subject(in: buffer, orientation: .right) else { return }
+        lock.lock()
+        subject = (box, aspect)
+        lock.unlock()
+    }
+
+    func setTracksSubject(_ on: Bool) {
+        lock.lock()
+        tracksSubject = on
+        if !on { subject = nil }
+        lock.unlock()
+    }
+
+    /// The main subject's box in a recent frame, while tracking is on.
+    func latestSubject() -> (box: CGRect, aspect: CGFloat)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return subject
     }
 
     /// The newest frame, turned upright and shrunk so the model can read it quickly.
@@ -158,20 +186,47 @@ final class PhotoCoach {
     }
 
     /// Runs until the task is cancelled. Restart it (with a new topic) when the dropdown changes.
-    func run(camera: CameraManager, topic: AdviceTopic) async {
+    func run(camera: CameraManager, topic: AdviceTopic, guide: SubjectGuide) async {
         feedback = nil
         notice = nil
+
+        // Where the subject sits is geometry, so the green box decides and the coach reads it out.
+        let usesBox = topic == .subjectPosition || topic == .composition
+        var modelIsAvailable = true
         if case .unavailable = SystemLanguageModel.default.availability {
-            notice = "The coach needs Apple Intelligence"
-            return
+            modelIsAvailable = false
+            if !usesBox {
+                notice = "The coach needs Apple Intelligence"
+                return
+            }
         }
+
         while !Task.isCancelled {
+            if usesBox, let target = guide.target {
+                feedback = Self.positionFeedback(for: target)
+                try? await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+            // Subject Position has no box to read yet, and the model can't judge it alone.
+            if topic == .subjectPosition || !modelIsAvailable {
+                feedback = nil
+                try? await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+
             try? await Task.sleep(for: Self.interval)
             guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
             if let answer = await ask(about: topic, image: frame), !Task.isCancelled {
                 feedback = answer
             }
         }
+    }
+
+    private static func positionFeedback(for placement: SubjectTarget) -> PhotoFeedback {
+        if placement.isAligned {
+            return PhotoFeedback(good: ["Subject in the green box"], improve: [], isGoodEnough: true)
+        }
+        return PhotoFeedback(good: [], improve: placement.cameraAdvice, isGoodEnough: false)
     }
 
     /// The newest live camera frame. The Simulator has no camera, so it uses the test photo instead.
@@ -186,7 +241,7 @@ final class PhotoCoach {
         #endif
     }
 
-    private static func testPhoto() -> CGImage? {
+    static func testPhoto() -> CGImage? {
         guard let photo = UIImage(named: "test photo") else { return nil }
         let scale = min(1, 1024 / max(photo.size.width, photo.size.height))
         let size = CGSize(width: photo.size.width * scale, height: photo.size.height * scale)
