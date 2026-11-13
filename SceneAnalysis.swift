@@ -109,6 +109,12 @@ nonisolated final class PhoneAttitude: @unchecked Sendable {
         smoothedGravity.map { Self.pitch(gravityZ: $0.z) }
     }
 
+    /// Degrees the phone is turned from upright portrait, clockwise positive. Nil when it points
+    /// almost straight up or down. Used to draw the level, which also works held sideways.
+    var roll: Double? {
+        smoothedGravity.flatMap { abs($0.z) < 0.8 ? atan2($0.x, -$0.y) * 180 / .pi : nil }
+    }
+
     /// Degrees the phone is rotated away from level, in portrait or landscape.
     var tilt: Double? {
         smoothedGravity.flatMap { Self.tilt(x: $0.x, y: $0.y, z: $0.z) }

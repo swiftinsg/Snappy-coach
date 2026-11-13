@@ -63,18 +63,21 @@ enum SubjectPlacement: Equatable {
 struct SubjectTarget: Equatable {
     let subject: CGRect
     let target: CGRect
+    /// Close enough by hand. Decided when the target is made, so it can depend on the last result.
+    let isAligned: Bool
 
     /// How close the centres must be, as a fraction of the frame, to count as lined up.
-    private static let tolerance: CGFloat = 0.06
+    /// Hand-held framing is never exact, so close enough counts.
+    static let tolerance: CGFloat = 0.10
+    /// Once lined up, the subject stays lined up until it drifts this far, so the box doesn't flicker.
+    static let holdTolerance: CGFloat = 0.15
     /// Smallest shift along one axis that is worth telling the person about.
-    private static let axisThreshold: CGFloat = 0.04
-
-    var isAligned: Bool { hypot(dx, dy) < Self.tolerance }
+    private static let axisThreshold: CGFloat = 0.06
 
     /// How close the subject is to the target box, 0...1. Reaches 1 once aligned.
     var progress: Double {
         guard !isAligned else { return 1 }
-        return max(0.1, 1 - Double(hypot(dx, dy)) / 0.4)
+        return max(0.1, 1 - Double(hypot(dx, dy) - Self.tolerance) / 0.4)
     }
 
     /// How far the subject has to move inside the frame. Positive is right or down.
@@ -82,7 +85,8 @@ struct SubjectTarget: Equatable {
     private var dy: CGFloat { target.midY - subject.midY }
 
     /// Puts the target where the chosen composition style wants the subject.
-    static func make(subject: CGRect, placement: SubjectPlacement) -> SubjectTarget? {
+    /// `wasAligned` is the last result, so a lined-up subject gets the looser `holdTolerance`.
+    static func make(subject: CGRect, placement: SubjectPlacement, wasAligned: Bool = false) -> SubjectTarget? {
         // A subject that fills the frame can't be placed anywhere else.
         guard subject.width < 0.75, subject.height < 0.75 else { return nil }
 
@@ -107,9 +111,12 @@ struct SubjectTarget: Equatable {
 
         let x = min(max(point.x - subject.width / 2, 0), 1 - subject.width)
         let y = min(max(point.y - subject.height / 2, 0), 1 - subject.height)
+        let target = CGRect(x: x, y: y, width: subject.width, height: subject.height)
+        let distance = hypot(target.midX - subject.midX, target.midY - subject.midY)
         return SubjectTarget(
             subject: subject,
-            target: CGRect(x: x, y: y, width: subject.width, height: subject.height)
+            target: target,
+            isAligned: distance < (wasAligned ? holdTolerance : tolerance)
         )
     }
 
@@ -155,7 +162,11 @@ final class SubjectGuide {
         while !Task.isCancelled {
             if let found = latestSubject(from: camera) {
                 frameAspect = found.aspect
-                target = SubjectTarget.make(subject: smooth(found.box), placement: placement)
+                target = SubjectTarget.make(
+                    subject: smooth(found.box),
+                    placement: placement,
+                    wasAligned: target?.isAligned ?? false
+                )
             }
             try? await Task.sleep(for: .milliseconds(300))
         }

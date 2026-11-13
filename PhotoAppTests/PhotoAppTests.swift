@@ -118,12 +118,28 @@ struct CoachRulesTests {
     }
 
     @Test func tiltWarningStaysUntilClearlyLevel() {
-        #expect(CoachRules.issues(for: .composition, in: scene(tilt: 3)).contains(.phoneTilted))
-        // 1.5° is too small to start a warning, but not level enough to clear one.
-        #expect(!CoachRules.issues(for: .composition, in: scene(tilt: 1.5)).contains(.phoneTilted))
-        #expect(CoachRules.issues(for: .composition, in: scene(tilt: 1.5), tiltShown: true).contains(.phoneTilted))
-        #expect(!CoachRules.issues(for: .composition, in: scene(tilt: 0.5), tiltShown: true).contains(.phoneTilted))
-        #expect(!CoachRules.strengths(for: .composition, in: scene(tilt: 1.5), tiltShown: true).contains("Phone is level"))
+        #expect(CoachRules.issues(for: .composition, in: scene(tilt: 5)).contains(.phoneTilted))
+        // 3.5° is too small to start a warning, but not level enough to clear one.
+        #expect(!CoachRules.issues(for: .composition, in: scene(tilt: 3.5)).contains(.phoneTilted))
+        #expect(CoachRules.issues(for: .composition, in: scene(tilt: 3.5), tiltShown: true).contains(.phoneTilted))
+        // Close enough by hand counts as level; it never asks for a perfect 1°.
+        #expect(!CoachRules.issues(for: .composition, in: scene(tilt: 2.5), tiltShown: true).contains(.phoneTilted))
+        #expect(!CoachRules.strengths(for: .composition, in: scene(tilt: 3.5), tiltShown: true).contains("Phone is level"))
+    }
+
+    @Test func subjectBoxForgivesSmallOffsetsAndHoldsOnceAligned() {
+        // Target is the centre; subjects are offset to the right of it.
+        func target(offset: CGFloat, wasAligned: Bool) -> SubjectTarget? {
+            SubjectTarget.make(
+                subject: CGRect(x: 0.4 + offset, y: 0.4, width: 0.2, height: 0.2),
+                placement: .centre,
+                wasAligned: wasAligned
+            )
+        }
+        #expect(target(offset: 0.08, wasAligned: false)?.isAligned == true)
+        #expect(target(offset: 0.12, wasAligned: false)?.isAligned == false)
+        #expect(target(offset: 0.12, wasAligned: true)?.isAligned == true)
+        #expect(target(offset: 0.2, wasAligned: true)?.isAligned == false)
     }
 
     @Test func tiltAdviceGivesDegrees() {

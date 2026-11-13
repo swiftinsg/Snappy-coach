@@ -382,10 +382,10 @@ struct CoachJudgement {
 nonisolated enum CoachRules {
     /// Below this the subject counts as soft. Measured on a 256-pixel-wide copy of the frame.
     static let softThreshold = 40.0
-    /// Degrees of tilt worth pointing out.
-    static let tiltThreshold = 2.5
-    /// Once tilt is being pointed out, it only counts as fixed below this, so it doesn't flicker.
-    static let tiltFixedThreshold = 1.0
+    /// Degrees of tilt worth pointing out. Nobody can hold a phone perfectly level, so small tilts are fine.
+    static let tiltThreshold = 4.0
+    /// Once tilt is being pointed out, it counts as fixed below this: close enough by hand, not perfect.
+    static let tiltFixedThreshold = 3.0
     /// Average turning speed, in radians a second, above which hand shake is likely to blur the photo.
     static let shakeThreshold = 0.25
 
@@ -446,8 +446,9 @@ nonisolated enum CoachRules {
         case .anglePerspective:
             if isTilted(a.tilt, alreadyShown: tiltShown) { found.append(.phoneTilted) }
             if let pitch = a.pitch {
-                if pitch < -30, !a.faces.isEmpty { found.append(.shootingDown) }
-                if pitch > 20 { found.append(.pointingUp) }
+                // Wide limits, so holding the phone near one doesn't flick the tip on and off.
+                if pitch < -35, !a.faces.isEmpty { found.append(.shootingDown) }
+                if pitch > 25 { found.append(.pointingUp) }
             }
         case .composition:
             if isTilted(a.tilt, alreadyShown: tiltShown) { found.append(.phoneTilted) }

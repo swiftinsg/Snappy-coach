@@ -185,6 +185,46 @@ struct CompositionGrid: View {
     }
 }
 
+// MARK: - Level
+
+/// A level like the Camera app's: two fixed marks with a line between them that follows the
+/// horizon. When the phone is level enough for the coach, the pieces join and turn green.
+/// Works held in portrait or sideways, and hides when the phone points straight up or down.
+struct CameraLevel: View {
+    let attitude: PhoneAttitude
+
+    var body: some View {
+        // Gravity is read on its own clock, much faster than the coach checks frames.
+        TimelineView(.periodic(from: .now, by: 1.0 / 30)) { _ in
+            if let roll = attitude.roll {
+                // Which way up the phone is held (portrait or sideways), and how far off level it is.
+                let base = (roll / 90).rounded() * 90
+                let tilt = roll - base
+                let isLevel = !CoachRules.isTilted(tilt, alreadyShown: true)
+                let tint: Color = isLevel ? .green : .white
+
+                HStack(spacing: 0) {
+                    Capsule().fill(tint).frame(width: 28, height: 2)
+                    Spacer().frame(width: isLevel ? 0 : 10)
+                    // The horizon turns the opposite way to the phone.
+                    Capsule().fill(tint).frame(width: 110, height: isLevel ? 2 : 1.5)
+                        .rotationEffect(.degrees(isLevel ? 0 : -tilt))
+                    Spacer().frame(width: isLevel ? 0 : 10)
+                    Capsule().fill(tint).frame(width: 28, height: 2)
+                }
+                .shadow(color: .black.opacity(0.5), radius: 1)
+                .rotationEffect(.degrees(-base))
+                .animation(.snappy, value: isLevel)
+                .accessibilityElement()
+                .accessibilityLabel(isLevel ? "Level" : "Tilted \(Int(abs(tilt).rounded())) degrees")
+            }
+        }
+        .allowsHitTesting(false)
+        .onAppear { attitude.start() }
+        .onDisappear { attitude.stop() }
+    }
+}
+
 // MARK: - Picker
 
 /// Horizontally scrolling row of composition styles, shown above the shutter.

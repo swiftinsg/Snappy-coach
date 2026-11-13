@@ -341,8 +341,11 @@ final class PhotoCoach {
     private static let modelInterval: Duration = .seconds(2)
     /// How often measured-only topics refresh. Measuring is cheap, so it can be quicker.
     private static let measureInterval: Duration = .seconds(1)
+    /// How long the model gets to judge a frame before the request is cancelled.
+    private static let modelTimeout: Duration = .seconds(8)
 
-    private let attitude = PhoneAttitude()
+    /// Shared with the on-screen level, so the line and the tilt advice always agree.
+    let attitude = PhoneAttitude()
     /// Raw scene labels from the last few checks, so one odd frame doesn't change the advice.
     private var recentScenes: [SceneType] = []
     private static let sceneHistory = 3
@@ -636,7 +639,10 @@ final class PhotoCoach {
         (.subjectCutOff, #"A tree cut off at the top: issue subjectCutOff, region top, thing "the tree", strength "Rich colours"."#),
         (.flatAngle, #"A flower shot from standing height: issue flatAngle, region whole, thing "the flower", strength "Bright colours"."#),
     ]
-    private static let noneExample = #"A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background"."#
+    private static let noneExample = """
+        A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background".
+        A cup slightly off the third line with a small plant at the edge: issue none, region whole, thing "", strength "Nice framing".
+        """
 
     private func makeSession(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> LanguageModelSession {
         let allowed = VisualIssue.allCases.filter { $0 != .none && CoachRules.allows($0, for: topic, styles: styles) }
@@ -647,8 +653,10 @@ final class PhotoCoach {
         return LanguageModelSession(instructions: """
             You are a photography teacher looking at a beginner's live camera view. \
             Judge only \(focus(for: topic, styles: styles)).
-            Pick the single biggest problem using only these issues: \(allowed.map(\.rawValue).joined(separator: ", ")). \
-            Pick none if this part of the photo already works.
+            A beginner holding a phone can't be perfect, so small imperfections are fine. \
+            Only report a problem a viewer would clearly notice in the finished photo, \
+            using only these issues: \(allowed.map(\.rawValue).joined(separator: ", ")). \
+            If the photo is close to right, pick none.
             Say where in the frame the problem is, and name the thing causing it in 1 to 3 plain words.
             Also name one thing that already works, in 2 to 5 words.\(praised)
             Brightness, sharpness and tilt are measured by the camera and handled separately, so never report them. \
@@ -694,18 +702,20 @@ final class PhotoCoach {
         let session = self.session ?? makeSession(for: topic, styles: styles)
         self.session = nil
         do {
-            let response = try await session.respond(
-                generating: CoachJudgement.self,
-                // Greedy sampling gives the same answer for the same scene, so the verdict doesn't flip.
-                options: GenerationOptions(samplingMode: .greedy)
-            ) {
-                "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
-                if analysis.scene != .object {
-                    analysis.scene.coachingHint
-                }
-                Attachment(frame)
+            // A stuck request is dropped, and this pass falls back to the measurements.
+            return try await withTimeout(Self.modelTimeout) {
+                try await session.respond(
+                    generating: CoachJudgement.self,
+                    // Greedy sampling gives the same answer for the same scene, so the verdict doesn't flip.
+                    options: GenerationOptions(samplingMode: .greedy)
+                ) {
+                    "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
+                    if analysis.scene != .object {
+                        analysis.scene.coachingHint
+                    }
+                    Attachment(frame)
+                }.content
             }
-            return response.content
         } catch {
             if !Task.isCancelled {
                 print("Coach error: \(error)")
@@ -758,6 +768,34 @@ final class PhotoCoach {
     }
 }
 
+/// A model request that took longer than allowed and was cancelled.
+struct ModelTimeoutError: Error {}
+
+/// Runs a model request, cancelling it if it takes longer than `limit`, so a stuck request
+/// can't hold up the coach. Throws `ModelTimeoutError` when it was cut short.
+func withTimeout<T: Sendable>(
+    _ limit: Duration,
+    _ operation: sending @escaping () async throws -> T
+) async throws -> T {
+    let request = Task { try await operation() }
+    let timer = Task {
+        try await Task.sleep(for: limit)
+        request.cancel()
+    }
+    defer { timer.cancel() }
+    return try await withTaskCancellationHandler {
+        do {
+            return try await request.value
+        } catch {
+            // Cancelled by the timer rather than by the caller: report it as a timeout.
+            if request.isCancelled, !Task.isCancelled { throw ModelTimeoutError() }
+            throw error
+        }
+    } onCancel: {
+        request.cancel()
+    }
+}
+
 /// Glass capsule showing the coach's latest tip over the viewfinder.
 struct CoachTipView: View {
     let text: String
@@ -767,8 +805,8 @@ struct CoachTipView: View {
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
             .multilineTextAlignment(.center)
-            // Two lines at most, so a long tip doesn't cover more of the viewfinder.
-            .lineLimit(2)
+            // A long tip wraps onto more lines at full size instead of being cut off.
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 18))
@@ -832,6 +870,8 @@ struct CoachFeedbackView: View {
                     .padding(.top, 2)
             }
         }
+        // Long advice wraps onto more lines at full size, and the card grows, instead of ending in "…".
+        .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 22))

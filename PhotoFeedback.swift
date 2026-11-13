@@ -78,16 +78,18 @@ final class PhotoCritique {
         )
 
         do {
-            let response = try await session.respond(
-                generating: Critique.self,
-                options: GenerationOptions(samplingMode: .greedy)
-            ) {
-                "Measured by the camera: \(analysis.summary)."
-                "Review this photo."
-                Attachment(attachment)
+            // Give up on a request that hangs, so the person isn't left waiting forever.
+            let critique = try await withTimeout(.seconds(20)) {
+                try await session.respond(
+                    generating: Critique.self,
+                    options: GenerationOptions(samplingMode: .greedy)
+                ) {
+                    "Measured by the camera: \(analysis.summary)."
+                    "Review this photo."
+                    Attachment(attachment)
+                }.content
             }
             guard !Task.isCancelled else { return }
-            let critique = response.content
             // A measured problem beats the model's guess.
             let issue = measured.first ?? critique.issue.coachIssue
             // Where the model saw the problem only applies to its own issue.
@@ -97,7 +99,9 @@ final class PhotoCritique {
         } catch {
             guard !Task.isCancelled else { return }
             print("Photo feedback error: \(error)")
-            state = .failed("Feedback couldn't be generated right now. Please try again.")
+            state = .failed(error is ModelTimeoutError
+                ? "Feedback took too long, so it was cancelled. Please try again."
+                : "Feedback couldn't be generated right now. Please try again.")
         }
     }
 

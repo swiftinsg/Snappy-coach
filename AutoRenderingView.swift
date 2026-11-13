@@ -105,6 +105,12 @@ struct AutoRenderingView: View {
                         CompositionGrid(styles: compositionGuides)
                     }
                 }
+                // A level in the middle of the frame while practising angle and perspective.
+                .overlay {
+                    if adviceTopic == .anglePerspective {
+                        CameraLevel(attitude: coach.attitude)
+                    }
+                }
                 // The green box shows where the subject should be.
                 .overlay {
                     if showsSubjectBox, let target = subjectGuide.target {
