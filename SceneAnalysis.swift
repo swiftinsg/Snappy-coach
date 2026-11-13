@@ -254,6 +254,20 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var shake: Double? = nil
     /// What kind of photo this looks like.
     var scene: SceneType = .object
+    /// What's behind the people in a people photo, like a landscape or a city, so both kinds
+    /// of advice apply. Nil when there's no person or the backdrop isn't clear.
+    var backdrop: SceneType? = nil
+
+    /// The main scene, then the backdrop if there is one.
+    var scenes: [SceneType] {
+        [scene] + (backdrop.map { [$0] } ?? [])
+    }
+
+    /// A wide view such as a landscape or a street has no single subject to fill the frame
+    /// with, so "get closer" tips don't apply. A small person in a big view is a fine shot.
+    var isWideScene: Bool {
+        scenes.contains(.landscape) || scenes.contains(.city)
+    }
 
     /// The subject is clearly darker than what's behind it.
     var isBacklit: Bool {
@@ -264,7 +278,11 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// Short facts for the model and the debug overlay.
     var summary: String {
         var facts: [String] = []
-        if scene != .object { facts.append("this looks like a \(scene.title.lowercased()) photo") }
+        if let backdrop {
+            facts.append("this looks like a \(scene.title.lowercased()) photo with a \(backdrop.title.lowercased()) behind")
+        } else if scene != .object {
+            facts.append("this looks like a \(scene.title.lowercased()) photo")
+        }
         facts.append("overall brightness \(Self.percent(brightness))")
         if highlightClip > 0.02 { facts.append("\(Self.percent(highlightClip)) of the frame is blown out to white") }
         if shadowClip > 0.05 { facts.append("\(Self.percent(shadowClip)) is pure black") }
@@ -282,7 +300,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         return [
             String(format: "bright %.2f  clipHi %.3f  clipLo %.3f", brightness, highlightClip, shadowClip),
             String(format: "subj %.2f  bg %.2f  sharp %.0f", subjectBrightness ?? -1, backgroundBrightness ?? -1, subjectSharpness),
-            "subject \(subjectText)  faces \(faces.count)  scene \(scene.rawValue)",
+            "subject \(subjectText)  faces \(faces.count)  scene \(scenes.map(\.rawValue).joined(separator: "+"))",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
         ].joined(separator: "\n")
@@ -306,7 +324,11 @@ extension SceneAnalysis {
         guard let gray = GrayImage(image) else { return nil }
         let subject = SubjectFinder.subject(in: image)
         let faces = detectFaces(in: image)
-        let scene = SceneType.classify(labels: classify(image), faces: faces)
+        let labels = classify(image)
+        let scene = SceneType.classify(labels: labels, faces: faces)
+        // What the labels alone say, so a person in front of a landscape keeps the landscape too.
+        let behind = SceneType.classify(labels: labels, faces: [])
+        let backdrop = scene == .people && behind != .object && behind != .people ? behind : nil
 
         // Without a subject, judge sharpness and brightness in the middle of the frame.
         let region = subject ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
@@ -326,7 +348,8 @@ extension SceneAnalysis {
             pitch: pitch,
             tilt: tilt,
             shake: shake,
-            scene: scene
+            scene: scene,
+            backdrop: backdrop
         )
     }
 

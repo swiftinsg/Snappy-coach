@@ -371,12 +371,24 @@ final class PhotoCoach {
     private var candidate: CoachIssue??
     private var candidateCount = 0
 
+    // The model can't tell from one photo that the person stepped closer or back, so the
+    // subject's size is measured instead. Zooming counts too, as it frames the same way.
+    /// How much of the frame the subject filled when a move tip appeared.
+    private var moveStartSize: Double?
+    /// Checks in a row the subject has been the asked-for size, so one jumpy frame doesn't count.
+    private var movePasses = 0
+    /// Moves done during this topic. Once someone has stepped closer, no tip asks again.
+    private var movesDone: Set<DistanceMove> = []
+    /// Recent backdrops (nil for none), smoothed like the scene so it doesn't flicker.
+    private var recentBackdrops: [SceneType?] = []
+
     /// Runs until the task is cancelled. Restart it (with a new topic or selection) when the pickers change.
     func run(camera: CameraManager, topic: AdviceTopic, styles: Set<CompositionGuide>, guide: SubjectGuide) async {
         feedback = nil
         notice = nil
         candidate = nil
         candidateCount = 0
+        movesDone = []
         sectionProgress = 0
         sectionRecommendation = nil
         // A new topic is a new section; the memory sentence carries what was done before.
@@ -409,6 +421,11 @@ final class PhotoCoach {
                 analysis.scene = smoothed
                 scene = smoothed
             }
+            recentBackdrops = Array((recentBackdrops + [analysis.backdrop]).suffix(Self.sceneHistory))
+            // A backdrop is kept only when it was seen in most of the recent checks.
+            let backdropCounts = Dictionary(recentBackdrops.compactMap(\.self).map { ($0, 1) }, uniquingKeysWith: +)
+            let steadyBackdrop = backdropCounts.first { $0.value * 2 > recentBackdrops.count }?.key
+            analysis.backdrop = analysis.scene == .people ? steadyBackdrop : nil
 
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
@@ -428,8 +445,18 @@ final class PhotoCoach {
                 continue
             }
 
+            if let shownIssue, let move = shownIssue.asksToMove, let size = Self.subjectSize(in: analysis) {
+                if let start = moveStartSize {
+                    movePasses = move.isDone(from: start, to: size) ? movePasses + 1 : 0
+                    if movePasses >= 2 { movesDone.insert(move) }
+                } else {
+                    moveStartSize = size
+                }
+            }
+
             let tiltShown = shownIssue == .phoneTilted
             var issues = CoachRules.issues(for: topic, in: analysis, tiltShown: tiltShown)
+            issues.removeAll { $0.asksToMove.map(movesDone.contains) ?? false }
             var good = CoachRules.strengths(for: topic, in: analysis, tiltShown: tiltShown)
             if usesBox, guide.target?.isAligned == true {
                 good.insert("Subject in the green box", at: 0)
@@ -443,7 +470,10 @@ final class PhotoCoach {
                let judgement = await judge(frame, topic: topic, styles: styles, analysis: analysis) {
                 guard !Task.isCancelled else { break }
                 modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
-                if CoachRules.allows(judgement.issue, for: topic, styles: styles), let issue = judgement.issue.coachIssue {
+                if CoachRules.allows(judgement.issue, for: topic, styles: styles),
+                   let issue = judgement.issue.coachIssue,
+                   !(issue.asksToMove.map(movesDone.contains) ?? false),
+                   !(issue.asksToMove == .closer && analysis.isWideScene) {
                     // What the model saw is more specific than a minor measurement, so it leads.
                     issues.removeAll { $0 == issue }
                     issues.insert(issue, at: 0)
@@ -492,6 +522,8 @@ final class PhotoCoach {
         sectionStrength = nil
         sectionProgress = 0
         sectionIssueCount = 1
+        moveStartSize = nil
+        movePasses = 0
     }
 
     /// Shows a verdict once it has been seen twice in a row, so the card doesn't flicker.
@@ -599,7 +631,7 @@ final class PhotoCoach {
     ) -> CompositionGuide? {
         guard !candidates.isEmpty else { return nil }
         // Styles that suit this kind of scene come first.
-        var preferred = analysis.scene.suitedStyles
+        var preferred = analysis.scenes.flatMap(\.suitedStyles)
         if !analysis.faces.isEmpty { preferred.append(.halfBodyPortrait) }
         if let pitch = analysis.pitch {
             if pitch < -55 { preferred.append(.tableTop90) }
@@ -709,8 +741,8 @@ final class PhotoCoach {
                     options: GenerationOptions(samplingMode: .greedy)
                 ) {
                     "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
-                    if analysis.scene != .object {
-                        analysis.scene.coachingHint
+                    for scene in analysis.scenes where scene != .object {
+                        scene.coachingHint
                     }
                     Attachment(frame)
                 }.content
@@ -721,6 +753,12 @@ final class PhotoCoach {
             }
             return nil
         }
+    }
+
+    /// How much of the frame the subject fills, 0...1: the main subject, or else the biggest face.
+    static func subjectSize(in analysis: SceneAnalysis) -> Double? {
+        if let subject = analysis.subject { return Double(subject.width * subject.height) }
+        return analysis.faces.map { Double($0.width * $0.height) }.max()
     }
 
     /// Keeps the model's "what works" short and free of numbers.

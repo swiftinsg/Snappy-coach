@@ -112,7 +112,9 @@ extension CoachIssue {
     /// Short, beginner-friendly advice that names the controls in the topic's top bar.
     /// With a `detail` from the model, the action names what to move away from and which way.
     func advice(for topic: AdviceTopic, analysis: SceneAnalysis? = nil, detail: IssueDetail? = nil) -> Advice {
-        let general = sceneAdvice(for: analysis?.scene) ?? generalAdvice(for: topic, analysis: analysis)
+        // The main scene's wording first, then the backdrop's, e.g. a person in a landscape.
+        let sceneWording = analysis?.scenes.lazy.compactMap { sceneAdvice(for: $0) }.first
+        let general = sceneWording ?? generalAdvice(for: topic, analysis: analysis)
         guard let detail, let specific = specificAction(detail) else { return general }
         return Advice(action: specific.text, why: general.why, symbol: specific.symbol ?? general.symbol)
     }
@@ -300,6 +302,16 @@ extension CoachIssue {
         }
     }
 
+    /// The way a model-judged tip asks the person to move. The camera can measure this:
+    /// stepping closer or zooming in makes the subject bigger in the frame, stepping back smaller.
+    var asksToMove: DistanceMove? {
+        switch self {
+        case .tooMuchEmptySpace, .noClearSubject, .subjectTooSmall: .closer
+        case .subjectCutOff, .subjectTooBig: .back
+        default: nil
+        }
+    }
+
     /// Problems the model can't see past, so it isn't asked while they're on screen.
     var blocksModel: Bool {
         self != .subjectTooSmall
@@ -313,6 +325,23 @@ extension CoachIssue {
         return tilt > 0
             ? Advice(action: "Rotate the phone about \(degrees)° left to level it", why: why, symbol: "rotate.left")
             : Advice(action: "Rotate the phone about \(degrees)° right to level it", why: why, symbol: "rotate.right")
+    }
+}
+
+/// Moving toward or away from the subject, measured by how much of the frame it fills.
+nonisolated enum DistanceMove: Sendable {
+    case closer, back
+
+    /// How much the subject's size must change for the move to count. Big enough that
+    /// the subject box jittering between frames doesn't count as a step.
+    static let change = 1.5
+
+    /// Whether the subject went from `start` to `now` (shares of the frame) the asked-for way.
+    func isDone(from start: Double, to now: Double) -> Bool {
+        switch self {
+        case .closer: now >= start * Self.change
+        case .back: now <= start / Self.change
+        }
     }
 }
 
@@ -462,7 +491,7 @@ nonisolated enum CoachRules {
                 if pitch > 25 { found.append(.pointingUp) }
             }
         case .composition:
-            if let subject = a.subject, subject.width * subject.height < 0.02 { found.append(.subjectTooSmall) }
+            if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
         case .subjectPosition:
             if let face = a.faces.max(by: { $0.width * $0.height < $1.width * $1.height }) {
                 if face.minY < 0.02 {
@@ -471,7 +500,7 @@ nonisolated enum CoachRules {
                     found.append(.tooMuchHeadroom)
                 }
             }
-            if let subject = a.subject, subject.width * subject.height < 0.02 { found.append(.subjectTooSmall) }
+            if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
         }
         return found
     }

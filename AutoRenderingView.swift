@@ -24,6 +24,8 @@ struct AutoRenderingView: View {
     @State private var isShutterBlinking = false
     /// Shows the coach's raw measurements over the card, for tuning the advice.
     @State private var isCoachDebugOn = false
+    /// The zoom when the current pinch began, so the pinch scales from there.
+    @State private var pinchStartZoom: CGFloat?
 
     /// The composition styles the person is practising. At least one is always selected,
     /// and only styles that can work together are kept.
@@ -120,6 +122,23 @@ struct AutoRenderingView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea()
                 .animation(.snappy, value: camera.aspectRatio)
+                // Pinch to zoom, like the Camera app. Lenses switch at the same points as the zoom buttons.
+                .gesture(
+                    MagnifyGesture()
+                        .onChanged { value in
+                            let start = pinchStartZoom ?? camera.zoomLevel
+                            pinchStartZoom = start
+                            let widest = camera.zoomStops.first ?? 1
+                            let longest = max(10, camera.zoomStops.last ?? 1)
+                            let level = min(max(start * value.magnification, widest), longest)
+                            if let message = camera.setZoom(level) {
+                                statusMessage = message
+                            }
+                        }
+                        .onEnded { _ in
+                            pinchStartZoom = nil
+                        }
+                )
 
             VStack(spacing: 12) {
                 // Top bar: advice topic dropdown on the left, camera controls on the right.

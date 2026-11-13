@@ -15,11 +15,12 @@ struct ZoomPicker: View {
     var body: some View {
         HStack(spacing: 4) {
             ForEach(stops, id: \.self) { stop in
-                let isSelected = stop == level
+                let isSelected = stop == activeStop
                 Button {
                     onSelect(stop)
                 } label: {
-                    Text(label(for: stop, isSelected: isSelected))
+                    // After a pinch the lit button shows the exact zoom, like "1.4×".
+                    Text(isSelected ? label(for: level, isSelected: true) : label(for: stop, isSelected: false))
                         .font(isSelected ? .footnote.bold() : .caption2.bold())
                         .foregroundStyle(isSelected ? .yellow : .white)
                         .frame(width: isSelected ? 40 : 32, height: isSelected ? 40 : 32)
@@ -33,6 +34,11 @@ struct ZoomPicker: View {
         .padding(4)
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
         .animation(.snappy, value: level)
+    }
+
+    /// The button for the lens in use: the biggest stop not above the current zoom.
+    private var activeStop: CGFloat? {
+        stops.last { $0 <= level + 0.01 } ?? stops.first
     }
 
     /// "0.5" becomes ".5", whole numbers drop the decimal, and the selected one gets "×".

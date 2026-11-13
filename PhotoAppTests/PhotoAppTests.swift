@@ -103,6 +103,42 @@ struct CoachRulesTests {
         #expect(!CoachRules.issues(for: .exposure, in: scene(highlightClip: 0.1, readings: readings)).contains(.highlightsClipped))
     }
 
+    @Test func steppingCloserOrBackIsMeasuredBySubjectSize() {
+        #expect(CoachIssue.tooMuchEmptySpace.asksToMove == .closer)
+        #expect(CoachIssue.subjectCutOff.asksToMove == .back)
+        #expect(CoachIssue.clutteredBackground.asksToMove == nil)
+        // Closer (or zoomed in): the subject fills half as much again.
+        #expect(DistanceMove.closer.isDone(from: 0.1, to: 0.16))
+        #expect(!DistanceMove.closer.isDone(from: 0.1, to: 0.12))
+        // Back: the subject shrinks by a third.
+        #expect(DistanceMove.back.isDone(from: 0.3, to: 0.19))
+        #expect(!DistanceMove.back.isDone(from: 0.3, to: 0.25))
+        // Without a subject box, the biggest face is used.
+        let face = CGRect(x: 0.4, y: 0.2, width: 0.2, height: 0.25)
+        #expect(PhotoCoach.subjectSize(in: scene(subject: nil, faces: [face])) == Double(0.2 * 0.25))
+    }
+
+    @Test func personInALandscapeGetsBothKindsOfAdvice() {
+        let face = CGRect(x: 0.45, y: 0.4, width: 0.05, height: 0.06)
+        var portrait = scene(subject: CGRect(x: 0.45, y: 0.4, width: 0.1, height: 0.1), faces: [face])
+        portrait.scene = .people
+        portrait.backdrop = .landscape
+        #expect(portrait.scenes == [.people, .landscape])
+        // The landscape's wording applies, though the main scene is people.
+        #expect(CoachIssue.horizonThroughMiddle.advice(for: .composition, analysis: portrait).action.contains("bottom third"))
+        // A small person in a big view is a fine shot, so no "get closer".
+        #expect(!CoachRules.issues(for: .composition, in: portrait).contains(.subjectTooSmall))
+        #expect(portrait.summary.contains("people photo with a landscape behind"))
+    }
+
+    @Test func wideScenesDontAskToGetCloser() {
+        let tiny = CGRect(x: 0.5, y: 0.5, width: 0.1, height: 0.1)
+        var landscape = scene(subject: tiny)
+        landscape.scene = .landscape
+        #expect(!CoachRules.issues(for: .composition, in: landscape).contains(.subjectTooSmall))
+        #expect(CoachRules.issues(for: .composition, in: scene(subject: tiny)).contains(.subjectTooSmall))
+    }
+
     @Test func noTipAsksForATapOnTheViewfinder() {
         // The viewfinder has no tap-to-focus, so tips can only name controls that exist.
         for issue in CoachIssue.allCases {
