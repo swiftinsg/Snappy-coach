@@ -200,10 +200,6 @@ extension CompositionGuide {
             judged = "the Table-Top 90 degree aerial style: shooting straight down onto a flat surface, with the camera parallel to the surface, items arranged neatly and the frame filled evenly"
         case .leadingLines:
             judged = "the Leading Lines style: lines such as paths, edges or rails should be visible, point toward the main subject and not be cut off, so they guide the eye to it"
-        case .singleVertex:
-            judged = "the Single Vertex style: one point where two lines meet should be a clear focal point, near a third position, with the lines leading away from it"
-        case .doubleVertex:
-            judged = "the Double Vertex style: two points where lines meet should both be visible and balanced across the frame, leading the eye between them"
         case .triangle:
             judged = "the Triangle style: three key elements, or the lines between them, should form a triangle, with all three in frame and well spaced"
         case .leadingLinesAligning:
@@ -675,7 +671,7 @@ final class PhotoCoach {
         preferred += [
             .ruleOfThirdsCorner, .symmetry, .leadingLines, .centre,
             .leadingLinesAligning, .triangle, .onePointPerspective,
-            .singleVertex, .doubleVertex, .compression,
+            .compression,
             .ruleOfThirdsTwo, .ruleOfThirdsOne,
         ]
         return preferred.first(where: candidates.contains)

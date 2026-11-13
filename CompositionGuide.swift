@@ -9,7 +9,7 @@ import SwiftUI
 enum CompositionGuide: String, CaseIterable, Identifiable {
     case ruleOfThirdsOne, ruleOfThirdsTwo, ruleOfThirdsCorner, centre
     case onePointPerspective, tableTop45, tableTop90
-    case leadingLines, singleVertex, doubleVertex, triangle, leadingLinesAligning
+    case leadingLines, triangle, leadingLinesAligning
     case symmetry, halfBodyPortrait, compression, negativeSpace
 
     var id: String { rawValue }
@@ -24,14 +24,32 @@ enum CompositionGuide: String, CaseIterable, Identifiable {
         case .tableTop45: "Table-Top 45°"
         case .tableTop90: "Table-Top 90° Aerial"
         case .leadingLines: "Leading Lines"
-        case .singleVertex: "Single Vertex"
-        case .doubleVertex: "Double Vertex"
         case .triangle: "Triangle"
         case .leadingLinesAligning: "Aligning Lines"
         case .symmetry: "Symmetry"
         case .halfBodyPortrait: "Half-Body Portrait"
         case .compression: "Compression"
         case .negativeSpace: "Negative Space"
+        }
+    }
+
+    /// Name of this style's example photo in the asset catalog, if there is one.
+    var exampleImageName: String? {
+        switch self {
+        case .ruleOfThirdsOne: "RuleOfThirds 1"
+        case .ruleOfThirdsTwo: "2:3"
+        case .ruleOfThirdsCorner: "corner"
+        case .centre: "center"
+        case .onePointPerspective: "OnePointPerspective"
+        case .tableTop45: "TableTop45Degrees"
+        case .tableTop90: "90 degrees"
+        case .leadingLines: "LeadingLines"
+        case .triangle: "Triangle"
+        case .leadingLinesAligning: "AligningLines"
+        case .symmetry: "symmetry"
+        case .halfBodyPortrait: "half_potrait"
+        case .compression: "Compression"
+        case .negativeSpace: "NegativeSpace"
         }
     }
 }
@@ -92,8 +110,6 @@ extension CompositionGuide {
         if pair.isSubset(of: placements) { return true }
         // Two camera-angle styles can't both be right.
         if pair.isSubset(of: [.tableTop45, .tableTop90]) { return true }
-        // One focal point or two, not both.
-        if pair.isSubset(of: [.singleVertex, .doubleVertex]) { return true }
         // Filling the frame and leaving lots of empty space pull opposite ways.
         if pair.isSubset(of: [.negativeSpace, .compression]) { return true }
 
@@ -281,32 +297,37 @@ struct CompositionPicker: View {
         return Button {
             toggle(guide)
         } label: {
-            HStack(spacing: 4) {
-                if isUnavailable {
-                    Image(systemName: "slash.circle")
-                        .font(.caption2)
-                } else if isRecommended {
-                    Image(systemName: "sparkles")
-                        .font(.caption2)
-                        .foregroundStyle(isSelected ? .black : .yellow)
+            // A card: the style's example photo on top, its name underneath.
+            VStack(spacing: 4) {
+                CompositionThumbnail(name: guide.exampleImageName)
+                HStack(spacing: 3) {
+                    if isUnavailable {
+                        Image(systemName: "slash.circle")
+                    } else if isRecommended {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(isSelected ? .black : .yellow)
+                    }
+                    // Two lines are always reserved so every card is the same height.
+                    Text(guide.title)
+                        .lineLimit(2, reservesSpace: true)
+                        .multilineTextAlignment(.center)
                 }
-                Text(guide.title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(isSelected ? .black : (isUnavailable ? Color.gray : .white))
+                .shadow(color: .black.opacity(isSelected || isUnavailable ? 0 : 0.5), radius: 2)
+                .frame(width: CompositionThumbnail.size.width)
             }
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(isSelected ? .black : (isUnavailable ? Color.gray : .white))
-            .shadow(color: .black.opacity(isSelected || isUnavailable ? 0 : 0.5), radius: 2)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(5)
             .glassEffect(
                 isSelected
                     ? .regular.tint(.yellow)
                     : .regular.tint(.black.opacity(isUnavailable ? 0.7 : 0.35)),
-                in: .capsule
+                in: .rect(cornerRadius: 14)
             )
             .overlay {
                 // The coach's pick gets a thin yellow ring so it stands out without being pushy.
                 if isRecommended, !isSelected {
-                    Capsule()
+                    RoundedRectangle(cornerRadius: 14)
                         .strokeBorder(.yellow.opacity(0.8), lineWidth: 1)
                 }
             }
@@ -359,5 +380,53 @@ struct CompositionPicker: View {
             let names = CompositionGuide.allCases.filter(conflicts.contains).map(\.title)
             onMessage("Swapped \(names.formatted(.list(type: .and))) for \(guide.title).")
         }
+    }
+}
+
+// MARK: - Example thumbnails
+
+/// A style's example photo, shown at the top of its picker card.
+/// Some example photos are 20+ megapixels, so each is downscaled once off the main thread
+/// and cached rather than decoded at full size.
+struct CompositionThumbnail: View {
+    static let size = CGSize(width: 92, height: 62)
+
+    /// Asset name of the photo; styles without one get a plain placeholder.
+    let name: String?
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(.white.opacity(0.15))
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if name == nil {
+                Image(systemName: "photo")
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .frame(width: Self.size.width, height: Self.size.height)
+        .clipShape(.rect(cornerRadius: 10))
+        .accessibilityHidden(true)
+        .task(id: name) {
+            guard let name else { return }
+            image = await Self.thumbnail(named: name)
+        }
+    }
+
+    private static var cache: [String: UIImage] = [:]
+
+    private static func thumbnail(named name: String) async -> UIImage? {
+        if let cached = cache[name] { return cached }
+        guard let full = UIImage(named: name) else { return nil }
+        // Scale so the photo covers the card at screen resolution; the view crops the rest.
+        let scale = max(size.width / max(1, full.size.width), size.height / max(1, full.size.height)) * 3
+        let target = CGSize(width: full.size.width * scale, height: full.size.height * scale)
+        let thumb = await full.byPreparingThumbnail(ofSize: target) ?? full
+        cache[name] = thumb
+        return thumb
     }
 }

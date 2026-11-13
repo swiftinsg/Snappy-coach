@@ -407,7 +407,6 @@ enum VisualIssue: String, CaseIterable {
         case .vanishingPointOffCentre: [.onePointPerspective]
         case .linesNotStraight: [.leadingLinesAligning, .onePointPerspective, .symmetry]
         case .noTriangle: [.triangle]
-        case .noClearVertex: [.singleVertex, .doubleVertex]
         case .notOverhead: [.tableTop90]
         case .layersNotStacked: [.compression]
         case .subjectTooBig: [.negativeSpace]
@@ -448,8 +447,9 @@ nonisolated enum CoachRules {
     /// Share of the frame above which the subject is too big for the Negative Space style.
     static let negativeSpaceLimit = 0.12
     /// Model issues the coach never uses: "get closer" tips it can't check (getting closer is
-    /// measured instead), and the Negative Space size, which is measured too.
-    static let unusedModelIssues: Set<VisualIssue> = [.noClearSubject, .tooMuchEmptySpace, .subjectTooBig]
+    /// measured instead), the Negative Space size, which is measured too, and the vertex tip,
+    /// whose Single and Double Vertex styles were removed.
+    static let unusedModelIssues: Set<VisualIssue> = [.noClearSubject, .tooMuchEmptySpace, .subjectTooBig, .noClearVertex]
 
     /// Topics where the model adds judgement the measurements can't give.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
