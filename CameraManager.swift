@@ -60,6 +60,8 @@ class CameraManager {
     let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let histogramProcessor = HistogramProcessor()
+    /// Supplies camera frames to the auto-rendering coach.
+    let frameGrabber = FrameGrabber()
     private let sessionQueue = DispatchQueue(label: "CameraManager.session")
     private let videoQueue = DispatchQueue(label: "CameraManager.video")
     /// Keeps each capture's delegate alive until its photo is saved.
@@ -115,6 +117,10 @@ class CameraManager {
         if session.canAddOutput(videoOutput) {
             videoOutput.alwaysDiscardsLateVideoFrames = true
             session.addOutput(videoOutput)
+        }
+        // A second video output, only for the auto-rendering coach.
+        if session.canAddOutput(frameGrabber.output) {
+            session.addOutput(frameGrabber.output)
         }
         session.commitConfiguration()
         isLivePhotoOn = photoOutput.isLivePhotoCaptureEnabled

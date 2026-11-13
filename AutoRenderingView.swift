@@ -10,6 +10,7 @@ import SwiftUI
 struct AutoRenderingView: View {
     @State private var controls = PhotoControlsModel()
     @State private var camera = CameraManager()
+    @State private var coach = PhotoCoach()
     @State private var gallery = PhotoGallery()
     @State private var isGalleryPresented = false
     /// Remembered between launches.
@@ -65,6 +66,11 @@ struct AutoRenderingView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
                     VStack(spacing: 16) {
+                        if let tip = coach.tip {
+                            CoachTipView(text: tip)
+                                .transition(.opacity)
+                        }
+
                         ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel) { level in
                             if let message = camera.setZoom(level) {
                                 statusMessage = message
@@ -121,6 +127,10 @@ struct AutoRenderingView: View {
         .task {
             await camera.start()
         }
+        // Restarts whenever the advice topic changes, so the tips follow the dropdown.
+        .task(id: adviceTopic) {
+            await coach.run(camera: camera, topic: adviceTopic)
+        }
         .task {
             await gallery.load()
         }
@@ -156,6 +166,7 @@ struct AutoRenderingView: View {
         .animation(.snappy, value: activeAdjustment)
         .animation(.snappy, value: adviceTopic)
         .animation(.easeInOut, value: statusMessage)
+        .animation(.easeInOut, value: coach.tip)
         .animation(.snappy, value: camera.countdown)
         .sensoryFeedback(.impact(weight: .medium), trigger: camera.shutterCount)
         .sensoryFeedback(.impact, trigger: controls.draft)
