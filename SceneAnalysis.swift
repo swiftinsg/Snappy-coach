@@ -26,6 +26,13 @@ nonisolated struct CameraReadings: Sendable, Equatable {
     var exposureBias: Double = 0
     var isNightModeOn = false
     var isFlashOn = false
+    // So the advice can say how much to move: "Zoom to 2×", "Turn about 10° left".
+    /// The zoom, like the zoom buttons: 1 is the main lens.
+    var zoom: Double = 1
+    /// The zoom buttons this camera offers.
+    var zoomStops: [Double] = [1, 2]
+    /// How many degrees the view spans across the sensor's long side, at the current zoom.
+    var fieldOfView: Double? = nil
 
     @MainActor
     static func read(from camera: CameraManager) -> CameraReadings {
@@ -36,8 +43,40 @@ nonisolated struct CameraReadings: Sendable, Equatable {
             iso: Double(device.iso),
             exposureBias: Double(camera.exposureBias),
             isNightModeOn: camera.isNightModeOn,
-            isFlashOn: camera.flash == .on
+            isFlashOn: camera.flash == .on,
+            zoom: Double(camera.zoomLevel),
+            zoomStops: camera.zoomStops.map(Double.init),
+            fieldOfView: Self.fieldOfView(of: device)
         )
+    }
+
+    /// The lens's field of view narrowed by its zoom. Nil when the camera doesn't report one.
+    @MainActor
+    private static func fieldOfView(of device: AVCaptureDevice) -> Double? {
+        let widest = Double(device.activeFormat.videoFieldOfView)
+        guard widest > 0 else { return nil }
+        let halfAngle = widest / 2 * .pi / 180
+        return 2 * atan(tan(halfAngle) / Double(device.videoZoomFactor)) * 180 / .pi
+    }
+
+    /// The view's span in degrees across and down, as the phone is held. Sensors are 4:3,
+    /// so the short side spans a little less than the long one.
+    func viewSpan(isLandscape: Bool) -> FieldOfView? {
+        guard let fieldOfView else { return nil }
+        let long = fieldOfView
+        let short = 2 * atan(tan(long / 2 * .pi / 180) * 3 / 4) * 180 / .pi
+        return isLandscape ? FieldOfView(horizontal: long, vertical: short) : FieldOfView(horizontal: short, vertical: long)
+    }
+}
+
+/// How many degrees the view spans across and down, for turning a shift in the frame into a turn of the phone.
+nonisolated struct FieldOfView: Equatable, Sendable {
+    var horizontal: Double
+    var vertical: Double
+
+    /// Degrees to turn the phone for a shift of `share` of the frame, rounded to 5°, at least 5°.
+    static func degrees(_ share: Double, across span: Double) -> Int {
+        max(5, Int((abs(share) * span / 5).rounded()) * 5)
     }
 }
 
@@ -304,6 +343,37 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     }
 
     /// Short facts for the model and the debug overlay.
+    /// Where the subject sits and how big it is, in words the model can use, like "the subject is on
+    /// the left third, high up, filling about 10% of the frame". Nil when there's no subject.
+    /// Vision measures this exactly; the model would otherwise have to guess it from a small image.
+    var positionPhrase: String? {
+        guard let subject else { return nil }
+        let across = switch subject.midX {
+        case ..<0.25: "near the left edge"
+        case ..<0.42: "on the left third"
+        case ...0.58: "in the centre"
+        case ...0.75: "on the right third"
+        default: "near the right edge"
+        }
+        let height: String? = switch subject.midY {
+        case ..<0.4: "high up"
+        case 0.6...: "low down"
+        default: nil
+        }
+        let share = Double(subject.width * subject.height)
+        let size = switch share {
+        case ..<0.05: "filling under 5% of the frame"
+        case 0.6...: "filling most of the frame"
+        default: "filling about \(Int((share * 20).rounded()) * 5)% of the frame"
+        }
+        return (["the subject is \(across)", height, size] as [String?]).compactMap(\.self).joined(separator: ", ")
+    }
+
+    /// A head touches the top edge of the frame, so it's cut off.
+    var headAtTopEdge: Bool {
+        faces.contains { $0.minY < 0.02 }
+    }
+
     var summary: String {
         var facts: [String] = []
         if let backdrop {
@@ -317,6 +387,10 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         if isBacklit { facts.append("the subject is darker than the background (backlit)") }
         facts.append(subjectSharpness < CoachRules.softThreshold ? "the subject looks soft" : "the subject is sharp")
         if personCount > 0 { facts.append("\(personCount) \(personCount == 1 ? "person" : "people")") }
+        // Where the subject is: framing facts the model can't measure well from a small image.
+        if let positionPhrase { facts.append(positionPhrase) }
+        if headAtTopEdge { facts.append("a head touches the top edge") }
+        if subjectTouchesEdge { facts.append("the subject runs off the edge of the frame") }
         if let tilt, abs(tilt) >= CoachRules.tiltThreshold { facts.append("the phone is tilted \(Int(abs(tilt).rounded()))°") }
         if let shake, shake >= CoachRules.shakeThreshold { facts.append("the phone is moving") }
         return facts.joined(separator: "; ")
@@ -329,6 +403,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             String(format: "bright %.2f  clipHi %.3f  clipLo %.3f", brightness, highlightClip, shadowClip),
             String(format: "subj %.2f  bg %.2f  sharp %.0f", subjectBrightness ?? -1, backgroundBrightness ?? -1, subjectSharpness),
             "subject \(subjectText)  faces \(faces.count)  people \(people.count)  scene \(scenes.map(\.rawValue).joined(separator: "+"))",
+            positionPhrase ?? "no subject",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
             String(format: "background busy %.3f (plain below %.3f)", backgroundBusyness ?? -1, CoachRules.plainBackgroundLimit),

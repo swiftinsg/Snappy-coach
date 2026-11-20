@@ -127,6 +127,20 @@ nonisolated enum SubjectFinder {
         return label.replacingOccurrences(of: "_", with: " ")
     }
 
+    /// What Vision sees in `box` (0...1 from the top left), with how sure it is, most likely first.
+    /// Used to check that a thing the model named is really there.
+    static func labels(of box: CGRect, in image: CGImage) -> [(label: String, confidence: Float)] {
+        let request = VNClassifyImageRequest()
+        request.regionOfInterest = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        request.runOnCPUInSimulator()
+        guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return [] }
+        return (request.results ?? [])
+            .filter { $0.confidence >= 0.1 }
+            .prefix(10)
+            .map { ($0.identifier, $0.confidence) }
+    }
+
     /// Vision labels that mean people, who are never described.
     private static let personLabels: Set<String> = ["people", "person", "adult", "child", "baby", "teen", "portrait", "selfie", "crowd"]
     /// Vision labels too broad to call something by, like "structure".
@@ -465,6 +479,8 @@ struct SubjectTarget: Equatable {
     /// True for the front camera, whose view is mirrored: there the scene moves the same way
     /// as the phone, so left and right swap in the advice and the guide.
     var isMirrored = false
+    /// How many degrees the view spans, so the advice can say how far to turn. Nil when unknown.
+    var fieldOfView: FieldOfView? = nil
 
     /// How close the centres must be, as a fraction of the frame, to count as lined up.
     /// Hand-held framing is never exact, so close enough counts.
@@ -496,7 +512,8 @@ struct SubjectTarget: Equatable {
         placement: SubjectPlacement,
         wasAligned: Bool = false,
         previous: SubjectTarget? = nil,
-        isMirrored: Bool = false
+        isMirrored: Bool = false,
+        fieldOfView: FieldOfView? = nil
     ) -> SubjectTarget? {
         // A subject that fills the frame can't be placed anywhere else.
         guard subject.width < 0.75, subject.height < 0.75 else { return nil }
@@ -540,7 +557,8 @@ struct SubjectTarget: Equatable {
             isAligned: hypot(dx, dy) < (wasAligned || overshot ? holdTolerance : tolerance),
             aimPoint: point,
             placement: placement,
-            isMirrored: isMirrored
+            isMirrored: isMirrored,
+            fieldOfView: fieldOfView
         )
     }
 
@@ -553,10 +571,21 @@ struct SubjectTarget: Equatable {
     var cameraAdvice: [String] {
         var steps: [String] = []
         if abs(dx) >= Self.axisThreshold {
-            steps.append("Move the camera\(amount(dx)) \(moveX > 0 ? "left" : "right")")
+            let side = moveX > 0 ? "left" : "right"
+            // With the lens's field of view known, say how far: a beginner can turn 10° in one go.
+            if let span = fieldOfView?.horizontal {
+                steps.append("Turn the phone about \(FieldOfView.degrees(dx, across: span))° \(side)")
+            } else {
+                steps.append("Move the camera\(amount(dx)) \(side)")
+            }
         }
         if abs(dy) >= Self.axisThreshold {
-            steps.append("Move the camera\(amount(dy)) \(dy > 0 ? "up" : "down")")
+            let side = dy > 0 ? "up" : "down"
+            if let span = fieldOfView?.vertical {
+                steps.append("Tilt the phone about \(FieldOfView.degrees(dy, across: span))° \(side)")
+            } else {
+                steps.append("Move the camera\(amount(dy)) \(side)")
+            }
         }
         // The goal goes on the last step only, so it isn't repeated.
         if let last = steps.popLast() {
@@ -666,7 +695,8 @@ final class SubjectGuide {
                     placement: placement,
                     wasAligned: target?.isAligned ?? false,
                     previous: target,
-                    isMirrored: camera.isUsingFrontCamera
+                    isMirrored: camera.isUsingFrontCamera,
+                    fieldOfView: CameraReadings.read(from: camera).viewSpan(isLandscape: found.aspect > 1)
                 )
             }
             try? await Task.sleep(for: .milliseconds(300))

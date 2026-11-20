@@ -374,6 +374,91 @@ struct CoachRulesTests {
         #expect(!Advice(action: "g", why: "").conflicts(with: left))
     }
 
+    @Test func modelNamesAreCheckedAgainstWhatVisionSees() {
+        let sign = IssueDetail(region: .right, rawThing: "the sign")
+        #expect(!sign.matches(labels: [("tree", 0.8)]))
+        #expect(sign.matches(labels: [("signboard", 0.6)]))
+        // Different words for the same thing.
+        let post = IssueDetail(region: .background, rawThing: "the lamp post")
+        #expect(post.matches(labels: [("streetlight", 0.7)]))
+        #expect(IssueDetail(region: .left, rawThing: "cars").matches(labels: [("vehicle", 0.9)]))
+        // When Vision isn't sure, the model gets the benefit of the doubt.
+        #expect(IssueDetail(region: .left, rawThing: "the bench").matches(labels: [("tree", 0.2)]))
+        #expect(IssueDetail(region: .left, rawThing: "the bench").matches(labels: []))
+    }
+
+    @Test func praiseMustMatchTheMeasurements() {
+        #expect(CoachRules.contradicts(strength: "Bright, even light", analysis: scene(brightness: 0.1)))
+        #expect(!CoachRules.contradicts(strength: "Bright, even light", analysis: scene()))
+        #expect(CoachRules.contradicts(strength: "Sharp details", analysis: scene(sharpness: 10)))
+        #expect(CoachRules.contradicts(strength: "Level horizon", analysis: scene(tilt: 6)))
+        var busy = scene()
+        busy.backgroundBusyness = 0.3
+        #expect(CoachRules.contradicts(strength: "Clean background", analysis: busy))
+        var plain = scene()
+        plain.backgroundBusyness = 0.02
+        #expect(!CoachRules.contradicts(strength: "Clean background", analysis: plain))
+        #expect(!CoachRules.contradicts(strength: "Strong lines", analysis: busy))
+        #expect(CoachRules.blamesPlainSurface("Avoid the glass doors behind them"))
+        #expect(!CoachRules.blamesPlainSurface("Stand in front of a plain wall"))
+    }
+
+    @Test func distanceAdviceNamesAZoomButton() {
+        let stops = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 120, iso: 100, zoom: 1, zoomStops: [0.5, 1, 2, 5])
+        func tiny(_ side: CGFloat, zoom: Double = 1) -> SceneAnalysis {
+            var readings = stops
+            readings.zoom = zoom
+            return scene(subject: CGRect(x: 0.4, y: 0.4, width: side, height: side), readings: readings)
+        }
+        // 1% of the frame needs about 2.4× to fill 6%, so the 5× button; 1.5% needs exactly 2×.
+        #expect(CoachIssue.subjectTooSmall.distanceAction(tiny(0.1)) == "Zoom to 5×, or walk closer")
+        #expect(CoachIssue.subjectTooSmall.distanceAction(tiny(0.1225)) == "Zoom to 2×, or walk closer")
+        #expect(CoachIssue.subjectTooSmall.distanceAction(tiny(0.05, zoom: 5)) == "Walk a few steps closer")
+        #expect(CoachIssue.subjectCutOff.distanceAction(tiny(0.5, zoom: 2)) == "Zoom out to 1×, or step back")
+        #expect(CoachIssue.subjectCutOff.distanceAction(tiny(0.5, zoom: 0.5)) == nil)
+        #expect(CoachIssue.subjectTooSmall.advice(for: .composition, analysis: tiny(0.1225)).action == "Zoom to 2×, or walk closer")
+    }
+
+    @Test func guideSaysHowFarToTurn() throws {
+        // The subject must slide 0.17 of a 60° view: about 10°.
+        let target = try #require(SubjectTarget.make(
+            subject: CGRect(x: 0.1133, y: 0.45, width: 0.1, height: 0.1), placement: .thirdsLine(1.0 / 3),
+            fieldOfView: FieldOfView(horizontal: 60, vertical: 75)
+        ))
+        #expect(target.cameraAdvice.first == "Turn the phone about 10° left until the dot is in the circle")
+        #expect(FieldOfView.degrees(0.01, across: 60) == 5)
+        // The view is narrower across the short side of the sensor.
+        let readings = CameraReadings(fieldOfView: 70)
+        let portrait = try #require(readings.viewSpan(isLandscape: false))
+        #expect(portrait.horizontal < portrait.vertical)
+    }
+
+    @Test func scenesGetTheirOwnWording() {
+        func kind(_ type: SceneType) -> SceneAnalysis {
+            var analysis = scene()
+            analysis.scene = type
+            return analysis
+        }
+        #expect(CoachIssue.subjectCutOff.advice(for: .composition, analysis: kind(.people)).action.contains("joints"))
+        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: kind(.nature)).action.contains("sky"))
+        #expect(CoachIssue.linesDontLead.advice(for: .composition, analysis: kind(.city)).action.contains("street"))
+        #expect(CoachIssue.distractingEdges.advice(for: .composition, analysis: kind(.food)).action.contains("cups"))
+    }
+
+    @Test func summaryStatesWhereTheSubjectIs() {
+        let highLeft = scene(subject: CGRect(x: 0.28, y: 0.1, width: 0.1, height: 0.2))
+        #expect(highLeft.positionPhrase == "the subject is on the left third, high up, filling under 5% of the frame")
+        let centred = scene(subject: CGRect(x: 0.35, y: 0.35, width: 0.3, height: 0.3))
+        #expect(centred.positionPhrase == "the subject is in the centre, filling about 10% of the frame")
+        #expect(centred.summary.contains("in the centre"))
+        // A head at the top edge is said, and is the same test the cut-off rule uses.
+        let cutOff = scene(faces: [CGRect(x: 0.4, y: 0.01, width: 0.2, height: 0.2)])
+        #expect(cutOff.summary.contains("a head touches the top edge"))
+        #expect(CoachRules.issues(for: .composition, in: cutOff).contains(.headCutOff))
+        #expect(scene(subject: CGRect(x: 0, y: 0.3, width: 0.3, height: 0.3)).summary.contains("runs off the edge"))
+        #expect(scene(subject: nil).positionPhrase == nil)
+    }
+
     @Test func subjectCutOffNeedsAnEdge() {
         #expect(scene(subject: CGRect(x: 0, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
         #expect(!scene(subject: CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)

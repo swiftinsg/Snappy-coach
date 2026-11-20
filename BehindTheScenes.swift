@@ -751,11 +751,23 @@ final class PhotoCoach {
                         if let found = CoachHighlight.locate(in: detail.region, subject: analysis.subject, among: candidates) {
                             detail.box = found.box
                             detail.boxIsArea = found.isArea
+                            // Check the model didn't imagine it: if Vision clearly sees something else
+                            // there, the tip falls back to its general wording and nothing is outlined.
+                            if !found.isArea {
+                                let labels = await Self.labels(of: found.box, in: frame)
+                                guard !Task.isCancelled else { break }
+                                if !detail.matches(labels: labels) {
+                                    modelNote += "\nname dropped: Vision sees \(labels.prefix(3).map(\.label).joined(separator: ", "))"
+                                    detail.thing = nil
+                                    detail.box = nil
+                                }
+                            }
                         }
                     }
                     details[issue] = detail
                 }
-                if let strength = Self.cleanedStrength(judgement.strength) {
+                if let strength = Self.cleanedStrength(judgement.strength),
+                   !CoachRules.contradicts(strength: strength, analysis: analysis) {
                     sectionStrength = strength
                     if !good.contains(strength) { good.append(strength) }
                 }
@@ -935,6 +947,12 @@ final class PhotoCoach {
         SubjectFinder.salientObjects(in: frame)
     }
 
+    /// What Vision sees in `box`. Runs off the main thread because Vision takes a moment.
+    @concurrent
+    nonisolated private static func labels(of box: CGRect, in frame: CGImage) async -> [(label: String, confidence: Float)] {
+        SubjectFinder.labels(of: box, in: frame)
+    }
+
     /// Suggests what to practise once the current section is complete.
     private func nextSectionSuggestion(
         topic: AdviceTopic,
@@ -997,11 +1015,16 @@ final class PhotoCoach {
     // MARK: - The model
 
     /// Worked answers for the model. Only those whose issue is allowed for the topic are shown,
-    /// so it isn't nudged toward an issue it can't use.
+    /// so it isn't nudged toward an issue it can't use. Style examples come first, so a picked
+    /// style's own example is always among those shown.
     private static let examples: [(issue: VisualIssue, text: String)] = [
+        (.notSymmetric, #"A doorway framed off-centre, with more wall on the left: issue notSymmetric, region left, thing "the wall", strength "Strong shape"."#),
+        (.noTriangle, #"Three cups in a straight row: issue noTriangle, region whole, thing "the cups", strength "Simple setup"."#),
+        (.layersNotStacked, #"Hills far apart with lots of sky between them: issue layersNotStacked, region background, thing "the hills", strength "Soft colours"."#),
+        (.jointsCropped, #"A portrait cut off at the knees: issue jointsCropped, region bottom, thing "the subject", strength "Sharp eyes"."#),
+        (.linesDontLead, #"A path running off the right edge instead of toward the bench: issue linesDontLead, region right, thing "the path", strength "Clear subject"."#),
         (.clutteredBackground, #"A person with a lamp post right behind their head: issue clutteredBackground, region background, thing "the lamp post", strength "Soft, even light"."#),
         (.distractingEdges, #"A bright sign at the right edge: issue distractingEdges, region right, thing "the sign", strength "Clear subject"."#),
-        (.linesDontLead, #"A road running off the left side instead of toward the house: issue linesDontLead, region left, thing "the road", strength "Strong lines"."#),
         (.subjectCutOff, #"A tree cut off at the top: issue subjectCutOff, region top, thing "the tree", strength "Rich colours"."#),
     ]
     private static let noneExample = """
@@ -1012,7 +1035,7 @@ final class PhotoCoach {
 
     private func makeSession(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> LanguageModelSession {
         let allowed = VisualIssue.allCases.filter { $0 != .none && CoachRules.allows($0, for: topic, styles: styles) }
-        let examples = Self.examples.filter { allowed.contains($0.issue) }.prefix(3).map(\.text) + [Self.noneExample]
+        let examples = Self.examples.filter { allowed.contains($0.issue) }.prefix(4).map(\.text) + [Self.noneExample]
         let praised = memory.recentStrengths.isEmpty
             ? ""
             : " Already praised: \(memory.recentStrengths.joined(separator: ", ")); praise something else if you can."
@@ -1026,10 +1049,9 @@ final class PhotoCoach {
             Say where in the frame the problem is, and name the thing causing it in 1 to 3 plain words.
             Never describe people: call one person the subject and several people the subjects.
             Also name one thing that already works, in 2 to 5 words.\(praised)
-            Plain surfaces such as walls, doors, glass, windows, floors and sky are a clean background, not a distraction. \
-            Only report clutteredBackground for a separate object, like a pole, sign or person, that sticks out from right behind the subject.
+            \(CoachRules.plainSurfaceRule)
             Brightness, sharpness and tilt are measured by the camera and handled separately, so never report them. \
-            The measurements given with each photo are always correct.
+            The measurements given with each photo, including where the subject is and how big it is, are always correct.
             Examples:
             \(examples.joined(separator: "\n"))
             So far: \(memory.sentence) Don't pick what was already fixed or pointed out unless it is clearly the biggest problem now.

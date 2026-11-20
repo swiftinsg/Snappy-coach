@@ -66,8 +66,9 @@ enum FrameRegion: String {
 /// What the model said about where the problem is and what causes it.
 struct IssueDetail: Equatable {
     let region: FrameRegion
-    /// A short, cleaned-up name like "the lamp post", or nil when the model's words weren't usable.
-    let thing: String?
+    /// A short, cleaned-up name like "the lamp post", or nil when the model's words weren't usable
+    /// or Vision saw something else there.
+    var thing: String?
     /// What the person tapped, like "cup", so the advice names it instead of "the subject".
     var subjectName: String? = nil
     /// Where `thing` was found on screen, in 0...1 viewfinder coordinates from the top left.
@@ -98,6 +99,26 @@ struct IssueDetail: Equatable {
         if let subjectName, !["person", "object"].contains(subjectName) {
             self.subjectName = subjectName
         }
+    }
+
+    /// Whether Vision's view of the spot agrees with the name the model gave, so a thing the
+    /// model imagined is never named or outlined. Only a confident label that matches nothing
+    /// counts against the name: when Vision isn't sure, the model gets the benefit of the doubt.
+    func matches(labels: [(label: String, confidence: Float)]) -> Bool {
+        guard let thing else { return true }
+        let named = thing.split(separator: " ").map(String.init).filter { $0 != "the" }
+        guard labels.contains(where: { $0.confidence >= 0.4 }) else { return true }
+        let seen = labels.flatMap { $0.label.lowercased().split(separator: "_").map(String.init) }
+        return named.contains { word in seen.contains { Self.sameThing(word, $0) } }
+    }
+
+    /// Two words for the same kind of thing: the same stem, like "car" and "cars", or synonyms.
+    static func sameThing(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        let shorter = a.count <= b.count ? a : b
+        let longer = a.count <= b.count ? b : a
+        if shorter.count >= 3, longer.hasPrefix(shorter) { return true }
+        return CoachRules.objectSynonyms.contains { $0.contains(a) && $0.contains(b) }
     }
 
     /// How the advice names the subject: what was tapped, or else "the subject".
@@ -201,8 +222,47 @@ extension CoachIssue {
         if keepsPlacement, let safe = placementSafeAction(detail) {
             return Advice(action: safe.text, why: general.why, symbol: safe.symbol)
         }
-        guard let detail, let specific = specificAction(detail) else { return general }
+        guard let detail, let specific = specificAction(detail) else {
+            // Say how much: the zoom button to tap, rather than just "step closer".
+            if let analysis, let distance = distanceAction(analysis) {
+                return Advice(action: distance, why: general.why, symbol: general.symbol)
+            }
+            return general
+        }
         return Advice(action: specific.text, why: general.why, symbol: specific.symbol ?? general.symbol, thirdsLines: general.thirdsLines)
+    }
+
+    /// How much of the frame the subject should fill once it's close enough.
+    static let comfortableShare = 0.06
+
+    /// A step closer or back with an amount: the zoom button that gets there, from how much
+    /// of the frame the subject fills now. Nil for other issues, or when zoom can't help.
+    func distanceAction(_ analysis: SceneAnalysis) -> String? {
+        let readings = analysis.readings
+        let stops = readings.zoomStops.sorted()
+        switch asksToMove {
+        case .closer:
+            let size = analysis.subject.map { Double($0.width * $0.height) }
+                ?? analysis.faces.map { Double($0.width * $0.height) }.max()
+            guard let size, size > 0 else { return nil }
+            // Zooming by a factor makes the subject that much wider and taller.
+            let needed = readings.zoom * (Self.comfortableShare / size).squareRoot()
+            if let stop = stops.first(where: { $0 >= needed - 0.05 && $0 > readings.zoom + 0.05 }) {
+                return "Zoom to \(Self.zoomText(stop)), or walk closer"
+            }
+            return "Walk a few steps closer"
+        case .back:
+            // Zoomed in: the next button down shows more, without walking.
+            guard let stop = stops.last(where: { $0 < readings.zoom - 0.05 }) else { return nil }
+            return "Zoom out to \(Self.zoomText(stop)), or step back"
+        case nil:
+            return nil
+        }
+    }
+
+    /// A zoom like the buttons show it: "0.5×", "2×".
+    static func zoomText(_ zoom: Double) -> String {
+        String(format: "%g×", zoom)
     }
 
     /// Tips that can only be followed by moving the subject off the spot the target guide put it in,
@@ -316,6 +376,20 @@ extension CoachIssue {
             Advice(action: "Move the subject into shade for soft light", why: "Shade stops squinting and harsh shadows on the face.")
         case (.tooDark, .food), (.highISO, .food):
             Advice(action: "Move the plate next to a window", why: "Soft window light shows the texture of food.")
+        case (.distractingEdges, .food):
+            Advice(action: "Move cups and phones out of the frame", why: "Only what belongs to the meal should share the plate's space.")
+        case (.subjectCutOff, .people):
+            Advice(action: "Step back so you don't crop at joints", why: "Cutting at the neck, elbows or knees looks like a mistake.")
+        case (.clutteredBackground, .people):
+            Advice(action: "Move them a few steps away from the background", why: "Distance softens the background and lifts the subject off it.")
+        case (.subjectTooSmall, .landscape), (.tooMuchEmptySpace, .landscape):
+            Advice(action: "Add a rock or flower in the foreground", why: "Something close gives a landscape depth and a place to start.")
+        case (.distractingEdges, .city):
+            Advice(action: "Step closer to drop cars and signs at the edges", why: "Busy streets crowd the edges and pull the eye out.")
+        case (.linesDontLead, .city):
+            Advice(action: "Stand so the street runs toward the subject", why: "Streets and kerbs are lines that lead the eye.")
+        case (.clutteredBackground, .nature):
+            Advice(action: "Get low so the sky is behind it", why: "A plain sky makes a flower or animal stand out.")
         default:
             nil
         }
@@ -565,6 +639,59 @@ nonisolated enum CoachRules {
         "sky", "curtain", "curtains", "blind", "blinds", "background", "panel", "panels",
     ]
 
+    /// Told to the model wherever it judges a photo, so the live coach and the photo review agree.
+    static let plainSurfaceRule = """
+        Plain surfaces such as walls, doors, glass, windows, floors and sky are a clean background, not a distraction. \
+        Only report clutteredBackground for a separate object, like a pole, sign or person, that sticks out from right behind the subject.
+        """
+
+    /// Whether the model's praise says something the camera measured as wrong, like "Bright light"
+    /// on a dark frame. Wrong praise makes all the advice harder to trust, so it isn't shown.
+    static func contradicts(strength: String, analysis a: SceneAnalysis) -> Bool {
+        let words = Set(strength.lowercased().split { !$0.isLetter }.map(String.init))
+        func mentions(_ keys: Set<String>) -> Bool { !words.isDisjoint(with: keys) }
+        let lightIssues = issues(for: .exposure, in: a) + issues(for: .light, in: a)
+        if mentions(["light", "lighting", "lit", "bright", "brightness", "exposure", "exposed"]), !lightIssues.isEmpty {
+            return true
+        }
+        if mentions(["sharp", "sharpness", "focus", "focused", "crisp", "clear"]), a.subjectSharpness < softThreshold {
+            return true
+        }
+        if mentions(["level", "straight", "horizon"]), isTilted(a.tilt, alreadyShown: false) {
+            return true
+        }
+        if mentions(["background", "clean", "simple", "uncluttered", "tidy"]),
+           let busyness = a.backgroundBusyness, busyness >= plainBackgroundLimit * 2 {
+            return true
+        }
+        return false
+    }
+
+    /// Whether a "next time" idea from the model blames a plain surface, like "avoid the glass doors".
+    static func blamesPlainSurface(_ text: String) -> Bool {
+        let words = Set(text.lowercased().split { !$0.isLetter }.map(String.init))
+        let blames: Set<String> = ["remove", "avoid", "distract", "distracting", "distraction", "hide", "clutter", "cluttered"]
+        return !words.isDisjoint(with: plainSurfaces) && !words.isDisjoint(with: blames)
+    }
+
+    /// Words the model and Vision use for the same kind of thing, so "the lamp post" matches
+    /// Vision's "streetlight". Each set is one kind of thing.
+    static let objectSynonyms: [Set<String>] = [
+        ["post", "pole", "lamp", "lamppost", "streetlight", "light", "pillar", "column"],
+        ["car", "cars", "vehicle", "automobile", "truck", "van", "bus"],
+        ["plant", "tree", "bush", "shrub", "foliage", "leaf", "leaves", "hedge", "flower", "branch"],
+        ["sign", "signboard", "billboard", "poster", "banner", "signage"],
+        ["bin", "trash", "garbage", "can", "dumpster", "rubbish"],
+        ["chair", "seat", "bench", "stool", "sofa", "couch"],
+        ["table", "desk", "counter"],
+        ["bottle", "cup", "mug", "glass", "drink", "drinkware", "beverage"],
+        ["fence", "railing", "rail", "barrier", "gate"],
+        ["wire", "cable", "cord", "wires", "cables"],
+        ["bag", "backpack", "handbag", "luggage"],
+        ["bike", "bicycle", "cycle"],
+        ["screen", "monitor", "television", "tv", "computer", "laptop"],
+    ]
+
     /// Whether the model's verdict fits what the camera measured. The model sometimes calls plain
     /// glass doors or a wall a distraction, so background verdicts must agree with the measurement.
     static func believes(_ issue: CoachIssue, detail: IssueDetail?, analysis: SceneAnalysis) -> Bool {
@@ -668,7 +795,7 @@ nonisolated enum CoachRules {
         case .composition:
             // Everyone counts: any head at the top edge is cut off, and headroom is
             // measured above the highest head, so it works for groups too.
-            if a.faces.contains(where: { $0.minY < 0.02 }) {
+            if a.headAtTopEdge {
                 found.append(.headCutOff)
             } else if let topmost = a.faces.min(by: { $0.minY < $1.minY }), topmost.minY > 0.35 {
                 found.append(.tooMuchHeadroom)
