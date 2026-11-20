@@ -645,10 +645,11 @@ final class PhotoCoach {
             )
 
             // Where the subject sits is geometry, so the green box decides while it's off target.
-            let usesBox = topic == .subjectPosition
-                || (topic == .composition && styles.contains { $0.subjectPlacement != nil })
+            // Composition always has the guide: the style's spot, or the nearest thirds crossing.
+            let usesBox = topic == .composition
             if usesBox, let target = guide.target, !target.isAligned {
-                feedback = Self.positionFeedback(for: target)
+                // The model's praise stays on the card, so the guide and the model read as one coach.
+                feedback = Self.positionFeedback(for: target, praise: sectionStrength ?? memory.recentStrengths.last)
                 sectionProgress = target.progress
                 continue
             }
@@ -687,22 +688,31 @@ final class PhotoCoach {
             // battery and keeps it to what it's good at: judging the look of the scene.
             var details: [CoachIssue: IssueDetail] = [:]
             var modelNote = "model: not asked"
+            // Once the subject is in place, the guide's job is done, and the model must keep it there.
+            let keepsPlacement = usesBox && guide.target?.isAligned == true
             if usesModel, !issues.contains(where: \.blocksModel),
-               let judgement = await judge(frame, topic: topic, styles: styles, analysis: analysis, selectedName: picked?.name) {
+               let judgement = await judge(
+                   frame, topic: topic, styles: styles, analysis: analysis,
+                   selectedName: picked?.name, keepsPlacement: keepsPlacement
+               ) {
                 guard !Task.isCancelled else { break }
                 modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
+                var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
+                detail.subjectBox = analysis.subject
                 if CoachRules.allows(judgement.issue, for: topic, styles: styles),
                    let issue = judgement.issue.coachIssue,
                    !(issue.asksToMove.map(movesDone.contains) ?? false),
                    !(issue.asksToMove == .closer && analysis.isWideScene),
                    !reframedDone.contains(issue),
                    // "Cut off" is only believed when the subject really runs off an edge.
-                   issue != .subjectCutOff || analysis.subjectTouchesEdge {
+                   issue != .subjectCutOff || analysis.subjectTouchesEdge,
+                   // A plain wall or glass doors aren't clutter, whatever the model says.
+                   CoachRules.believes(issue, detail: detail, analysis: analysis),
+                   // A tip that can only be fixed by moving the subject off its spot loses to the guide.
+                   !(keepsPlacement && issue.undoesPlacement) {
                     // What the model saw is more specific than a minor measurement, so it leads.
                     issues.removeAll { $0 == issue }
                     issues.insert(issue, at: 0)
-                    var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
-                    detail.subjectBox = analysis.subject
                     // Find what the model named, so the advice can point at it and say which way to step.
                     if CoachHighlight.pointsAt(issue), detail.distraction != nil {
                         let candidates = await Self.salientObjects(in: frame)
@@ -732,7 +742,8 @@ final class PhotoCoach {
                 details: details,
                 topic: topic,
                 styles: styles,
-                analysis: analysis
+                analysis: analysis,
+                keepsPlacement: keepsPlacement
             )
         }
     }
@@ -777,7 +788,8 @@ final class PhotoCoach {
         details: [CoachIssue: IssueDetail],
         topic: AdviceTopic,
         styles: Set<CompositionGuide>,
-        analysis: SceneAnalysis
+        analysis: SceneAnalysis,
+        keepsPlacement: Bool = false
     ) {
         if candidate == .some(top) {
             candidateCount += 1
@@ -844,11 +856,16 @@ final class PhotoCoach {
             1 - Double(remaining) / Double(max(sectionIssueCount, remaining, 1))
         )
 
-        let usual = top.advice(for: topic, analysis: analysis, detail: sectionDetail)
+        let usual = top.advice(for: topic, analysis: analysis, detail: sectionDetail, keepsPlacement: keepsPlacement)
         let advice = usesAlternative ? (top.alternativeAdvice(for: topic) ?? usual) : usual
         var improve = [advice.action]
-        if let next {
-            improve.append(next.advice(for: topic, analysis: analysis, detail: details[next]).action)
+        // The rules and the model are one coach: the second tip is left out when it would
+        // undo the first, or move the subject off the spot the guide put it in.
+        if let next, !(keepsPlacement && next.undoesPlacement) {
+            let then = next.advice(for: topic, analysis: analysis, detail: details[next], keepsPlacement: keepsPlacement)
+            if !then.conflicts(with: advice) {
+                improve.append(then.action)
+            }
         }
         feedback = PhotoFeedback(
             good: Array(good.prefix(2)),
@@ -957,6 +974,7 @@ final class PhotoCoach {
     ]
     private static let noneExample = """
         A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background".
+        A person in front of glass doors: issue none, region whole, thing "", strength "Clean background".
         A cup slightly off the third line with a small plant at the edge: issue none, region whole, thing "", strength "Nice framing".
         """
 
@@ -976,6 +994,8 @@ final class PhotoCoach {
             Say where in the frame the problem is, and name the thing causing it in 1 to 3 plain words.
             Never describe people: call one person the subject and several people the subjects.
             Also name one thing that already works, in 2 to 5 words.\(praised)
+            Plain surfaces such as walls, doors, glass, windows, floors and sky are a clean background, not a distraction. \
+            Only report clutteredBackground for a separate object, like a pole, sign or person, that sticks out from right behind the subject.
             Brightness, sharpness and tilt are measured by the camera and handled separately, so never report them. \
             The measurements given with each photo are always correct.
             Examples:
@@ -1013,7 +1033,8 @@ final class PhotoCoach {
         topic: AdviceTopic,
         styles: Set<CompositionGuide>,
         analysis: SceneAnalysis,
-        selectedName: String? = nil
+        selectedName: String? = nil,
+        keepsPlacement: Bool = false
     ) async -> CoachJudgement? {
         // The person chose what they're photographing, so the advice is about that.
         let chosen = selectedName.map { name in
@@ -1036,6 +1057,10 @@ final class PhotoCoach {
                     "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
                     if let chosen {
                         chosen
+                    }
+                    // The guide has already placed the subject; the model mustn't undo it.
+                    if keepsPlacement {
+                        "The subject is already where the chosen style wants it. Don't suggest moving the camera left, right, up or down; only stepping closer or back, zooming, or none."
                     }
                     for scene in analysis.scenes where scene != .object {
                         scene.coachingHint
@@ -1067,9 +1092,9 @@ final class PhotoCoach {
 
     // MARK: - Frames
 
-    private static func positionFeedback(for placement: SubjectTarget) -> PhotoFeedback {
+    private static func positionFeedback(for placement: SubjectTarget, praise: String? = nil) -> PhotoFeedback {
         PhotoFeedback(
-            good: [],
+            good: praise.map { [$0] } ?? [],
             improve: placement.cameraAdvice,
             why: "A subject on a third line feels more natural than one dead centre.",
             symbol: placement.moveSymbol,

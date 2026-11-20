@@ -32,6 +32,26 @@ nonisolated struct Advice: Equatable, Sendable {
     let why: String
     /// An arrow showing which way to move, when the advice has a direction.
     var symbol: String? = nil
+
+    /// True when following both would undo each other, like moving left then right,
+    /// so the coach never shows them together.
+    func conflicts(with other: Advice) -> Bool {
+        let mine = Self.directions(of: symbol)
+        let theirs = Self.directions(of: other.symbol)
+        let opposites: [(String, String)] = [("left", "right"), ("up", "down")]
+        if opposites.contains(where: { (mine.contains($0.0) && theirs.contains($0.1)) || (mine.contains($0.1) && theirs.contains($0.0)) }) {
+            return true
+        }
+        // Stepping closer and stepping back undo each other too.
+        let closer = "arrow.up.left.and.arrow.down.right", back = "arrow.down.right.and.arrow.up.left"
+        return (symbol == closer && other.symbol == back) || (symbol == back && other.symbol == closer)
+    }
+
+    /// The directions a plain arrow symbol points, like ["up", "left"] for "arrow.up.left".
+    private static func directions(of symbol: String?) -> Set<String> {
+        guard let symbol, symbol.hasPrefix("arrow."), !symbol.contains(".and.") else { return [] }
+        return Set(symbol.split(separator: ".").dropFirst().map(String.init))
+    }
 }
 
 /// Where in the frame the model saw the problem.
@@ -160,12 +180,42 @@ extension FrameRegion {
 extension CoachIssue {
     /// Short, beginner-friendly advice that names the controls in the topic's top bar.
     /// With a `detail` from the model, the action names what to move away from and which way.
-    func advice(for topic: AdviceTopic, analysis: SceneAnalysis? = nil, detail: IssueDetail? = nil) -> Advice {
+    /// With `keepsPlacement`, the subject is already where the target guide wants it, so the advice
+    /// never asks to move the camera across the frame, which would undo that.
+    func advice(
+        for topic: AdviceTopic,
+        analysis: SceneAnalysis? = nil,
+        detail: IssueDetail? = nil,
+        keepsPlacement: Bool = false
+    ) -> Advice {
         // The main scene's wording first, then the backdrop's, e.g. a person in a landscape.
         let sceneWording = analysis?.scenes.lazy.compactMap { sceneAdvice(for: $0) }.first
         let general = sceneWording ?? generalAdvice(for: topic, analysis: analysis)
+        if keepsPlacement, let safe = placementSafeAction(detail) {
+            return Advice(action: safe.text, why: general.why, symbol: safe.symbol)
+        }
         guard let detail, let specific = specificAction(detail) else { return general }
         return Advice(action: specific.text, why: general.why, symbol: specific.symbol ?? general.symbol)
+    }
+
+    /// Tips that can only be followed by moving the subject off its spot, so they lose to the target guide.
+    var undoesPlacement: Bool {
+        self == .vanishingPointOffCentre
+    }
+
+    /// The same fix without moving the camera across the frame: stepping or zooming keeps the
+    /// subject where the guide put it. Nil when the usual advice doesn't move the camera sideways.
+    private func placementSafeAction(_ detail: IssueDetail?) -> (text: String, symbol: String?)? {
+        switch self {
+        case .distractingEdges:
+            let target = detail?.distraction ?? "distractions at the edges"
+            return ("Step closer or zoom in a little to drop \(target)", "arrow.up.left.and.arrow.down.right")
+        case .subjectCutOff:
+            let cut = detail.map { $0.distraction ?? $0.subjectPhrase } ?? "the subject"
+            return ("Step back so \(cut) fits", "arrow.down.right.and.arrow.up.left")
+        default:
+            return nil
+        }
     }
 
     private func generalAdvice(for topic: AdviceTopic, analysis: SceneAnalysis?) -> Advice {
@@ -491,6 +541,33 @@ nonisolated enum CoachRules {
     /// measured instead), the Negative Space size, which is measured too, and the vertex tip,
     /// whose Single and Double Vertex styles were removed.
     static let unusedModelIssues: Set<VisualIssue> = [.noClearSubject, .tooMuchEmptySpace, .subjectTooBig, .noClearVertex]
+    /// Below this share of edges (see `SceneAnalysis.backgroundBusyness`) the background is
+    /// measurably plain, so the model's "cluttered background" isn't believed.
+    static let plainBackgroundLimit = 0.08
+    /// Surfaces that make a clean background, not a distraction, whatever the model says,
+    /// unless the background measures clearly busy (a window onto a busy street, say).
+    static let plainSurfaces: Set<String> = [
+        "wall", "walls", "door", "doors", "glass", "window", "windows", "floor", "ceiling",
+        "sky", "curtain", "curtains", "blind", "blinds", "background", "panel", "panels",
+    ]
+
+    /// Whether the model's verdict fits what the camera measured. The model sometimes calls plain
+    /// glass doors or a wall a distraction, so background verdicts must agree with the measurement.
+    static func believes(_ issue: CoachIssue, detail: IssueDetail?, analysis: SceneAnalysis) -> Bool {
+        guard issue == .clutteredBackground || issue == .distractingEdges else { return true }
+        let busyness = analysis.backgroundBusyness
+        let namesPlainSurface = detail?.thing.map { name in
+            name.split(separator: " ").contains { plainSurfaces.contains(String($0)) }
+        } ?? false
+        if namesPlainSurface {
+            // Only a clearly busy background lets a plain-surface name through.
+            return (busyness ?? 0) >= plainBackgroundLimit * 2
+        }
+        if issue == .clutteredBackground, let busyness, busyness < plainBackgroundLimit {
+            return false
+        }
+        return true
+    }
 
     /// Topics where the model adds judgement the measurements can't give.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
@@ -574,13 +651,6 @@ nonisolated enum CoachRules {
                 if pitch > 25 { found.append(.pointingUp) }
             }
         case .composition:
-            if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
-            // Negative Space wants a small subject in lots of empty space.
-            if styles.contains(.negativeSpace), let subject = a.subject,
-               Double(subject.width * subject.height) > negativeSpaceLimit {
-                found.append(.subjectTooBig)
-            }
-        case .subjectPosition:
             // Everyone counts: any head at the top edge is cut off, and headroom is
             // measured above the highest head, so it works for groups too.
             if a.faces.contains(where: { $0.minY < 0.02 }) {
@@ -589,6 +659,11 @@ nonisolated enum CoachRules {
                 found.append(.tooMuchHeadroom)
             }
             if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
+            // Negative Space wants a small subject in lots of empty space.
+            if styles.contains(.negativeSpace), let subject = a.subject,
+               Double(subject.width * subject.height) > negativeSpaceLimit {
+                found.append(.subjectTooBig)
+            }
         }
         return found
     }
@@ -610,9 +685,7 @@ nonisolated enum CoachRules {
         case .anglePerspective:
             if a.tilt != nil, !problems.contains(.phoneTilted) { good.append("Phone is level") }
         case .composition:
-            // Framing strengths come from the model and the green box, not from how the phone is held.
-            break
-        case .subjectPosition:
+            // Other framing strengths come from the model and the target guide, not from how the phone is held.
             if !a.faces.isEmpty, !problems.contains(.headCutOff), !problems.contains(.tooMuchHeadroom) {
                 good.append("Good headroom")
             }

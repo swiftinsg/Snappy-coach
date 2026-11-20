@@ -170,8 +170,8 @@ struct CoachRulesTests {
     @Test func headroomRules() {
         let cutOff = CGRect(x: 0.4, y: 0.0, width: 0.2, height: 0.2)
         let sunk = CGRect(x: 0.4, y: 0.5, width: 0.2, height: 0.2)
-        #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [cutOff])).first == .headCutOff)
-        #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [sunk])).first == .tooMuchHeadroom)
+        #expect(CoachRules.issues(for: .composition, in: scene(faces: [cutOff])).first == .headCutOff)
+        #expect(CoachRules.issues(for: .composition, in: scene(faces: [sunk])).first == .tooMuchHeadroom)
     }
 
     @Test func groupsAreCheckedForEveryone() {
@@ -179,12 +179,12 @@ struct CoachRulesTests {
         let cutOff = CGRect(x: 0.6, y: 0.0, width: 0.1, height: 0.1)
         // Someone's head at the top edge is cut off, even if it isn't the biggest face.
         let bigFine = CGRect(x: 0.3, y: 0.2, width: 0.2, height: 0.2)
-        #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [bigFine, cutOff])).contains(.headCutOff))
+        #expect(CoachRules.issues(for: .composition, in: scene(faces: [bigFine, cutOff])).contains(.headCutOff))
         // Headroom is measured above the highest head, so it works with several people.
         let low1 = CGRect(x: 0.2, y: 0.4, width: 0.1, height: 0.1)
         let low2 = CGRect(x: 0.6, y: 0.45, width: 0.1, height: 0.1)
-        #expect(CoachRules.issues(for: .subjectPosition, in: scene(faces: [low1, low2])).contains(.tooMuchHeadroom))
-        #expect(!CoachRules.issues(for: .subjectPosition, in: scene(faces: [fine, low2])).contains(.tooMuchHeadroom))
+        #expect(CoachRules.issues(for: .composition, in: scene(faces: [low1, low2])).contains(.tooMuchHeadroom))
+        #expect(!CoachRules.issues(for: .composition, in: scene(faces: [fine, low2])).contains(.tooMuchHeadroom))
         // People facing away (bodies, no faces) still count.
         var backs = scene(faces: [])
         backs.people = [CGRect(x: 0.2, y: 0.2, width: 0.2, height: 0.6), CGRect(x: 0.5, y: 0.2, width: 0.2, height: 0.6)]
@@ -263,6 +263,65 @@ struct CoachRulesTests {
         #expect(slideDown.cameraAdvice.first?.contains("up") == true)
         #expect(slideDown.moveSymbol == "arrow.up")
         #expect(slideDown.phoneAim.y < 0.5)
+    }
+
+    @Test func plainBackgroundsArentClutter() {
+        var plain = scene()
+        plain.backgroundBusyness = 0.02
+        var busy = scene()
+        busy.backgroundBusyness = 0.3
+
+        let glassDoors = IssueDetail(region: .background, rawThing: "glass doors")
+        let wall = IssueDetail(region: .background, rawThing: "the wall")
+        let lampPost = IssueDetail(region: .background, rawThing: "the lamp post")
+        #expect(!CoachRules.believes(.clutteredBackground, detail: glassDoors, analysis: plain))
+        #expect(!CoachRules.believes(.clutteredBackground, detail: wall, analysis: plain))
+        #expect(!CoachRules.believes(.distractingEdges, detail: wall, analysis: plain))
+        // Even a real object isn't clutter when the background measures plain.
+        #expect(!CoachRules.believes(.clutteredBackground, detail: lampPost, analysis: plain))
+        #expect(CoachRules.believes(.clutteredBackground, detail: lampPost, analysis: busy))
+        // A window onto a busy street is a real distraction.
+        #expect(CoachRules.believes(.clutteredBackground, detail: IssueDetail(region: .background, rawThing: "window"), analysis: busy))
+        // Other issues aren't touched.
+        #expect(CoachRules.believes(.subjectCutOff, detail: wall, analysis: plain))
+    }
+
+    @Test func compositionChecksHeadroom() {
+        let cutOff = CGRect(x: 0.4, y: 0.0, width: 0.2, height: 0.2)
+        #expect(CoachRules.issues(for: .composition, in: scene(faces: [cutOff])).contains(.headCutOff))
+        #expect(!AdviceTopic.allCases.map(\.rawValue).contains("subjectPosition"))
+    }
+
+    @Test func modelTipsKeepThePlacedSubjectInPlace() {
+        let sign = IssueDetail(region: .right, rawThing: "the sign")
+        let usual = CoachIssue.distractingEdges.advice(for: .composition, detail: sign)
+        #expect(usual.action.contains("Move the camera"))
+
+        let kept = CoachIssue.distractingEdges.advice(for: .composition, detail: sign, keepsPlacement: true)
+        #expect(kept.action == "Step closer or zoom in a little to drop the sign")
+        for direction in ["left", "right", " up", "down"] {
+            #expect(!kept.action.contains(direction))
+        }
+        let cut = CoachIssue.subjectCutOff.advice(
+            for: .composition, detail: IssueDetail(region: .top, rawThing: "the subject"), keepsPlacement: true
+        )
+        #expect(cut.action == "Step back so the subject fits")
+        #expect(CoachIssue.vanishingPointOffCentre.undoesPlacement)
+    }
+
+    @Test func tipsThatUndoEachOtherConflict() {
+        let left = Advice(action: "a", why: "", symbol: "arrow.left")
+        let right = Advice(action: "b", why: "", symbol: "arrow.right")
+        let up = Advice(action: "c", why: "", symbol: "arrow.up")
+        let upRight = Advice(action: "d", why: "", symbol: "arrow.up.right")
+        let closer = Advice(action: "e", why: "", symbol: "arrow.up.left.and.arrow.down.right")
+        let back = Advice(action: "f", why: "", symbol: "arrow.down.right.and.arrow.up.left")
+        #expect(left.conflicts(with: right))
+        #expect(left.conflicts(with: upRight))
+        #expect(!left.conflicts(with: up))
+        #expect(closer.conflicts(with: back))
+        #expect(!closer.conflicts(with: left))
+        #expect(!Advice(action: "g", why: "").conflicts(with: left))
     }
 
     @Test func subjectCutOffNeedsAnEdge() {

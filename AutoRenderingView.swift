@@ -203,22 +203,18 @@ struct AutoRenderingView: View {
 
     /// Where the target guide puts the subject for the chosen topic and style, if it has a box at all.
     private var subjectPlacement: SubjectPlacement? {
-        switch adviceTopic {
-        case .subjectPosition:
-            .thirdsPoint
-        case .composition:
-            // With several styles picked, the first one that defines a subject position leads.
-            CompositionGuide.allCases
-                .first { compositionGuides.contains($0) && $0.subjectPlacement != nil }?
-                .subjectPlacement
-        default:
-            nil
-        }
+        guard adviceTopic == .composition else { return nil }
+        // With several styles picked, the first one that defines a subject position leads.
+        // Styles that don't place the subject still get a guide: the middle for One-Point
+        // Perspective, where the lines meet, and otherwise the nearest thirds crossing.
+        return CompositionGuide.allCases
+            .first { compositionGuides.contains($0) && $0.subjectPlacement != nil }?
+            .subjectPlacement ?? (compositionGuides.contains(.onePointPerspective) ? .centre : .thirdsPoint)
     }
 
     /// Topics whose advice is about one subject, so they wait for the person to tap it.
     private var needsObject: Bool {
-        [.composition, .subjectPosition, .focus].contains(adviceTopic)
+        [.composition, .focus].contains(adviceTopic)
     }
 
     /// The advice is about a subject that hasn't been chosen yet.

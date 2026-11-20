@@ -263,6 +263,9 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// What's behind the people in a people photo, like a landscape or a city, so both kinds
     /// of advice apply. Nil when there's no person or the backdrop isn't clear.
     var backdrop: SceneType? = nil
+    /// How busy the background right around the subject is: the share of it on a clear edge, 0...1.
+    /// Nil without a subject. Walls, doors and glass score low; clutter scores high.
+    var backgroundBusyness: Double? = nil
 
     /// How many people are in the frame, whether their faces or only their bodies show.
     var personCount: Int {
@@ -328,6 +331,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             "subject \(subjectText)  faces \(faces.count)  people \(people.count)  scene \(scenes.map(\.rawValue).joined(separator: "+"))",
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
+            String(format: "background busy %.3f (plain below %.3f)", backgroundBusyness ?? -1, CoachRules.plainBackgroundLimit),
         ].joined(separator: "\n")
     }
 
@@ -383,7 +387,8 @@ extension SceneAnalysis {
             layout: (0..<64).map { cell in
                 gray.mean(in: CGRect(x: Double(cell % 8) / 8, y: Double(cell / 8) / 8, width: 1.0 / 8, height: 1.0 / 8))
             },
-            backdrop: backdrop
+            backdrop: backdrop,
+            backgroundBusyness: subject.map { gray.edgeShare(in: $0.insetBy(dx: -0.15, dy: -0.15), excluding: $0) }
         )
     }
 
@@ -484,5 +489,25 @@ private nonisolated struct GrayImage {
         guard count > 0 else { return 0 }
         let average = sum / count
         return sumOfSquares / count - average * average
+    }
+
+    /// Share of pixels inside `rect` but outside `excluded` that sit on a clear edge, 0...1.
+    /// Counting edges rather than how strong they are means the few straight lines of a door
+    /// frame or a window score low, while clutter, with edges everywhere, scores high.
+    func edgeShare(in rect: CGRect, excluding excluded: CGRect) -> Double {
+        let (xs, ys) = bounds(of: rect)
+        let (skipXs, skipYs) = bounds(of: excluded)
+        var edges = 0
+        var count = 0
+        for y in max(ys.lowerBound, 1)..<min(ys.upperBound, height - 1) {
+            for x in max(xs.lowerBound, 1)..<min(xs.upperBound, width - 1) where !(skipXs.contains(x) && skipYs.contains(y)) {
+                let center = Int(pixels[y * width + x])
+                let laplacian = Int(pixels[(y - 1) * width + x]) + Int(pixels[(y + 1) * width + x])
+                    + Int(pixels[y * width + x - 1]) + Int(pixels[y * width + x + 1]) - 4 * center
+                if abs(laplacian) > 24 { edges += 1 }
+                count += 1
+            }
+        }
+        return count == 0 ? 0 : Double(edges) / Double(count)
     }
 }

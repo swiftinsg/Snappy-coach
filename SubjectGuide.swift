@@ -607,7 +607,7 @@ struct CameraMoveArrow: View {
     }
 }
 
-/// Keeps the green box up to date while the Subject Position or Composition topic is chosen.
+/// Keeps the target guide up to date while the Composition topic is chosen.
 @Observable
 final class SubjectGuide {
     private(set) var target: SubjectTarget?

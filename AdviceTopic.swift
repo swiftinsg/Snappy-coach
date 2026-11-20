@@ -7,14 +7,13 @@ import SwiftUI
 
 /// What the live advice focuses on. Chosen from the dropdown in the top bar.
 enum AdviceTopic: String, CaseIterable, Identifiable {
-    case composition, subjectPosition, anglePerspective, focus, light, exposure
+    case composition, anglePerspective, focus, light, exposure
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .composition: "Composition"
-        case .subjectPosition: "Subject Position"
         case .anglePerspective: "Angle & Perspective"
         case .focus: "Focus"
         case .light: "Light"
@@ -25,7 +24,6 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     /// Shorter name for the dropdown button, so it fits beside the camera controls.
     var shortTitle: String {
         switch self {
-        case .subjectPosition: "Subject"
         case .anglePerspective: "Angle"
         default: title
         }
@@ -34,7 +32,6 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .composition: "square.grid.3x3"
-        case .subjectPosition: "person.crop.rectangle"
         case .anglePerspective: "angle"
         case .focus: "dot.viewfinder"
         case .light: "sun.max"
@@ -47,7 +44,6 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     var defaultControls: [PhotoControl] {
         switch self {
         case .composition: [.aspect, .timer, .live]
-        case .subjectPosition: [.aspect, .depth, .timer]
         case .anglePerspective: [.aspect, .timer, .live]
         case .focus: [.focus, .depth, .lensAperture]
         case .light: [.flash, .nightMode, .whiteBalance]
