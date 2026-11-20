@@ -336,7 +336,10 @@ struct CoachRulesTests {
 
     @Test func modelIssuesAreFilteredByTopic() {
         #expect(CoachRules.allows(.clutteredBackground, for: .composition))
-        #expect(CoachRules.allows(.clutteredBackground, for: .anglePerspective))
+        // Only Composition looks at the background and other objects.
+        #expect(!CoachRules.allows(.clutteredBackground, for: .anglePerspective))
+        #expect(!CoachRules.usesModel(.anglePerspective))
+        #expect(CoachRules.usesModel(.composition))
         #expect(!CoachRules.allows(.subjectCutOff, for: .exposure))
     }
 

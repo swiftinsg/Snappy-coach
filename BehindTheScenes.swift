@@ -1020,8 +1020,6 @@ final class PhotoCoach {
                 judge the biggest problem that applies to any of them:
                 \(criteria)
                 """
-        case .anglePerspective:
-            return "the background: whether anything behind the subject distracts from it"
         default:
             return "the framing: the background, the edges, whether the subject is cut off, and empty space"
         }

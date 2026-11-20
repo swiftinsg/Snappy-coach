@@ -569,9 +569,11 @@ nonisolated enum CoachRules {
         return true
     }
 
-    /// Topics where the model adds judgement the measurements can't give.
+    /// Topics where the model adds judgement the measurements can't give. Only Composition looks
+    /// beyond the subject, at the background and other objects; every other topic is about the
+    /// subject and the camera alone, so it is measured only.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
-        topic == .composition || topic == .anglePerspective
+        topic == .composition
     }
 
     /// Visual issues that make sense to report for a topic and the chosen composition styles.
@@ -585,9 +587,8 @@ nonisolated enum CoachRules {
             // Style issues only count when one of their styles is being practised.
             guard let owners = issue.styles else { return true }
             return !owners.isDisjoint(with: styles)
-        case .anglePerspective:
-            return issue == .clutteredBackground || issue == .none
         default:
+            // Only Composition judges the background and other objects.
             return false
         }
     }

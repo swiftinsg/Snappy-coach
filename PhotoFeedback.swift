@@ -73,6 +73,7 @@ final class PhotoCritique {
             They were practising \(topic.title.lowercased()). \
             Be specific to what is actually visible. Never name or describe people; say "the subject", or "the subjects" for several people. \
             The camera's measurements are always correct, so don't contradict them.
+            \(CoachRules.usesModel(topic) ? "" : "Talk only about the subject and \(topic.title.lowercased()); don't comment on the background or other objects.")
             \(memory.map { "While shooting: \($0) Build on that rather than repeating it." } ?? "")
             """
         )
@@ -90,10 +91,15 @@ final class PhotoCritique {
                 }.content
             }
             guard !Task.isCancelled else { return }
+            // Only Composition looks beyond the subject, so other topics ignore what the model
+            // says about the background and other objects.
+            let judgesSurroundings = CoachRules.usesModel(topic)
             // A measured problem beats the model's guess.
-            let issue = measured.first ?? critique.issue.coachIssue
+            let issue = measured.first ?? (judgesSurroundings ? critique.issue.coachIssue : nil)
             // Where the model saw the problem only applies to its own issue.
-            let detail = measured.isEmpty ? IssueDetail(region: critique.region, rawThing: critique.thing) : nil
+            let detail = measured.isEmpty && judgesSurroundings
+                ? IssueDetail(region: critique.region, rawThing: critique.thing)
+                : nil
             state = .finished(Self.text(strength: critique.strength, issue: issue, detail: detail,
                                         nextTime: critique.nextTime, topic: topic, analysis: analysis))
         } catch {
