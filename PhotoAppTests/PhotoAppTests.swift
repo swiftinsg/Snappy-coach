@@ -459,6 +459,21 @@ struct CoachRulesTests {
         #expect(scene(subject: nil).positionPhrase == nil)
     }
 
+    @Test func modelHearsWhatTheRulesAreHandling() throws {
+        let small = try #require(CoachRules.handledNote(issues: [.subjectTooSmall], keepsPlacement: false, placement: .thirdsPoint))
+        #expect(small.contains("step closer or zoom"))
+        let placed = try #require(CoachRules.handledNote(issues: [], keepsPlacement: true, placement: .thirdsPoint))
+        #expect(placed.contains("on a thirds crossing"))
+        #expect(placed.contains("don't suggest moving the camera"))
+        #expect(CoachRules.handledNote(issues: [], keepsPlacement: false, placement: .centre) == nil)
+    }
+
+    @Test func compositionShowsOneTip() {
+        // Composition mixes rule and model tips, so it shows one; other topics' tips are all rules.
+        #expect(!CoachRules.showsSecondTip(for: .composition))
+        #expect(CoachRules.showsSecondTip(for: .exposure))
+    }
+
     @Test func subjectCutOffNeedsAnEdge() {
         #expect(scene(subject: CGRect(x: 0, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
         #expect(!scene(subject: CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)

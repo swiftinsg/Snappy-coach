@@ -446,6 +446,16 @@ enum SubjectPlacement: Equatable {
     /// The vertical middle line, at whatever height the subject is.
     case centreLine
 
+    /// Where this is, in a few words, for telling the model where the subject was placed.
+    var name: String {
+        switch self {
+        case .thirdsPoint: "on a thirds crossing"
+        case .thirdsLine: "on a third line"
+        case .centre: "in the centre"
+        case .centreLine: "on the centre line"
+        }
+    }
+
     /// The photography idea behind putting the subject here, shown under the guide's advice.
     var why: String {
         switch self {

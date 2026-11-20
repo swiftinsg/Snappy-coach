@@ -720,13 +720,20 @@ final class PhotoCoach {
             var modelNote = "model: not asked"
             // Once the subject is in place, the guide's job is done, and the model must keep it there.
             let keepsPlacement = usesBox && guide.target?.isAligned == true
+            // The rules and the model are one coach: the model hears what the rules are already
+            // dealing with, so it neither repeats nor contradicts them.
+            let handled = CoachRules.handledNote(
+                issues: issues, keepsPlacement: keepsPlacement,
+                placement: CompositionGuide.guidePlacement(for: styles)
+            )
             if usesModel, !issues.contains(where: \.blocksModel),
                let judgement = await judge(
                    frame, topic: topic, styles: styles, analysis: analysis,
-                   selectedName: picked?.name, keepsPlacement: keepsPlacement
+                   selectedName: picked?.name, handled: handled
                ) {
                 guard !Task.isCancelled else { break }
                 modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
+                if let handled { modelNote += "\nsent: \(handled)" }
                 var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
                 detail.subjectBox = analysis.subject
                 detail.isMirrored = camera.isUsingFrontCamera
@@ -904,7 +911,8 @@ final class PhotoCoach {
         var improve = [advice.action]
         // The rules and the model are one coach: the second tip is left out when it would
         // undo the first, or move the subject off the spot the guide put it in.
-        if let next, !(keepsPlacement && next.undoesPlacement(CompositionGuide.guidePlacement(for: styles))) {
+        if let next, CoachRules.showsSecondTip(for: topic),
+           !(keepsPlacement && next.undoesPlacement(CompositionGuide.guidePlacement(for: styles))) {
             let then = next.advice(for: topic, analysis: analysis, detail: details[next], keepsPlacement: keepsPlacement)
             if !then.conflicts(with: advice) {
                 improve.append(then.action)
@@ -1086,7 +1094,7 @@ final class PhotoCoach {
         styles: Set<CompositionGuide>,
         analysis: SceneAnalysis,
         selectedName: String? = nil,
-        keepsPlacement: Bool = false
+        handled: String? = nil
     ) async -> CoachJudgement? {
         // The person chose what they're photographing, so the advice is about that.
         let chosen = selectedName.map { name in
@@ -1110,9 +1118,9 @@ final class PhotoCoach {
                     if let chosen {
                         chosen
                     }
-                    // The guide has already placed the subject; the model mustn't undo it.
-                    if keepsPlacement {
-                        "The subject is already where the chosen style wants it. Don't suggest moving the camera left, right, up or down; only stepping closer or back, zooming, or none."
+                    // What the rules are already dealing with, so the model doesn't repeat or undo it.
+                    if let handled {
+                        handled
                     }
                     for scene in analysis.scenes where scene != .object {
                         scene.coachingHint

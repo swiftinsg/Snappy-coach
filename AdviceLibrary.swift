@@ -639,6 +639,26 @@ nonisolated enum CoachRules {
         "sky", "curtain", "curtains", "blind", "blinds", "background", "panel", "panels",
     ]
 
+    /// What the rules are already dealing with, told to the model so it neither repeats nor
+    /// contradicts them. Nil when the rules aren't handling anything the model would see.
+    static func handledNote(issues: [CoachIssue], keepsPlacement: Bool, placement: SubjectPlacement) -> String? {
+        var handled: [String] = []
+        if issues.contains(.subjectTooSmall) {
+            handled.append("the camera is already asking them to step closer or zoom in, so don't report the subject being small or far away")
+        }
+        if keepsPlacement {
+            handled.append("the subject is already where the chosen style wants it (\(placement.name)), so don't suggest moving the camera left, right, up or down; only stepping closer or back, zooming, or none")
+        }
+        guard !handled.isEmpty else { return nil }
+        return "Already handled by the camera: " + handled.joined(separator: "; ") + "."
+    }
+
+    /// Composition shows one tip, because its tips can come from the rules or the model and two
+    /// from different sources can pull opposite ways. Other topics' tips all come from the rules.
+    static func showsSecondTip(for topic: AdviceTopic) -> Bool {
+        topic != .composition
+    }
+
     /// Told to the model wherever it judges a photo, so the live coach and the photo review agree.
     static let plainSurfaceRule = """
         Plain surfaces such as walls, doors, glass, windows, floors and sky are a clean background, not a distraction. \
