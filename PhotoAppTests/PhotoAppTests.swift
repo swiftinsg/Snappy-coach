@@ -306,7 +306,57 @@ struct CoachRulesTests {
             for: .composition, detail: IssueDetail(region: .top, rawThing: "the subject"), keepsPlacement: true
         )
         #expect(cut.action == "Step back so the subject fits")
-        #expect(CoachIssue.vanishingPointOffCentre.undoesPlacement)
+        #expect(CoachIssue.vanishingPointOffCentre.undoesPlacement(.thirdsPoint))
+    }
+
+    @Test func horizonTipOnlyGivesWayWhenTheGuideFixesHeight() {
+        #expect(CoachIssue.horizonThroughMiddle.undoesPlacement(.thirdsPoint))
+        #expect(CoachIssue.horizonThroughMiddle.undoesPlacement(.centre))
+        #expect(!CoachIssue.horizonThroughMiddle.undoesPlacement(.thirdsLine(1.0 / 3)))
+        #expect(!CoachIssue.horizonThroughMiddle.undoesPlacement(.centreLine))
+        #expect(CompositionGuide.guidePlacement(for: [.leadingLines]) == .thirdsPoint)
+        #expect(CompositionGuide.guidePlacement(for: [.onePointPerspective]) == .centre)
+        #expect(CompositionGuide.guidePlacement(for: [.ruleOfThirdsOne]) == .thirdsLine(1.0 / 3))
+    }
+
+    @Test func guideExplainsItsOwnPlacement() throws {
+        let centred = try #require(SubjectTarget.make(
+            subject: CGRect(x: 0.1, y: 0.1, width: 0.1, height: 0.1), placement: .centre
+        ))
+        #expect(centred.placement.why.contains("centred"))
+        let thirds = try #require(SubjectTarget.make(
+            subject: CGRect(x: 0.45, y: 0.45, width: 0.1, height: 0.1), placement: .thirdsPoint
+        ))
+        #expect(thirds.placement.why.contains("third line"))
+    }
+
+    @Test func selfieCameraSwapsLeftAndRight() throws {
+        // The subject has to slide right. On the back camera the phone moves left;
+        // in the mirrored selfie view the scene follows the phone, so it moves right.
+        let subject = CGRect(x: 0.0, y: 0.45, width: 0.1, height: 0.1)
+        let back = try #require(SubjectTarget.make(subject: subject, placement: .thirdsLine(1.0 / 3)))
+        let selfie = try #require(SubjectTarget.make(subject: subject, placement: .thirdsLine(1.0 / 3), isMirrored: true))
+        #expect(back.moveSymbol == "arrow.left")
+        #expect(selfie.moveSymbol == "arrow.right")
+        #expect(selfie.cameraAdvice.first?.contains("right") == true)
+        #expect(selfie.phoneAim.x > 0.5)
+
+        var sign = IssueDetail(region: .right, rawThing: "the sign")
+        sign.isMirrored = true
+        #expect(CoachIssue.distractingEdges.advice(for: .composition, detail: sign).action
+            == "Move the camera slightly right to drop the sign")
+        // Up and down aren't mirrored.
+        var top = IssueDetail(region: .top, rawThing: "the subject")
+        top.isMirrored = true
+        #expect(CoachIssue.subjectCutOff.advice(for: .composition, detail: top).symbol == "arrow.up")
+
+        // The person holding the phone is usually the subject, so no step side is given.
+        var clutter = IssueDetail(region: .background, rawThing: "the lamp post")
+        clutter.subjectBox = CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.4)
+        clutter.box = CGRect(x: 0.38, y: 0.1, width: 0.05, height: 0.6)
+        #expect(clutter.stepSide == .left)
+        clutter.isMirrored = true
+        #expect(clutter.stepSide == nil)
     }
 
     @Test func tipsThatUndoEachOtherConflict() {

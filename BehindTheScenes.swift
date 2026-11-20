@@ -89,7 +89,9 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         if orientation != frameOrientation {
             // Turning the phone turns the frame: carry the followed box across, then look the
             // object up again at its new spot. Switching cameras shows a different scene, so it's dropped.
-            if let current = selected,
+            // Mirrored frames are the front camera, so a change between mirrored and not is a camera switch.
+            let switchedCamera = (Self.unmirrored(orientation) == nil) != (Self.unmirrored(frameOrientation) == nil)
+            if !switchedCamera, let current = selected,
                let box = Self.rotate(current.box, from: frameOrientation, to: orientation) {
                 selected = SelectedObject(box: box, frameAspect: 1 / current.frameAspect, name: current.name)
                 pendingTap = CGPoint(x: box.midX, y: box.midY)
@@ -104,7 +106,6 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 
     /// A box in one upright frame, in another upright frame of the same sensor image.
-    /// Nil for mirrored (front camera) orientations, which aren't mapped.
     private static func rotate(_ box: CGRect, from old: CGImagePropertyOrientation, to new: CGImagePropertyOrientation) -> CGRect? {
         let corners = [CGPoint(x: box.minX, y: box.minY), CGPoint(x: box.maxX, y: box.maxY)]
         let mapped = corners.compactMap { corner in
@@ -121,7 +122,11 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
 
     /// A sensor-frame point (0...1 from the top left) once the frame is turned upright with `orientation`.
     private static func uprightPoint(_ point: CGPoint, in orientation: CGImagePropertyOrientation) -> CGPoint? {
-        switch orientation {
+        // A mirrored frame is the unmirrored one flipped left to right.
+        if let plain = unmirrored(orientation) {
+            return uprightPoint(point, in: plain).map { CGPoint(x: 1 - $0.x, y: $0.y) }
+        }
+        return switch orientation {
         case .up: point
         case .down: CGPoint(x: 1 - point.x, y: 1 - point.y)
         // Turned a quarter clockwise: the sensor's top edge becomes the right side.
@@ -133,11 +138,26 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
 
     /// The reverse of `uprightPoint`.
     private static func sensorPoint(_ point: CGPoint, in orientation: CGImagePropertyOrientation) -> CGPoint? {
-        switch orientation {
+        if let plain = unmirrored(orientation) {
+            return sensorPoint(CGPoint(x: 1 - point.x, y: point.y), in: plain)
+        }
+        return switch orientation {
         case .up: point
         case .down: CGPoint(x: 1 - point.x, y: 1 - point.y)
         case .right: CGPoint(x: point.y, y: 1 - point.x)
         case .left: CGPoint(x: 1 - point.y, y: point.x)
+        default: nil
+        }
+    }
+
+    /// The plain orientation a mirrored one flips, or nil when `orientation` isn't mirrored.
+    /// Checked by turning a test image: `.leftMirrored` is `.right` flipped left to right.
+    private static func unmirrored(_ orientation: CGImagePropertyOrientation) -> CGImagePropertyOrientation? {
+        switch orientation {
+        case .upMirrored: .up
+        case .downMirrored: .down
+        case .leftMirrored: .right
+        case .rightMirrored: .left
         default: nil
         }
     }
@@ -353,7 +373,15 @@ struct FrameStats {
 
 /// What the coach needs to know about each composition style in the picker.
 extension CompositionGuide {
-    /// Where the green box puts the subject, or nil when the style isn't about subject position.
+    /// Where the target guide puts the subject for the picked styles. The first style that
+    /// places the subject leads. Styles that don't still get a guide: the middle for One-Point
+    /// Perspective, where the lines meet, and otherwise the nearest thirds crossing.
+    static func guidePlacement(for styles: Set<CompositionGuide>) -> SubjectPlacement {
+        allCases.first { styles.contains($0) && $0.subjectPlacement != nil }?.subjectPlacement
+            ?? (styles.contains(.onePointPerspective) ? .centre : .thirdsPoint)
+    }
+
+    /// Where the target guide puts the subject, or nil when the style isn't about subject position.
     var subjectPlacement: SubjectPlacement? {
         switch self {
         case .ruleOfThirdsOne: .thirdsLine(1.0 / 3)
@@ -417,6 +445,8 @@ struct PhotoFeedback: Equatable {
     var move: CameraMove? = nil
     /// What the first improvement names, like "the lamp post", outlined on the viewfinder.
     var highlight: CoachHighlight? = nil
+    /// The third lines the first improvement names, lit up on the viewfinder grid.
+    var thirdsLines: Set<ThirdsLine> = []
     /// True when the shot is ready to take.
     var isGoodEnough: Bool
     /// What to practise next, shown once the current section is complete.
@@ -699,6 +729,7 @@ final class PhotoCoach {
                 modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
                 var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
                 detail.subjectBox = analysis.subject
+                detail.isMirrored = camera.isUsingFrontCamera
                 if CoachRules.allows(judgement.issue, for: topic, styles: styles),
                    let issue = judgement.issue.coachIssue,
                    !(issue.asksToMove.map(movesDone.contains) ?? false),
@@ -709,7 +740,7 @@ final class PhotoCoach {
                    // A plain wall or glass doors aren't clutter, whatever the model says.
                    CoachRules.believes(issue, detail: detail, analysis: analysis),
                    // A tip that can only be fixed by moving the subject off its spot loses to the guide.
-                   !(keepsPlacement && issue.undoesPlacement) {
+                   !(keepsPlacement && issue.undoesPlacement(CompositionGuide.guidePlacement(for: styles))) {
                     // What the model saw is more specific than a minor measurement, so it leads.
                     issues.removeAll { $0 == issue }
                     issues.insert(issue, at: 0)
@@ -861,7 +892,7 @@ final class PhotoCoach {
         var improve = [advice.action]
         // The rules and the model are one coach: the second tip is left out when it would
         // undo the first, or move the subject off the spot the guide put it in.
-        if let next, !(keepsPlacement && next.undoesPlacement) {
+        if let next, !(keepsPlacement && next.undoesPlacement(CompositionGuide.guidePlacement(for: styles))) {
             let then = next.advice(for: topic, analysis: analysis, detail: details[next], keepsPlacement: keepsPlacement)
             if !then.conflicts(with: advice) {
                 improve.append(then.action)
@@ -874,6 +905,7 @@ final class PhotoCoach {
             symbol: advice.symbol,
             move: top.asksToMove.map { $0 == .closer ? .closer : .back },
             highlight: highlight,
+            thirdsLines: advice.thirdsLines,
             isGoodEnough: false
         )
     }
@@ -1094,7 +1126,7 @@ final class PhotoCoach {
         PhotoFeedback(
             good: praise.map { [$0] } ?? [],
             improve: placement.cameraAdvice,
-            why: "A subject on a third line feels more natural than one dead centre.",
+            why: placement.placement.why,
             symbol: placement.moveSymbol,
             isGoodEnough: false
         )

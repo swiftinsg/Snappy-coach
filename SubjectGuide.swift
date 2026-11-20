@@ -431,6 +431,24 @@ enum SubjectPlacement: Equatable {
     case centre
     /// The vertical middle line, at whatever height the subject is.
     case centreLine
+
+    /// The photography idea behind putting the subject here, shown under the guide's advice.
+    var why: String {
+        switch self {
+        case .thirdsPoint, .thirdsLine: "A subject on a third line feels more natural than one dead centre."
+        case .centre: "A centred subject feels bold and balanced."
+        case .centreLine: "Centring the subject lets both halves mirror each other."
+        }
+    }
+
+    /// True when the guide fixes the subject's height as well as its side, so moving the
+    /// camera up or down would take the subject off its spot.
+    var fixesHeight: Bool {
+        switch self {
+        case .thirdsPoint, .centre: true
+        case .thirdsLine, .centreLine: false
+        }
+    }
 }
 
 /// Where the subject is now, and where the green box says it should be.
@@ -442,6 +460,11 @@ struct SubjectTarget: Equatable {
     let isAligned: Bool
     /// The point the subject is being guided to. Kept between updates so the box doesn't jump.
     let aimPoint: CGPoint
+    /// Where the chosen style wants the subject.
+    var placement: SubjectPlacement = .thirdsPoint
+    /// True for the front camera, whose view is mirrored: there the scene moves the same way
+    /// as the phone, so left and right swap in the advice and the guide.
+    var isMirrored = false
 
     /// How close the centres must be, as a fraction of the frame, to count as lined up.
     /// Hand-held framing is never exact, so close enough counts.
@@ -460,6 +483,9 @@ struct SubjectTarget: Equatable {
     /// How far the subject has to move inside the frame. Positive is right or down.
     private var dx: CGFloat { target.midX - subject.midX }
     private var dy: CGFloat { target.midY - subject.midY }
+    /// Which way the subject has to slide across the view, as the phone sees it: in a mirrored view
+    /// the scene follows the phone, so the phone moves the same way as the subject has to.
+    private var moveX: CGFloat { isMirrored ? -dx : dx }
 
     /// Puts the target where the chosen composition style wants the subject.
     /// `wasAligned` is the last result, so a lined-up subject gets the looser `holdTolerance`.
@@ -469,7 +495,8 @@ struct SubjectTarget: Equatable {
         subject: CGRect,
         placement: SubjectPlacement,
         wasAligned: Bool = false,
-        previous: SubjectTarget? = nil
+        previous: SubjectTarget? = nil,
+        isMirrored: Bool = false
     ) -> SubjectTarget? {
         // A subject that fills the frame can't be placed anywhere else.
         guard subject.width < 0.75, subject.height < 0.75 else { return nil }
@@ -511,7 +538,9 @@ struct SubjectTarget: Equatable {
             subject: subject,
             target: target,
             isAligned: hypot(dx, dy) < (wasAligned || overshot ? holdTolerance : tolerance),
-            aimPoint: point
+            aimPoint: point,
+            placement: placement,
+            isMirrored: isMirrored
         )
     }
 
@@ -524,7 +553,7 @@ struct SubjectTarget: Equatable {
     var cameraAdvice: [String] {
         var steps: [String] = []
         if abs(dx) >= Self.axisThreshold {
-            steps.append("Move the camera\(amount(dx)) \(dx > 0 ? "left" : "right")")
+            steps.append("Move the camera\(amount(dx)) \(moveX > 0 ? "left" : "right")")
         }
         if abs(dy) >= Self.axisThreshold {
             steps.append("Move the camera\(amount(dy)) \(dy > 0 ? "up" : "down")")
@@ -541,15 +570,15 @@ struct SubjectTarget: Equatable {
     }
 
     /// Where the phone has to point, in frame coordinates, if the centre is where it points now.
-    /// The opposite of the subject's shift: to slide the subject right, the phone moves left.
+    /// The opposite of the subject's shift on the back camera: to slide the subject right, the phone moves left.
     /// As the person moves the phone, this slides into the centre.
     var phoneAim: CGPoint {
-        CGPoint(x: min(max(0.5 - dx, 0.05), 0.95), y: min(max(0.5 - dy, 0.05), 0.95))
+        CGPoint(x: min(max(0.5 - moveX, 0.05), 0.95), y: min(max(0.5 - dy, 0.05), 0.95))
     }
 
     /// An arrow for the phone move `cameraAdvice` asks for, so the card's icon agrees with its words.
     var moveSymbol: String {
-        let horizontal = abs(dx) >= Self.axisThreshold ? (dx > 0 ? "left" : "right") : nil
+        let horizontal = abs(dx) >= Self.axisThreshold ? (moveX > 0 ? "left" : "right") : nil
         let vertical = abs(dy) >= Self.axisThreshold ? (dy > 0 ? "up" : "down") : nil
         switch (vertical, horizontal) {
         case let (vertical?, horizontal?): return "arrow.\(vertical).\(horizontal)"
@@ -636,7 +665,8 @@ final class SubjectGuide {
                     subject: smooth(found.box),
                     placement: placement,
                     wasAligned: target?.isAligned ?? false,
-                    previous: target
+                    previous: target,
+                    isMirrored: camera.isUsingFrontCamera
                 )
             }
             try? await Task.sleep(for: .milliseconds(300))

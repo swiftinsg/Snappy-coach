@@ -32,6 +32,9 @@ nonisolated struct Advice: Equatable, Sendable {
     let why: String
     /// An arrow showing which way to move, when the advice has a direction.
     var symbol: String? = nil
+    /// The third lines the advice names, like the bottom one for "put the horizon on the bottom
+    /// third", so the viewfinder grid can light them up.
+    var thirdsLines: Set<ThirdsLine> = []
 
     /// True when following both would undo each other, like moving left then right,
     /// so the coach never shows them together.
@@ -73,6 +76,20 @@ struct IssueDetail: Equatable {
     var boxIsArea = false
     /// The subject's box, in the same coordinates, so a step can be pointed the right way.
     var subjectBox: CGRect? = nil
+    /// True for the front camera, whose view is mirrored, so the scene follows the phone.
+    var isMirrored = false
+
+    /// How to move the camera toward `region` of the view. In a mirrored view the scene moves
+    /// the same way as the phone, so left and right swap.
+    func cameraToward(_ region: FrameRegion) -> (text: String, symbol: String)? {
+        let isSideways = region == .left || region == .right
+        return (isMirrored && isSideways ? region.opposite ?? region : region).turnToward
+    }
+
+    /// How to move the camera away from `region` of the view.
+    func cameraAway(from region: FrameRegion) -> (text: String, symbol: String)? {
+        region.opposite.flatMap(cameraToward)
+    }
 
     init(region: FrameRegion, rawThing: String, subjectName: String? = nil) {
         self.region = region
@@ -98,7 +115,8 @@ struct IssueDetail: Equatable {
     /// straight behind it. Stepping toward the side it's on moves it further that way, because
     /// the background shifts less than the nearer subject.
     var stepSide: FrameRegion? {
-        guard let box, let subjectBox else { return nil }
+        // With the front camera the subject is usually the person holding it, who moves too.
+        guard !isMirrored, let box, let subjectBox else { return nil }
         let offset = box.midX - subjectBox.midX
         guard abs(offset) >= 0.03 else { return nil }
         return offset < 0 ? .left : .right
@@ -164,17 +182,6 @@ extension FrameRegion {
         default: nil
         }
     }
-
-    /// How to point the camera away from this side of the frame.
-    nonisolated var turnAway: (text: String, symbol: String)? {
-        switch self {
-        case .left: FrameRegion.right.turnToward
-        case .right: FrameRegion.left.turnToward
-        case .top: FrameRegion.bottom.turnToward
-        case .bottom: FrameRegion.top.turnToward
-        default: nil
-        }
-    }
 }
 
 extension CoachIssue {
@@ -195,12 +202,19 @@ extension CoachIssue {
             return Advice(action: safe.text, why: general.why, symbol: safe.symbol)
         }
         guard let detail, let specific = specificAction(detail) else { return general }
-        return Advice(action: specific.text, why: general.why, symbol: specific.symbol ?? general.symbol)
+        return Advice(action: specific.text, why: general.why, symbol: specific.symbol ?? general.symbol, thirdsLines: general.thirdsLines)
     }
 
-    /// Tips that can only be followed by moving the subject off its spot, so they lose to the target guide.
-    var undoesPlacement: Bool {
-        self == .vanishingPointOffCentre
+    /// Tips that can only be followed by moving the subject off the spot the target guide put it in,
+    /// so they lose to the guide.
+    func undoesPlacement(_ placement: SubjectPlacement) -> Bool {
+        switch self {
+        case .vanishingPointOffCentre: true
+        // Moving the horizon means moving the camera up or down, which only matters
+        // when the guide fixes the subject's height too.
+        case .horizonThroughMiddle: placement.fixesHeight
+        default: false
+        }
     }
 
     /// The same fix without moving the camera across the frame: stepping or zooming keeps the
@@ -251,7 +265,7 @@ extension CoachIssue {
         case .headCutOff:
             Advice(action: "Tilt the camera up to show the whole head", why: "Cutting off the top of a head looks like a mistake.", symbol: "arrow.up")
         case .tooMuchHeadroom:
-            Advice(action: "Tilt down so the eyes sit near the top third", why: "Too much space above the head makes the subject look sunk.", symbol: "arrow.down")
+            Advice(action: "Tilt down to align eyes with the upper third line", why: "Too much space above the head makes the subject look sunk.", symbol: "arrow.down", thirdsLines: [.top])
         case .subjectTooSmall:
             Advice(action: "Step closer or tap a zoom button", why: "Filling the frame makes it clear what the photo is about.")
         case .clutteredBackground:
@@ -265,7 +279,7 @@ extension CoachIssue {
         case .tooMuchEmptySpace:
             Advice(action: "Step closer to fill the frame", why: "Empty space only helps when it gives the subject room to breathe.")
         case .horizonThroughMiddle:
-            Advice(action: "Put the horizon on the top or bottom grid line", why: "A horizon across the middle splits the photo in two.")
+            Advice(action: "Put the horizon on the top or bottom third line", why: "A horizon across the middle splits the photo in two.", thirdsLines: [.top, .bottom])
         case .linesDontLead:
             Advice(action: "Move so the lines run toward the subject", why: "Lines pull the eye along them, so they should end at what matters.")
         case .notSymmetric:
@@ -295,7 +309,7 @@ extension CoachIssue {
         case (.clutteredBackground, .food):
             Advice(action: "Move the plate so only the table is behind it", why: "A plain surface keeps the eye on the food.")
         case (.horizonThroughMiddle, .landscape):
-            Advice(action: "Put the horizon on the bottom third for more sky", why: "Giving the sky or the land two thirds makes a clear choice.")
+            Advice(action: "Put the horizon on the bottom third for more sky", why: "Giving the sky or the land two thirds makes a clear choice.", thirdsLines: [.bottom])
         case (.subjectTooSmall, .nature):
             Advice(action: "Step closer, or tap 2× to fill the frame", why: "Small details in nature only shine when they fill the photo.")
         case (.harshContrast, .people):
@@ -322,10 +336,10 @@ extension CoachIssue {
                 }
             }
         case .distractingEdges:
-            guard let move = detail.region.turnAway, let edge = detail.region.edgeName else { return nil }
+            guard let move = detail.cameraAway(from: detail.region), let edge = detail.region.edgeName else { return nil }
             return (object.map { "\(move.text) to drop \($0)" } ?? "\(move.text) to clear the \(edge)", move.symbol)
         case .subjectCutOff:
-            guard let move = detail.region.turnToward else { return nil }
+            guard let move = detail.cameraToward(detail.region) else { return nil }
             let cut = detail.thing == "the subjects" ? "the subjects" : (object ?? subject)
             return ("\(move.text), or step back, so \(cut) fits", move.symbol)
         case .tooMuchEmptySpace:
@@ -333,7 +347,7 @@ extension CoachIssue {
         case .linesDontLead:
             return object.map { ("Move until \($0) points at \(subject)", nil) }
         case .vanishingPointOffCentre:
-            return detail.region.turnToward.map { ("\($0.text) so the lines meet in the middle", $0.symbol) }
+            return detail.cameraToward(detail.region).map { ("\($0.text) so the lines meet in the middle", $0.symbol) }
         case .linesNotStraight:
             return object.map { ("Turn the phone until \($0) matches the grid", "rotate.right") }
         default:

@@ -160,9 +160,24 @@ extension CompositionGuide {
 
 // MARK: - Viewfinder grid
 
+/// One of the two horizontal rule-of-thirds lines.
+nonisolated enum ThirdsLine: Hashable, Sendable {
+    case top, bottom
+
+    /// How far down the frame the line sits, 0...1.
+    var fraction: CGFloat {
+        switch self {
+        case .top: 1.0 / 3
+        case .bottom: 2.0 / 3
+        }
+    }
+}
+
 /// Draws the rule-of-thirds grid, plus guides for the selected composition styles.
 struct CompositionGrid: View {
     let styles: Set<CompositionGuide>
+    /// Third lines the coach's advice names, drawn in orange like the coach's other highlights.
+    var highlightedLines: Set<ThirdsLine> = []
 
     private let styleTint = Color.yellow.opacity(0.75)
 
@@ -205,6 +220,17 @@ struct CompositionGrid: View {
                 guides.addLine(to: CGPoint(x: 0, y: size.height))
             }
             context.stroke(guides, with: .color(styleTint), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+
+            // The line the advice points at, e.g. "put the horizon on the bottom third line".
+            var named = Path()
+            for line in highlightedLines {
+                named.move(to: CGPoint(x: 0, y: size.height * line.fraction))
+                named.addLine(to: CGPoint(x: size.width, y: size.height * line.fraction))
+            }
+            context.drawLayer { layer in
+                layer.addFilter(.shadow(color: .black.opacity(0.4), radius: 2))
+                layer.stroke(named, with: .color(.orange), lineWidth: 2.5)
+            }
 
             // The three-by-three style aims at the points where the thirds lines cross.
             if styles.contains(.ruleOfThirdsCorner) {

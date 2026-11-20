@@ -943,11 +943,13 @@ nonisolated enum HoldOrientation: Equatable, Sendable {
 
     /// How to turn a camera frame so the scene is upright. The back camera's frames arrive upright
     /// when the top of the phone is on the left; the front camera's when it's on the right.
+    /// The front camera's preview is mirrored, like a mirror, so its frames are mirrored too:
+    /// then everything the coach finds and draws is on the side the person sees it.
     func frameOrientation(isFrontCamera: Bool) -> CGImagePropertyOrientation {
         switch self {
-        case .portrait: .right
-        case .landscapeLeft: isFrontCamera ? .down : .up
-        case .landscapeRight: isFrontCamera ? .up : .down
+        case .portrait: isFrontCamera ? .leftMirrored : .right
+        case .landscapeLeft: isFrontCamera ? .downMirrored : .up
+        case .landscapeRight: isFrontCamera ? .upMirrored : .down
         }
     }
 }

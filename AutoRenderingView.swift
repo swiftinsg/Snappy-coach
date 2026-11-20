@@ -196,6 +196,12 @@ struct AutoRenderingView: View {
         CompositionGuide.allCases.filter(compositionGuides.contains).map(\.rawValue).joined(separator: ",")
     }
 
+    /// The third lines the advice on screen names, lit up on the grid while the advice is showing.
+    private var highlightedThirdsLines: Set<ThirdsLine> {
+        guard !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil else { return [] }
+        return coach.feedback?.thirdsLines ?? []
+    }
+
     /// The target guide only appears for topics and styles about where the subject sits.
     private var showsSubjectBox: Bool {
         subjectPlacement != nil
@@ -203,13 +209,7 @@ struct AutoRenderingView: View {
 
     /// Where the target guide puts the subject for the chosen topic and style, if it has a box at all.
     private var subjectPlacement: SubjectPlacement? {
-        guard adviceTopic == .composition else { return nil }
-        // With several styles picked, the first one that defines a subject position leads.
-        // Styles that don't place the subject still get a guide: the middle for One-Point
-        // Perspective, where the lines meet, and otherwise the nearest thirds crossing.
-        return CompositionGuide.allCases
-            .first { compositionGuides.contains($0) && $0.subjectPlacement != nil }?
-            .subjectPlacement ?? (compositionGuides.contains(.onePointPerspective) ? .centre : .thirdsPoint)
+        adviceTopic == .composition ? CompositionGuide.guidePlacement(for: compositionGuides) : nil
     }
 
     /// Topics whose advice is about one subject, so they wait for the person to tap it.
@@ -426,7 +426,7 @@ struct AutoRenderingView: View {
                 .overlay {
                     if adviceTopic == .composition {
                         UprightOverlay(orientation: camera.holdOrientation) {
-                            CompositionGrid(styles: compositionGuides)
+                            CompositionGrid(styles: compositionGuides, highlightedLines: highlightedThirdsLines)
                         }
                     }
                 }
@@ -819,6 +819,8 @@ struct AutoRenderingView: View {
         .animation(.snappy, value: onboardingStep)
         .sensoryFeedback(.selection, trigger: onboardingStep)
         .sensoryFeedback(.success, trigger: coach.isReady) { _, isReady in isReady }
+        // A tick as the dot reaches the circle, so lining up doesn't need watching the arrows.
+        .sensoryFeedback(.alignment, trigger: subjectGuide.target?.isAligned) { _, isAligned in isAligned == true }
         .animation(.snappy, value: camera.countdown)
         .sensoryFeedback(.impact(weight: .medium), trigger: camera.shutterCount)
         .sensoryFeedback(.impact, trigger: controls.draft)
