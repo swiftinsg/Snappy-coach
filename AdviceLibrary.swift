@@ -45,10 +45,43 @@ struct IssueDetail: Equatable {
     let region: FrameRegion
     /// A short, cleaned-up name like "the lamp post", or nil when the model's words weren't usable.
     let thing: String?
+    /// What the person tapped, like "cup", so the advice names it instead of "the subject".
+    var subjectName: String? = nil
+    /// Where `thing` was found on screen, in 0...1 viewfinder coordinates from the top left.
+    var box: CGRect? = nil
+    /// True when `box` is only the part of the frame named, because no single object stood out there.
+    var boxIsArea = false
+    /// The subject's box, in the same coordinates, so a step can be pointed the right way.
+    var subjectBox: CGRect? = nil
 
-    init(region: FrameRegion, rawThing: String) {
+    init(region: FrameRegion, rawThing: String, subjectName: String? = nil) {
         self.region = region
         self.thing = Self.cleanedThing(rawThing)
+        // Vague names read worse than "the subject", and people are never described.
+        if let subjectName, !["person", "object"].contains(subjectName) {
+            self.subjectName = subjectName
+        }
+    }
+
+    /// How the advice names the subject: what was tapped, or else "the subject".
+    var subjectPhrase: String {
+        subjectName.map { "the \($0)" } ?? "the subject"
+    }
+
+    /// The thing the model named, unless it named the subject, which can't be a distraction.
+    var distraction: String? {
+        let subjectNames = ["the subject", "the subjects", subjectName.map { "the \($0)" }]
+        return subjectNames.contains(thing) ? nil : thing
+    }
+
+    /// Which way to step so `thing` slides out from behind the subject, or nil when it's
+    /// straight behind it. Stepping toward the side it's on moves it further that way, because
+    /// the background shifts less than the nearer subject.
+    var stepSide: FrameRegion? {
+        guard let box, let subjectBox else { return nil }
+        let offset = box.midX - subjectBox.midX
+        guard abs(offset) >= 0.03 else { return nil }
+        return offset < 0 ? .left : .right
     }
 
     /// Words that describe a person. The coach never describes people, so these become "the subject".
@@ -172,9 +205,9 @@ extension CoachIssue {
         case .subjectTooSmall:
             Advice(action: "Step closer or tap a zoom button", why: "Filling the frame makes it clear what the photo is about.")
         case .clutteredBackground:
-            Advice(action: "Step sideways for a cleaner background", why: "A busy background pulls the eye away from the subject.")
+            Advice(action: "Step left or right to put a plain background behind", why: "A busy background pulls the eye away from the subject.")
         case .distractingEdges:
-            Advice(action: "Reframe to drop distractions at the edges", why: "Bright things near the edge drag the eye out of the photo.")
+            Advice(action: "Move the camera so bright things leave the edges", why: "Bright things near the edge drag the eye out of the photo.")
         case .subjectCutOff:
             Advice(action: "Step back so the whole subject fits", why: "Cropping through the subject looks accidental.")
         case .noClearSubject:
@@ -182,19 +215,19 @@ extension CoachIssue {
         case .tooMuchEmptySpace:
             Advice(action: "Step closer to fill the frame", why: "Empty space only helps when it gives the subject room to breathe.")
         case .horizonThroughMiddle:
-            Advice(action: "Reframe so the horizon sits on a third line", why: "A horizon across the middle splits the photo in two.")
+            Advice(action: "Put the horizon on the top or bottom grid line", why: "A horizon across the middle splits the photo in two.")
         case .linesDontLead:
             Advice(action: "Move so the lines run toward the subject", why: "Lines pull the eye along them, so they should end at what matters.")
         case .notSymmetric:
-            Advice(action: "Step sideways until both halves mirror each other", why: "Symmetry works when both halves closely match.")
+            Advice(action: "Step left or right until both halves mirror each other", why: "Symmetry works when both halves closely match.")
         case .vanishingPointOffCentre:
             Advice(action: "Move until the lines meet in the middle", why: "Lines meeting near the centre give the deepest look.")
         case .linesNotStraight:
             Advice(action: "Turn the phone until the lines match the grid", why: "Straight lines that lean make a photo look careless.")
         case .noTriangle:
-            Advice(action: "Reframe so three key things form a triangle", why: "A triangle leads the eye around the photo and feels stable.")
+            Advice(action: "Frame three key things so they form a triangle", why: "A triangle leads the eye around the photo and feels stable.")
         case .noClearVertex:
-            Advice(action: "Put the point where lines meet on a third", why: "Where lines meet is a natural place for the eye to rest.")
+            Advice(action: "Move the camera until lines meet on a grid line", why: "Where lines meet is a natural place for the eye to rest.")
         case .notOverhead:
             Advice(action: "Hold the phone flat, straight above the table", why: "A true top-down view shows the arrangement like a map.")
         case .layersNotStacked:
@@ -227,20 +260,28 @@ extension CoachIssue {
     /// Advice that uses what the model saw, or nil when the detail doesn't help for this issue.
     private func specificAction(_ detail: IssueDetail) -> (text: String, symbol: String?)? {
         // "The subject" can't be a distraction in the background or at the edge.
-        let object = ["the subject", "the subjects"].contains(detail.thing) ? nil : detail.thing
+        let object = detail.distraction
+        let subject = detail.subjectPhrase
         switch self {
         case .clutteredBackground:
-            return object.map { ("Step sideways so \($0) isn't behind the subject", "arrow.left.and.right") }
+            return object.map { object in
+                switch detail.stepSide {
+                case .left: ("Step left so \(object) isn't behind \(subject)", "arrow.left")
+                case .right: ("Step right so \(object) isn't behind \(subject)", "arrow.right")
+                default: ("Step left or right so \(object) isn't behind \(subject)", "arrow.left.and.right")
+                }
+            }
         case .distractingEdges:
             guard let move = detail.region.turnAway, let edge = detail.region.edgeName else { return nil }
             return (object.map { "\(move.text) to drop \($0)" } ?? "\(move.text) to clear the \(edge)", move.symbol)
         case .subjectCutOff:
             guard let move = detail.region.turnToward else { return nil }
-            return ("\(move.text), or step back, so \(detail.thing ?? "the subject") fits", move.symbol)
+            let cut = detail.thing == "the subjects" ? "the subjects" : (object ?? subject)
+            return ("\(move.text), or step back, so \(cut) fits", move.symbol)
         case .tooMuchEmptySpace:
             return object.map { ("Step closer to \($0) to fill the frame", "arrow.up.forward") }
         case .linesDontLead:
-            return object.map { ("Move until \($0) points at the subject", nil) }
+            return object.map { ("Move until \($0) points at \(subject)", nil) }
         case .vanishingPointOffCentre:
             return detail.region.turnToward.map { ("\($0.text) so the lines meet in the middle", $0.symbol) }
         case .linesNotStraight:

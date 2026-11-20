@@ -415,6 +415,8 @@ struct PhotoFeedback: Equatable {
     var symbol: String? = nil
     /// The camera move the first improvement asks for, shown as a big arrow on the viewfinder.
     var move: CameraMove? = nil
+    /// What the first improvement names, like "the lamp post", outlined on the viewfinder.
+    var highlight: CoachHighlight? = nil
     /// True when the shot is ready to take.
     var isGoodEnough: Bool
     /// What to practise next, shown once the current section is complete.
@@ -542,6 +544,10 @@ final class PhotoCoach {
     private var shownIssue: CoachIssue?
     /// Where the model saw the issue, kept for the section so the wording doesn't change every pass.
     private var sectionDetail: IssueDetail?
+    /// Checks in a row the model named something else in the same place, so one odd answer doesn't rename it.
+    private var renamePasses = 0
+    /// What the advice names, outlined on the viewfinder and following it as the camera moves.
+    private var highlight: CoachHighlight?
     /// True when the section shows the issue's other tip, because the usual one was ignored before.
     private var usesAlternative = false
     /// What the model last praised, remembered when the section ends.
@@ -674,7 +680,7 @@ final class PhotoCoach {
             issues.removeAll { $0.asksToMove.map(movesDone.contains) ?? false }
             var good = CoachRules.strengths(for: topic, in: analysis, tiltShown: tiltShown)
             if usesBox, guide.target?.isAligned == true {
-                good.insert("Subject in the green box", at: 0)
+                good.insert("Subject lined up", at: 0)
             }
 
             // The model is only asked when nothing it can't see past was measured, which saves
@@ -695,7 +701,18 @@ final class PhotoCoach {
                     // What the model saw is more specific than a minor measurement, so it leads.
                     issues.removeAll { $0 == issue }
                     issues.insert(issue, at: 0)
-                    details[issue] = IssueDetail(region: judgement.region, rawThing: judgement.thing)
+                    var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
+                    detail.subjectBox = analysis.subject
+                    // Find what the model named, so the advice can point at it and say which way to step.
+                    if CoachHighlight.pointsAt(issue), detail.distraction != nil {
+                        let candidates = await Self.salientObjects(in: frame)
+                        guard !Task.isCancelled else { break }
+                        if let found = CoachHighlight.locate(in: detail.region, subject: analysis.subject, among: candidates) {
+                            detail.box = found.box
+                            detail.boxIsArea = found.isArea
+                        }
+                    }
+                    details[issue] = detail
                 }
                 if let strength = Self.cleanedStrength(judgement.strength) {
                     sectionStrength = strength
@@ -738,6 +755,8 @@ final class PhotoCoach {
         session = nil
         shownIssue = nil
         sectionDetail = nil
+        renamePasses = 0
+        highlight = nil
         usesAlternative = false
         sectionStrength = nil
         sectionProgress = 0
@@ -799,13 +818,26 @@ final class PhotoCoach {
                 && top.alternativeAdvice(for: topic) != nil
             memory.noteShown(top)
             sectionDetail = details[top]
+            renamePasses = 0
         } else if let detail = details[top], detail.region != sectionDetail?.region,
                   detail.region != sectionDetail?.region.opposite {
             // The problem has moved, so the direction has to change too. A jump to the
             // opposite side is the model wavering, not the scene, so the tip keeps its
             // direction rather than flipping between left and right.
             sectionDetail = detail
+            renamePasses = 0
+        } else if let detail = details[top], detail.thing != nil, detail.thing != sectionDetail?.thing {
+            // Something else is causing it now, e.g. the person stepped past the lamp post and
+            // a sign is behind the subject. Seen twice in a row, the advice names the new thing.
+            renamePasses += 1
+            if renamePasses >= 2 {
+                sectionDetail = detail
+                renamePasses = 0
+            }
+        } else if details[top] != nil {
+            renamePasses = 0
         }
+        updateHighlight(for: top, latest: details[top])
         // The ring fills as the issues in the section are cleared.
         sectionProgress = max(
             0.1,
@@ -824,8 +856,34 @@ final class PhotoCoach {
             why: advice.why,
             symbol: advice.symbol,
             move: top.asksToMove.map { $0 == .closer ? .closer : .back },
+            highlight: highlight,
             isGoodEnough: false
         )
+    }
+
+    /// Outlines what the section's advice names. The wording stays fixed for the section, but the
+    /// outline follows the thing as the camera moves, while the model still names the same thing.
+    private func updateHighlight(for issue: CoachIssue, latest: IssueDetail?) {
+        guard CoachHighlight.pointsAt(issue), let detail = sectionDetail,
+              let name = detail.distraction, let sectionBox = detail.box else {
+            highlight = nil
+            return
+        }
+        let label = name.hasPrefix("the ") ? String(name.dropFirst(4)) : name
+        let current = latest.flatMap { $0.thing == detail.thing && $0.box != nil ? $0 : nil }
+        let found = current?.box ?? sectionBox
+        let shown = highlight?.label == label ? highlight?.box : nil
+        highlight = CoachHighlight(
+            box: shown.map { CoachHighlight.blend($0, toward: found) } ?? found,
+            label: label,
+            isArea: current?.boxIsArea ?? detail.boxIsArea
+        )
+    }
+
+    /// Eye-catching objects in the frame. Runs off the main thread because Vision takes a moment.
+    @concurrent
+    nonisolated private static func salientObjects(in frame: CGImage) async -> [CGRect] {
+        SubjectFinder.salientObjects(in: frame)
     }
 
     /// Suggests what to practise once the current section is complete.
@@ -1014,6 +1072,7 @@ final class PhotoCoach {
             good: [],
             improve: placement.cameraAdvice,
             why: "A subject on a third line feels more natural than one dead centre.",
+            symbol: placement.moveSymbol,
             isGoodEnough: false
         )
     }
@@ -1116,13 +1175,13 @@ struct CoachFeedbackView: View {
                         .textCase(.uppercase)
 
                     Label {
-                        Text(action)
-                            .foregroundStyle(.white)
+                        Text(actionText(action))
                     } icon: {
                         Image(systemName: feedback.symbol ?? "arrow.right")
                             .foregroundStyle(.yellow)
                     }
                     .font(.headline)
+                    .accessibilityHint(highlightHint)
 
                     if feedback.improve.count > 1 {
                         Text("Then: \(feedback.improve[1])")
@@ -1153,6 +1212,26 @@ struct CoachFeedbackView: View {
         .padding(14)
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 22))
         .accessibilityElement(children: .combine)
+    }
+
+    /// The advice in white, with the outlined thing's name in the outline's orange so the two are linked.
+    private func actionText(_ action: String) -> AttributedString {
+        var text = AttributedString(action)
+        text.foregroundColor = .white
+        if let label = feedback.highlight?.label, let range = text.range(of: label) {
+            text[range].foregroundColor = .orange
+        }
+        return text
+    }
+
+    /// Says where the outlined thing is, for VoiceOver, which can't see the outline.
+    private var highlightHint: String {
+        guard let highlight = feedback.highlight else { return "" }
+        let box = highlight.box
+        let across = box.midX < 0.4 ? "left" : box.midX > 0.6 ? "right" : "middle"
+        let down = box.midY < 0.4 ? "top" : box.midY > 0.6 ? "bottom" : nil
+        let place = down.map { across == "middle" ? $0 : "\($0) \(across)" } ?? across
+        return "The \(highlight.label) is outlined at the \(place) of the viewfinder."
     }
 
     private func section(title: String, items: [String], systemImage: String, tint: Color) -> some View {

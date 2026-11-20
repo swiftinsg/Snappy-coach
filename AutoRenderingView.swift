@@ -23,6 +23,8 @@ struct AutoRenderingView: View {
     @AppStorage("compositionGuides") private var compositionGuidesRaw = CompositionGuide.ruleOfThirdsOne.rawValue
     @State private var activeAdjustment: PhotoControl?
     @State private var statusMessage: String?
+    /// The composition style being explained after a press and hold, shown for a few seconds.
+    @State private var compositionExplanation: CompositionGuide?
     /// Briefly blacks out the screen when a photo is taken, like the Camera app.
     @State private var isShutterBlinking = false
     /// Shows the coach's raw measurements over the card, for tuning the advice.
@@ -194,12 +196,12 @@ struct AutoRenderingView: View {
         CompositionGuide.allCases.filter(compositionGuides.contains).map(\.rawValue).joined(separator: ",")
     }
 
-    /// The green box only appears for topics and styles about where the subject sits.
+    /// The target guide only appears for topics and styles about where the subject sits.
     private var showsSubjectBox: Bool {
         subjectPlacement != nil
     }
 
-    /// Where the green box puts the subject for the chosen topic and style, if it has a box at all.
+    /// Where the target guide puts the subject for the chosen topic and style, if it has a box at all.
     private var subjectPlacement: SubjectPlacement? {
         switch adviceTopic {
         case .subjectPosition:
@@ -438,7 +440,7 @@ struct AutoRenderingView: View {
                         CameraLevel(attitude: coach.attitude)
                     }
                 }
-                // The green box shows where the subject should be.
+                // The dot and circle show which way to move the phone to place the subject.
                 .overlay {
                     if showsSubjectBox, !isWaitingForObject, let target = subjectGuide.target {
                         UprightOverlay(orientation: camera.holdOrientation) {
@@ -466,6 +468,16 @@ struct AutoRenderingView: View {
                         }
                     }
                 }
+                // Outlines what the advice names, like "the lamp post", so it's clear what it means.
+                .overlay {
+                    if !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, let highlight = coach.feedback?.highlight {
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            CoachHighlightOverlay(highlight: highlight)
+                        }
+                        .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut, value: coach.feedback?.highlight)
                 // A big arrow for the camera move the advice asks for, once the advice is about a chosen object.
                 .overlay {
                     if !isWaitingForObject, coach.notice == nil, let move = coach.feedback?.move {
@@ -555,6 +567,41 @@ struct AutoRenderingView: View {
                         .allowsHitTesting(false)
                 }
 
+                // What a composition style means, after pressing and holding its card.
+                if let compositionExplanation {
+                    VStack(spacing: 4) {
+                        Text(compositionExplanation.title)
+                            .font(.subheadline.bold())
+                        Text(compositionExplanation.explanation)
+                            .font(.subheadline)
+                    }
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: 320)
+                    // Room on the sides so the text never runs under the close button.
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 18))
+                    // Only the close button takes touches; the rest lets taps through to the viewfinder.
+                    .allowsHitTesting(false)
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            self.compositionExplanation = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.8))
+                                .frame(width: 32, height: 32)
+                                .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close explanation")
+                    }
+                    .rotationEffect(camera.holdOrientation.uiRotation)
+                    .transition(.opacity)
+                    .id(compositionExplanation)
+                }
+
                 Spacer()
 
                 if controls.isEditing {
@@ -579,6 +626,7 @@ struct AutoRenderingView: View {
                                     unavailable: coach.unavailableCompositions,
                                     recommended: coach.recommendedComposition,
                                     onMessage: { statusMessage = $0 },
+                                    onExplain: { compositionExplanation = $0 },
                                     onScroll: noteCompositionScrolled,
                                     chipRotation: camera.holdOrientation.uiRotation
                                 )
@@ -712,6 +760,12 @@ struct AutoRenderingView: View {
             try? await Task.sleep(for: .seconds(1.5))
             statusMessage = nil
         }
+        // Long enough to read a full sentence. Holding another card restarts the timer.
+        .task(id: compositionExplanation) {
+            guard compositionExplanation != nil else { return }
+            try? await Task.sleep(for: .seconds(10))
+            compositionExplanation = nil
+        }
         .onChange(of: controls.isEditing) {
             if controls.isEditing {
                 activeAdjustment = nil
@@ -720,6 +774,9 @@ struct AutoRenderingView: View {
         // Swap the top bar to the controls that matter for the chosen topic.
         .onChange(of: adviceTopic, initial: true) {
             controls.setTopic(adviceTopic)
+            if adviceTopic != .composition {
+                compositionExplanation = nil
+            }
             if let activeAdjustment, !controls.pinned.contains(activeAdjustment) {
                 self.activeAdjustment = nil
             }
@@ -760,6 +817,7 @@ struct AutoRenderingView: View {
         .animation(.snappy, value: activeAdjustment)
         .animation(.snappy, value: adviceTopic)
         .animation(.easeInOut, value: statusMessage)
+        .animation(.easeInOut, value: compositionExplanation)
         .animation(.easeInOut, value: coach.feedback)
         .animation(.snappy, value: isAdviceCollapsed)
         .animation(.snappy, value: onboardingStep)

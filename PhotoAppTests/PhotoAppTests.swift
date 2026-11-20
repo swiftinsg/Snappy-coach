@@ -239,6 +239,32 @@ struct CoachRulesTests {
         #expect(FrameRegion.left.opposite == .right)
     }
 
+    @Test func phoneGuidePointsTheWayToMove() throws {
+        // The subject is at the far left but belongs on the left third: it has to slide right,
+        // so the phone moves left, and the words, the ring and the icon all say left.
+        let slideRight = try #require(SubjectTarget.make(
+            subject: CGRect(x: 0.0, y: 0.45, width: 0.1, height: 0.1), placement: .thirdsLine(1.0 / 3)
+        ))
+        #expect(slideRight.cameraAdvice.first?.contains("left") == true)
+        #expect(slideRight.moveSymbol == "arrow.left")
+        #expect(slideRight.phoneAim.x < 0.5)
+
+        let slideLeft = try #require(SubjectTarget.make(
+            subject: CGRect(x: 0.85, y: 0.45, width: 0.1, height: 0.1), placement: .thirdsLine(2.0 / 3)
+        ))
+        #expect(slideLeft.cameraAdvice.first?.contains("right") == true)
+        #expect(slideLeft.moveSymbol == "arrow.right")
+        #expect(slideLeft.phoneAim.x > 0.5)
+
+        // The subject is high and has to come down to the centre, so the phone points up.
+        let slideDown = try #require(SubjectTarget.make(
+            subject: CGRect(x: 0.45, y: 0.05, width: 0.1, height: 0.1), placement: .centre
+        ))
+        #expect(slideDown.cameraAdvice.first?.contains("up") == true)
+        #expect(slideDown.moveSymbol == "arrow.up")
+        #expect(slideDown.phoneAim.y < 0.5)
+    }
+
     @Test func subjectCutOffNeedsAnEdge() {
         #expect(scene(subject: CGRect(x: 0, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
         #expect(!scene(subject: CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)).subjectTouchesEdge)
@@ -350,6 +376,50 @@ struct CoachRulesTests {
         let junk = IssueDetail(region: .background, rawThing: "3 cars parked along the busy road")
         #expect(junk.thing == nil)
         #expect(CoachIssue.clutteredBackground.advice(for: .composition, detail: junk) == general)
+    }
+
+    @Test func clutterAdviceSaysWhichWayToStep() {
+        let subject = CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.4)
+        var detail = IssueDetail(region: .background, rawThing: "the lamp post")
+        detail.subjectBox = subject
+
+        // Clutter just left of the subject: stepping left slides it out from behind.
+        detail.box = CGRect(x: 0.38, y: 0.1, width: 0.05, height: 0.6)
+        let left = CoachIssue.clutteredBackground.advice(for: .anglePerspective, detail: detail)
+        #expect(left.action == "Step left so the lamp post isn't behind the subject")
+        #expect(left.symbol == "arrow.left")
+
+        detail.box = CGRect(x: 0.55, y: 0.1, width: 0.05, height: 0.6)
+        #expect(CoachIssue.clutteredBackground.advice(for: .anglePerspective, detail: detail).symbol == "arrow.right")
+
+        // Straight behind, or not found: either way works, and the advice says so.
+        detail.box = nil
+        #expect(CoachIssue.clutteredBackground.advice(for: .anglePerspective, detail: detail).action.hasPrefix("Step left or right"))
+    }
+
+    @Test func adviceNamesTheTappedSubject() {
+        let detail = IssueDetail(region: .background, rawThing: "the sign", subjectName: "cup")
+        #expect(CoachIssue.clutteredBackground.advice(for: .composition, detail: detail).action.hasSuffix("behind the cup"))
+        // Vague names read worse than "the subject".
+        #expect(IssueDetail(region: .background, rawThing: "sign", subjectName: "object").subjectPhrase == "the subject")
+        // The tapped thing itself is never called a distraction.
+        #expect(IssueDetail(region: .background, rawThing: "the cup", subjectName: "cup").distraction == nil)
+    }
+
+    @Test func highlightPicksTheNamedThingNotTheSubject() {
+        let subject = CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.4)
+        let insideSubject = CGRect(x: 0.42, y: 0.35, width: 0.15, height: 0.3)
+        let leftSign = CGRect(x: 0.05, y: 0.4, width: 0.1, height: 0.1)
+        let behind = CGRect(x: 0.55, y: 0.1, width: 0.08, height: 0.5)
+        let candidates = [insideSubject, leftSign, behind]
+
+        #expect(CoachHighlight.bestCandidate(in: .left, subject: subject, among: candidates) == leftSign)
+        #expect(CoachHighlight.bestCandidate(in: .background, subject: subject, among: candidates) == behind)
+        // Nothing stands out on the right, so that side of the frame is shown instead.
+        let right = CoachHighlight.locate(in: .right, subject: subject, among: candidates)
+        #expect(right?.isArea == true)
+        #expect(right.map { $0.box.minX >= 0.7 } == true)
+        #expect(CoachHighlight.locate(in: .whole, subject: subject, among: candidates) == nil)
     }
 
     @Test func peopleAreAlwaysTheSubject() {

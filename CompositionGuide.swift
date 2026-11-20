@@ -52,6 +52,26 @@ enum CompositionGuide: String, CaseIterable, Identifiable {
         case .negativeSpace: "NegativeSpace"
         }
     }
+
+    /// One-sentence explanation shown when the person presses and holds this style's card.
+    var explanation: String {
+        switch self {
+        case .ruleOfThirdsOne: "Split the frame into a 3×3 grid and place your subject on the left vertical third line."
+        case .ruleOfThirdsTwo: "Split the frame into a 3×3 grid and place your subject on the right vertical third line, two thirds of the way across."
+        case .ruleOfThirdsCorner: "Split the frame into a 3×3 grid and place your subject on one of the four points where the grid lines cross."
+        case .centre: "Place your subject right in the middle of the frame for instant focus and balance, which works well with symmetry and leading lines."
+        case .onePointPerspective: "Line up lines that meet at one vanishing point on the horizon, which adds depth and pulls the eye into the frame."
+        case .tableTop45: "Shoot your subject on a table from about 45° (anywhere from 25° to 75°) to show both its top and its front."
+        case .tableTop90: "Hold the camera directly above the table, pointing straight down at 90°, and keep table legs out of the frame."
+        case .leadingLines: "Use lines in the scene, like roads, rails or fences, to guide the viewer's eye toward your subject."
+        case .triangle: "Arrange subjects, lines or focal points into a triangle to give the photo structure and guide the eye."
+        case .leadingLinesAligning: "Keep horizons and verticals level for balance, and use leading lines to guide the eye toward your subject."
+        case .symmetry: "Frame the scene so its two halves mirror each other across the centre line."
+        case .halfBodyPortrait: "Frame a person from the waist up, with their eyes near the top third of the frame."
+        case .compression: "Zoom in from farther away so the background looks closer and bigger behind your subject."
+        case .negativeSpace: "Keep your subject small, with lots of empty space around it, so it stands out."
+        }
+    }
 }
 
 // MARK: - Scene suitability
@@ -275,11 +295,16 @@ struct CompositionPicker: View {
     var recommended: CompositionGuide?
     /// Called with an explanation when a style can't be used.
     var onMessage: (String) -> Void = { _ in }
+    /// Called when the person presses and holds a style to learn what it means.
+    var onExplain: (CompositionGuide) -> Void = { _ in }
     /// Called when the person scrolls the row themselves.
     var onScroll: () -> Void = {}
     /// Turns each card to read upright when the phone is held sideways. The row itself stays put,
     /// so held sideways it runs up and down for the person. The cards are about square, so they turn in place.
     var chipRotation: Angle = .zero
+
+    /// The card just held for an explanation, so letting go of it doesn't also toggle it.
+    @State private var longPressedGuide: CompositionGuide?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -300,6 +325,8 @@ struct CompositionPicker: View {
             // Only a finger drag counts; scrolling to the selection in code doesn't.
             .onScrollPhaseChange { _, phase in
                 if phase == .interacting {
+                    // A hold that turned into a scroll never reaches the button, so forget it here.
+                    longPressedGuide = nil
                     onScroll()
                 }
             }
@@ -329,6 +356,11 @@ struct CompositionPicker: View {
         // Greyed out like a disabled control, but still tappable so it can explain why.
         let isGreyedOut = isUnavailable && !isSelected
         return Button {
+            // The finger lifting after a hold still fires the button; that release only ends the hold.
+            if longPressedGuide == guide {
+                longPressedGuide = nil
+                return
+            }
             toggle(guide)
         } label: {
             // A card: the style's example photo on top, its name underneath.
@@ -369,7 +401,16 @@ struct CompositionPicker: View {
             .opacity(isGreyedOut ? 0.55 : (isUnavailable ? 0.7 : 1))
         }
         .buttonStyle(.plain)
+        // Press and hold explains the style. Simultaneous, so the row can still scroll.
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                longPressedGuide = guide
+                onExplain(guide)
+            }
+        )
+        .sensoryFeedback(.impact(weight: .light), trigger: longPressedGuide) { _, new in new == guide }
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityAction(named: "Explain") { onExplain(guide) }
         .accessibilityHint(accessibilityHint(for: guide, isUnavailable: isUnavailable, isRecommended: isRecommended))
     }
 

@@ -2,7 +2,7 @@
 //  SubjectGuide.swift
 //  Grp 6pm Photo App
 //
-//  The green box that shows where the subject should be in the frame.
+//  The target guide that shows which way to move the phone to place the subject.
 //
 
 import Foundation
@@ -49,6 +49,14 @@ nonisolated enum SubjectFinder {
         let group = people.reduce(nil as CGRect?) { box, person in box?.union(person) ?? person }
         let salient = saliency.results?.first?.salientObjects?.first.map { topLeft($0.boundingBox) }
         return Found(subject: group ?? salient, people: people)
+    }
+
+    /// Every object that stands out in the frame, from the top left, for pointing at what the coach names.
+    static func salientObjects(in image: CGImage) -> [CGRect] {
+        let objectness = VNGenerateObjectnessBasedSaliencyImageRequest()
+        objectness.runOnCPUInSimulator()
+        guard (try? VNImageRequestHandler(cgImage: image).perform([objectness])) != nil else { return [] }
+        return (objectness.results?.first?.salientObjects ?? []).map { topLeft($0.boundingBox) }
     }
 
     /// The thing at `point` in an upright frame, and what it looks like, for when the person taps it.
@@ -268,6 +276,137 @@ struct SelectedObjectOverlay: View {
     }
 }
 
+/// What the coach's advice is about, like "the lamp post", outlined on the viewfinder so it's easy to find.
+nonisolated struct CoachHighlight: Equatable, Sendable {
+    /// In 0...1 viewfinder coordinates from the top left.
+    var box: CGRect
+    /// The name used in the advice, without "the", like "lamp post".
+    var label: String
+    /// True when only the part of the frame is known, not the object itself, so it's shown as a soft area.
+    var isArea: Bool
+
+    /// Issues whose advice names something worth pointing at, other than the subject.
+    static func pointsAt(_ issue: CoachIssue) -> Bool {
+        [.clutteredBackground, .distractingEdges, .tooMuchEmptySpace, .linesDontLead, .linesNotStraight].contains(issue)
+    }
+
+    /// Where the named thing probably is: the eye-catching object in `region` that isn't the subject,
+    /// or else that part of the frame. Nil when the region is the whole frame.
+    static func locate(
+        in region: FrameRegion,
+        subject: CGRect?,
+        among candidates: [CGRect]
+    ) -> (box: CGRect, isArea: Bool)? {
+        if let object = bestCandidate(in: region, subject: subject, among: candidates) {
+            return (object, false)
+        }
+        return area(for: region, subject: subject).map { ($0, true) }
+    }
+
+    /// The object most likely to be the one the model named. Candidates are most eye-catching first.
+    static func bestCandidate(in region: FrameRegion, subject: CGRect?, among candidates: [CGRect]) -> CGRect? {
+        let usable = candidates.filter { box in
+            let size = box.width * box.height
+            // Specks aren't worth pointing at, and a box over most of the frame points at nothing.
+            guard size >= 0.002, size <= 0.5 else { return false }
+            // Mostly covering the subject means it is the subject.
+            guard let subject else { return true }
+            let overlap = box.intersection(subject)
+            return overlap.isNull || overlap.width * overlap.height < 0.6 * size
+        }
+        switch region {
+        case .left: return usable.first { $0.midX < 0.4 }
+        case .right: return usable.first { $0.midX > 0.6 }
+        case .top: return usable.first { $0.midY < 0.4 }
+        case .bottom: return usable.first { $0.midY > 0.6 }
+        case .centre: return usable.first { centreArea.contains(CGPoint(x: $0.midX, y: $0.midY)) }
+        case .background:
+            // Behind the subject: the nearest object that touches the area around it.
+            guard let subject else { return nil }
+            let around = subject.insetBy(dx: -0.1, dy: -0.1)
+            return usable
+                .filter { $0.intersects(around) }
+                .min { distance($0, to: subject) < distance($1, to: subject) }
+        case .whole: return nil
+        }
+    }
+
+    /// The part of the frame `region` names, for when no single object stands out there.
+    static func area(for region: FrameRegion, subject: CGRect?) -> CGRect? {
+        switch region {
+        case .left: CGRect(x: 0, y: 0, width: 0.25, height: 1)
+        case .right: CGRect(x: 0.75, y: 0, width: 0.25, height: 1)
+        case .top: CGRect(x: 0, y: 0, width: 1, height: 0.25)
+        case .bottom: CGRect(x: 0, y: 0.75, width: 1, height: 0.25)
+        case .centre: centreArea
+        // Just around the subject, where something behind it shows.
+        case .background: subject?.insetBy(dx: -0.06, dy: -0.06).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        case .whole: nil
+        }
+    }
+
+    /// Blends a newly found box into the shown one, so the outline follows the object without jittering.
+    static func blend(_ shown: CGRect, toward found: CGRect) -> CGRect {
+        CGRect(
+            x: shown.minX * 0.6 + found.minX * 0.4,
+            y: shown.minY * 0.6 + found.minY * 0.4,
+            width: shown.width * 0.6 + found.width * 0.4,
+            height: shown.height * 0.6 + found.height * 0.4
+        )
+    }
+
+    private static let centreArea = CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+
+    private static func distance(_ box: CGRect, to subject: CGRect) -> CGFloat {
+        hypot(box.midX - subject.midX, box.midY - subject.midY)
+    }
+}
+
+/// Outlines what the coach's advice is about, in orange so it can't be mistaken for the
+/// yellow box around the chosen subject. Put it on top of the preview, sized like the viewfinder.
+struct CoachHighlightOverlay: View {
+    let highlight: CoachHighlight
+
+    var body: some View {
+        GeometryReader { proxy in
+            let rect = CGRect(
+                x: highlight.box.minX * proxy.size.width,
+                y: highlight.box.minY * proxy.size.height,
+                width: highlight.box.width * proxy.size.width,
+                height: highlight.box.height * proxy.size.height
+            )
+            // At the top edge the tag would be cut off above the box, so it goes underneath instead.
+            let tagBelow = rect.minY < 24
+            let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+            shape
+                .fill(.orange.opacity(highlight.isArea ? 0.18 : 0))
+                .strokeBorder(.orange.opacity(highlight.isArea ? 0.6 : 1), style: StrokeStyle(lineWidth: 2.5, dash: [7, 5]))
+                .phaseAnimator([false, true]) { outline, isBright in
+                    outline.opacity(isBright ? 1 : 0.55)
+                } animation: { _ in
+                    .easeInOut(duration: 0.8)
+                }
+                .frame(width: rect.width, height: rect.height)
+                .overlay(alignment: tagBelow ? .bottomLeading : .topLeading) {
+                    Text(highlight.label.capitalized)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.orange, in: .capsule)
+                        .alignmentGuide(.top) { $0[.bottom] + 4 }
+                        .alignmentGuide(.bottom) { $0[.top] - 4 }
+                }
+                .shadow(color: .black.opacity(0.4), radius: 2)
+                .offset(x: rect.minX, y: rect.minY)
+                .animation(.snappy, value: highlight)
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 extension VNRequest {
     /// The Simulator can't run Vision on the Neural Engine, so requests use the CPU there.
     /// Does nothing on a device.
@@ -400,6 +539,25 @@ struct SubjectTarget: Equatable {
     private func amount(_ shift: CGFloat) -> String {
         abs(shift) < 0.12 ? " a little" : ""
     }
+
+    /// Where the phone has to point, in frame coordinates, if the centre is where it points now.
+    /// The opposite of the subject's shift: to slide the subject right, the phone moves left.
+    /// As the person moves the phone, this slides into the centre.
+    var phoneAim: CGPoint {
+        CGPoint(x: min(max(0.5 - dx, 0.05), 0.95), y: min(max(0.5 - dy, 0.05), 0.95))
+    }
+
+    /// An arrow for the phone move `cameraAdvice` asks for, so the card's icon agrees with its words.
+    var moveSymbol: String {
+        let horizontal = abs(dx) >= Self.axisThreshold ? (dx > 0 ? "left" : "right") : nil
+        let vertical = abs(dy) >= Self.axisThreshold ? (dy > 0 ? "up" : "down") : nil
+        switch (vertical, horizontal) {
+        case let (vertical?, horizontal?): return "arrow.\(vertical).\(horizontal)"
+        case let (vertical?, nil): return "arrow.\(vertical)"
+        case let (nil, horizontal?): return "arrow.\(horizontal)"
+        case (nil, nil): return "scope"
+        }
+    }
 }
 
 /// Stepping towards or away from the subject, shown as a badge on the viewfinder.
@@ -519,9 +677,10 @@ final class SubjectGuide {
     }
 }
 
-/// Shows where the subject should go, like Samsung's shot suggestions: corner brackets frame the
-/// target, a ring marks its centre, and a dot marks the subject's centre now. Line the dot up
-/// in the ring and everything turns green. Put it on top of the preview, sized exactly like the preview.
+/// Shows which way to move the phone, like Samsung's shot suggestions: the dot in the middle is
+/// where the phone points now, and the ring is where it should point. Move the phone toward the
+/// ring until the dot is inside it, and everything turns green. Put it on top of the preview,
+/// sized exactly like the preview.
 struct SubjectTargetOverlay: View {
     let target: SubjectTarget
     let frameAspect: CGFloat
@@ -531,19 +690,23 @@ struct SubjectTargetOverlay: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let targetRect = viewRect(for: target.target, in: proxy.size)
             let subjectRect = viewRect(for: target.subject, in: proxy.size)
-            let aim = CGPoint(x: targetRect.midX, y: targetRect.midY)
-            let dot = CGPoint(x: subjectRect.midX, y: subjectRect.midY)
+            let aimRect = viewRect(for: CGRect(origin: target.phoneAim, size: .zero), in: proxy.size)
+            let centreRect = viewRect(for: CGRect(x: 0.5, y: 0.5, width: 0, height: 0), in: proxy.size)
+            let aim = aimRect.origin
+            let dot = centreRect.origin
             let tint: Color = target.isAligned ? .green : .white
 
             ZStack(alignment: .topLeading) {
-                CornerBrackets()
-                    .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .frame(width: targetRect.width, height: targetRect.height)
-                    .offset(x: targetRect.minX, y: targetRect.minY)
+                // Once lined up, the subject is framed in green to show it's in place.
+                if target.isAligned {
+                    CornerBrackets()
+                        .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .frame(width: subjectRect.width, height: subjectRect.height)
+                        .offset(x: subjectRect.minX, y: subjectRect.minY)
+                }
 
-                // A dashed line from the subject to where it should be, until they meet.
+                // A dashed line from the centre to where the phone should point, until they meet.
                 if !target.isAligned {
                     Path { path in
                         path.move(to: dot)
@@ -551,7 +714,7 @@ struct SubjectTargetOverlay: View {
                     }
                     .stroke(.white.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
 
-                    // Chevrons along the line show which way the dot has to travel.
+                    // Chevrons along the line show which way to move the phone.
                     let angle = Angle(radians: atan2(aim.y - dot.y, aim.x - dot.x))
                     ForEach([0.3, 0.5, 0.7], id: \.self) { fraction in
                         Image(systemName: "chevron.right")
