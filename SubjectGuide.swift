@@ -51,9 +51,189 @@ nonisolated enum SubjectFinder {
         return Found(subject: group ?? salient, people: people)
     }
 
+    /// The thing at `point` in an upright frame, and what it looks like, for when the person taps it.
+    /// Prefers the outline of the object there, then a person there, then a box around the tap.
+    static func object(at point: CGPoint, in image: CGImage) -> (box: CGRect, name: String) {
+        let handler = VNImageRequestHandler(cgImage: image)
+        let instances = VNGenerateForegroundInstanceMaskRequest()
+        let humans = VNDetectHumanRectanglesRequest()
+        humans.upperBodyOnly = false
+        instances.runOnCPUInSimulator()
+        humans.runOnCPUInSimulator()
+        try? handler.perform([instances, humans])
+
+        let person = (humans.results ?? [])
+            .filter { $0.confidence >= 0.5 }
+            .map { topLeft($0.boundingBox) }
+            .first { $0.contains(point) }
+        let outline = instances.results?.first.flatMap { box(of: $0.instanceMask, at: point) }
+        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let side = 0.3
+        let box = (outline ?? person ?? CGRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side))
+            .intersection(unit)
+        // People are never described, only called a person.
+        return (box, person != nil ? "person" : name(of: box, in: image))
+    }
+
+    /// The bounds of the mask instance under `point`, or nil when the point is on the background.
+    private static func box(of mask: CVPixelBuffer, at point: CGPoint) -> CGRect? {
+        CVPixelBufferLockBaseAddress(mask, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(mask) else { return nil }
+        let width = CVPixelBufferGetWidth(mask)
+        let height = CVPixelBufferGetHeight(mask)
+        let rowBytes = CVPixelBufferGetBytesPerRow(mask)
+        let pixels = base.assumingMemoryBound(to: UInt8.self)
+        let x = min(max(Int(point.x * CGFloat(width)), 0), width - 1)
+        let y = min(max(Int(point.y * CGFloat(height)), 0), height - 1)
+        let instance = pixels[y * rowBytes + x]
+        guard instance != 0 else { return nil }
+
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for row in 0..<height {
+            for column in 0..<width where pixels[row * rowBytes + column] == instance {
+                minX = min(minX, column)
+                maxX = max(maxX, column)
+                minY = min(minY, row)
+                maxY = max(maxY, row)
+            }
+        }
+        guard maxX >= minX else { return nil }
+        return CGRect(
+            x: CGFloat(minX) / CGFloat(width),
+            y: CGFloat(minY) / CGFloat(height),
+            width: CGFloat(maxX - minX + 1) / CGFloat(width),
+            height: CGFloat(maxY - minY + 1) / CGFloat(height)
+        )
+    }
+
+    /// Vision's best label for what's in `box`, like "cup", or "object" when it isn't sure.
+    private static func name(of box: CGRect, in image: CGImage) -> String {
+        let request = VNClassifyImageRequest()
+        request.regionOfInterest = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+        request.runOnCPUInSimulator()
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        let label = request.results?.first { $0.confidence >= 0.2 }?.identifier
+        return label?.replacingOccurrences(of: "_", with: " ") ?? "object"
+    }
+
     /// Vision measures from the bottom left, the screen from the top left.
     private static func topLeft(_ box: CGRect) -> CGRect {
         CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+    }
+}
+
+/// The object the person tapped to photograph.
+nonisolated struct SelectedObject: Equatable, Sendable {
+    /// In 0...1 coordinates of the whole upright frame, from the top left.
+    var box: CGRect
+    /// Width divided by height of the frame `box` is measured in.
+    var frameAspect: CGFloat
+    /// What it looks like in a word or two, like "cup". "person" for people.
+    var name: String
+}
+
+/// Maps between the whole upright camera frame and the viewfinder, which fills its area and crops the rest.
+nonisolated enum FrameMapping {
+    /// Where the whole frame sits in a view of `size`. Parts of it run past the view's edges.
+    static func shownFrame(frameAspect: CGFloat, in size: CGSize) -> CGRect {
+        let viewAspect = size.width / size.height
+        let shown = frameAspect > viewAspect
+            ? CGSize(width: size.height * frameAspect, height: size.height)
+            : CGSize(width: size.width, height: size.width / frameAspect)
+        return CGRect(
+            x: (size.width - shown.width) / 2,
+            y: (size.height - shown.height) / 2,
+            width: shown.width,
+            height: shown.height
+        )
+    }
+
+    /// A frame box, in the view's points.
+    static func viewRect(for box: CGRect, frameAspect: CGFloat, in size: CGSize) -> CGRect {
+        let frame = shownFrame(frameAspect: frameAspect, in: size)
+        return CGRect(
+            x: frame.minX + box.minX * frame.width,
+            y: frame.minY + box.minY * frame.height,
+            width: box.width * frame.width,
+            height: box.height * frame.height
+        )
+    }
+
+    /// A point in the view, in 0...1 frame coordinates.
+    static func framePoint(for point: CGPoint, frameAspect: CGFloat, in size: CGSize) -> CGPoint {
+        let frame = shownFrame(frameAspect: frameAspect, in: size)
+        return CGPoint(x: (point.x - frame.minX) / frame.width, y: (point.y - frame.minY) / frame.height)
+    }
+
+    /// A frame box in 0...1 coordinates of only the part the viewfinder shows, which is what the coach judges.
+    static func visibleBox(_ box: CGRect, frameAspect: CGFloat, viewAspect: CGFloat) -> CGRect {
+        let rect = viewRect(for: box, frameAspect: frameAspect, in: CGSize(width: viewAspect, height: 1))
+        return CGRect(x: rect.minX / viewAspect, y: rect.minY, width: rect.width / viewAspect, height: rect.height)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+    }
+}
+
+/// Follows the object the person tapped, for its outline and the advice card.
+@Observable
+final class ObjectSelection {
+    private(set) var object: SelectedObject?
+    /// A tap is waiting for the next frame to find what's there.
+    private(set) var isFinding = false
+    /// The object went out of view and couldn't be followed any more.
+    private(set) var isLost = false
+
+    /// `point` is in 0...1 coordinates of the whole upright frame.
+    func select(at point: CGPoint, camera: CameraManager) {
+        camera.frameGrabber.selectObject(at: point)
+        isFinding = true
+        isLost = false
+    }
+
+    func clear(camera: CameraManager) {
+        camera.frameGrabber.clearSelection()
+        object = nil
+        isFinding = false
+        isLost = false
+    }
+
+    /// Runs until the task is cancelled, copying what the frame grabber is following.
+    func run(camera: CameraManager) async {
+        while !Task.isCancelled {
+            let latest = camera.frameGrabber.selection()
+            if latest.object != object { object = latest.object }
+            if latest.isPending != isFinding { isFinding = latest.isPending }
+            if latest.isLost != isLost { isLost = latest.isLost }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+}
+
+/// Outlines the object the person tapped, with its name. Put it on top of the preview, sized like the preview.
+struct SelectedObjectOverlay: View {
+    let object: SelectedObject
+
+    var body: some View {
+        GeometryReader { proxy in
+            let rect = FrameMapping.viewRect(for: object.box, frameAspect: object.frameAspect, in: proxy.size)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(.yellow, lineWidth: 2)
+                .frame(width: rect.width, height: rect.height)
+                .overlay(alignment: .topLeading) {
+                    Text(object.name.capitalized)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.yellow, in: .capsule)
+                        .alignmentGuide(.top) { $0[.bottom] + 4 }
+                }
+                .offset(x: rect.minX, y: rect.minY)
+                .animation(.snappy, value: object)
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -206,6 +386,11 @@ final class SubjectGuide {
 
         while !Task.isCancelled {
             if let found = latestSubject(from: camera) {
+                // Turning the phone changes the frame's shape, and the old box no longer lines up.
+                if (found.aspect > 1) != (frameAspect > 1) {
+                    smoothed = nil
+                    target = nil
+                }
                 frameAspect = found.aspect
                 target = SubjectTarget.make(
                     subject: smooth(found.box),
@@ -287,20 +472,6 @@ struct SubjectTargetOverlay: View {
 
     /// The preview fills its area and crops what doesn't fit, so map the frame the same way.
     private func viewRect(for box: CGRect, in size: CGSize) -> CGRect {
-        let viewAspect = size.width / size.height
-        let shown: CGSize
-        if frameAspect > viewAspect {
-            shown = CGSize(width: size.height * frameAspect, height: size.height)
-        } else {
-            shown = CGSize(width: size.width, height: size.width / frameAspect)
-        }
-        let originX = (size.width - shown.width) / 2
-        let originY = (size.height - shown.height) / 2
-        return CGRect(
-            x: originX + box.minX * shown.width,
-            y: originY + box.minY * shown.height,
-            width: box.width * shown.width,
-            height: box.height * shown.height
-        )
+        FrameMapping.viewRect(for: box, frameAspect: frameAspect, in: size)
     }
 }

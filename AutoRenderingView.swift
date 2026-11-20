@@ -5,6 +5,7 @@
 //  Created by soonqirui on 12/11/26.
 //
 
+import AVKit
 import SwiftUI
 
 struct AutoRenderingView: View {
@@ -12,6 +13,8 @@ struct AutoRenderingView: View {
     @State private var camera = CameraManager()
     @State private var coach = PhotoCoach()
     @State private var subjectGuide = SubjectGuide()
+    /// The object the person tapped to get advice about.
+    @State private var objectSelection = ObjectSelection()
     @State private var gallery = PhotoGallery()
     @State private var isGalleryPresented = false
     /// Remembered between launches.
@@ -24,8 +27,151 @@ struct AutoRenderingView: View {
     @State private var isShutterBlinking = false
     /// Shows the coach's raw measurements over the card, for tuning the advice.
     @State private var isCoachDebugOn = false
+    /// The advice card is pushed down out of the way, leaving a small pill to pull it back up. Remembered between launches.
+    @AppStorage("isAdviceCollapsed") private var isAdviceCollapsed = false
+    /// The advice card also shows the idea behind the advice. Tapping the card toggles through prompt, explanation, then back to the pill.
+    @State private var isAdviceExplained = false
+    /// How far the advice card is being dragged, while the finger is down.
+    @State private var adviceDragOffset: CGFloat = 0
     /// The zoom when the current pinch began, so the pinch scales from there.
     @State private var pinchStartZoom: CGFloat?
+    /// The first-launch tour only runs until it's finished or skipped once.
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    /// The tour stop being shown, or nil when the tour isn't running.
+    @State private var onboardingStep: OnboardingStep?
+    /// How the person is doing on the current tour stop.
+    @State private var onboardingFeedback: OnboardingFeedback?
+    /// On the topic stop, the mode the tour asks for next. Nil once every mode has been tried,
+    /// when the tour asks to go back to Composition.
+    @State private var tourNextTopic: AdviceTopic? = AdviceTopic.allCases.dropFirst().first
+    /// On the composition stop, whether the person has scrolled the row and picked a style yet.
+    @State private var tourScrolledStyles = false
+    @State private var tourPickedStyle = false
+
+    private func showOnboarding(_ step: OnboardingStep) {
+        onboardingStep = step
+        onboardingFeedback = nil
+        tourScrolledStyles = false
+        tourPickedStyle = false
+    }
+
+    /// The header inside the open topic menu while the tour is on that stop, since the menu covers the tour card.
+    private var topicMenuPrompt: String? {
+        guard onboardingStep == .topicMenu else { return nil }
+        if let next = tourNextTopic {
+            return "Each mode coaches a different skill. Select \(next.title) next."
+        }
+        return "That's every mode. Go back to Composition."
+    }
+
+    /// Moves to the next tour stop whose control is on screen, or ends the tour after the last one.
+    private func continueOnboarding(from step: OnboardingStep, available: Set<OnboardingStep>) {
+        if let next = OnboardingStep.allCases.first(where: {
+            $0.rawValue > step.rawValue && !$0.isFollowOn && available.contains($0)
+        }) {
+            showOnboarding(next)
+        } else {
+            finishOnboarding()
+        }
+    }
+
+    private func finishOnboarding() {
+        onboardingStep = nil
+        onboardingFeedback = nil
+        hasCompletedOnboarding = true
+    }
+
+    /// Shows feedback, but only while the tour is on `step`.
+    private func noteOnboarding(_ step: OnboardingStep, _ text: String, isComplete: Bool) {
+        guard onboardingStep == step else { return }
+        onboardingFeedback = OnboardingFeedback(text: text, isComplete: isComplete)
+    }
+
+    /// The tour walks through every mode in menu order, then asks to go back to Composition.
+    /// Whichever topic is picked gets explained.
+    private func noteTopicPicked(_ topic: AdviceTopic) {
+        guard onboardingStep == .topicMenu else { return }
+        let explained = "\(topic.title): \(topic.tourDescription)"
+        guard let next = tourNextTopic else {
+            if topic == .composition {
+                noteOnboarding(.topicMenu, "Back to Composition. \(topic.tourDescription)", isComplete: true)
+            } else {
+                noteOnboarding(.topicMenu, "\(explained) Now open the menu and go back to Composition.", isComplete: false)
+            }
+            return
+        }
+        guard topic == next else {
+            noteOnboarding(.topicMenu, "\(explained) For this tour, open the menu and select \(next.title).", isComplete: false)
+            return
+        }
+        let modes = AdviceTopic.allCases
+        let after = modes.firstIndex(of: topic).map { modes.index(after: $0) }
+        tourNextTopic = after.flatMap { $0 < modes.endIndex ? modes[$0] : nil }
+        if let upcoming = tourNextTopic {
+            noteOnboarding(.topicMenu, "\(explained) Open the menu again and select \(upcoming.title).", isComplete: false)
+        } else {
+            noteOnboarding(.topicMenu, "\(explained) That's every mode. Open the menu once more and go back to Composition.", isComplete: false)
+        }
+    }
+
+    /// Opening the controls panel moves the tour on to picking buttons; closing it finishes that stop.
+    private func noteControlsEditingChanged() {
+        if controls.isEditing {
+            if onboardingStep == .photoControls {
+                showOnboarding(.editControls)
+            }
+        } else {
+            let names = controls.pinned.map(\.title)
+            let text = names.isEmpty
+                ? "Your bar is empty now. Press and hold the top right corner anytime to add buttons back."
+                : "Your bar shows \(names.formatted(.list(type: .and))). Press and hold it anytime to change them."
+            noteOnboarding(.editControls, text, isComplete: true)
+        }
+    }
+
+    /// Says what each tap in the controls panel did.
+    private func noteDraftChanged(from old: [PhotoControl], to new: [PhotoControl]) {
+        // Opening and closing the panel also change the draft; only the person's own edits count.
+        guard controls.isEditing, !old.isEmpty || new != controls.pinned else { return }
+        if let added = new.first(where: { !old.contains($0) }) {
+            noteOnboarding(.editControls, "Added \(added.title). It \(added.tourDescription). Tap ✓ to keep it.", isComplete: false)
+        } else if let removed = old.first(where: { !new.contains($0) }) {
+            noteOnboarding(.editControls, "Removed \(removed.title). Tap ✓ to keep the change.", isComplete: false)
+        } else if old != new {
+            noteOnboarding(.editControls, "Moved them around. Tap ✓ to keep this order.", isComplete: false)
+        }
+    }
+
+    /// Explains the composition style that was just picked.
+    private func noteCompositionChanged(from old: String, to new: String) {
+        let before = Set(old.split(separator: ",").compactMap { CompositionGuide(rawValue: String($0)) })
+        let after = Set(new.split(separator: ",").compactMap { CompositionGuide(rawValue: String($0)) })
+        // The stop is done once the row has been scrolled and a style picked, in either order.
+        let next = tourScrolledStyles
+            ? "Tap another to combine styles. The ✨ icon marks the coach's recommendation for this scene."
+            : "Now scroll the row to see the other styles."
+        if let added = CompositionGuide.allCases.first(where: { after.contains($0) && !before.contains($0) }) {
+            tourPickedStyle = true
+            noteOnboarding(.compositionRow, "\(added.title): \(added.tourDescription) The grid on screen shows you how. \(next)", isComplete: tourScrolledStyles)
+        } else if let removed = CompositionGuide.allCases.first(where: { before.contains($0) && !after.contains($0) }) {
+            tourPickedStyle = true
+            noteOnboarding(.compositionRow, "Turned off \(removed.title). You can practise a few styles at once. \(next)", isComplete: tourScrolledStyles)
+        }
+    }
+
+    private func noteCompositionScrolled() {
+        guard onboardingStep == .compositionRow, !tourScrolledStyles else { return }
+        tourScrolledStyles = true
+        let text = tourPickedStyle
+            ? "That's all \(CompositionGuide.allCases.count) styles. You can select more than one, and the ✨ icon marks the coach's recommendation for this scene."
+            : "That's all \(CompositionGuide.allCases.count) styles. Now tap one to practise it. You can select more than one, and the ✨ icon marks the coach's recommendation."
+        noteOnboarding(.compositionRow, text, isComplete: tourPickedStyle)
+    }
+
+    private func noteZoomChanged() {
+        let level = Double(camera.zoomLevel).formatted(.number.precision(.fractionLength(0...1)))
+        noteOnboarding(.compositionRow, "Zoomed to \(level)×. Zooming changes how much of the scene fits in the frame. Now try tapping a style.", isComplete: false)
+    }
 
     /// The composition styles the person is practising. At least one is always selected,
     /// and only styles that can work together are kept.
@@ -68,10 +214,113 @@ struct AutoRenderingView: View {
         }
     }
 
+    /// How far the advice has to be dragged before it collapses or expands.
+    private let adviceDragThreshold: CGFloat = 50
+
+    /// The coach's advice, which can be pushed down into a small pill and pulled back up.
+    @ViewBuilder
+    private var adviceArea: some View {
+        if coach.notice != nil || coach.feedback != nil || objectSelection.object == nil {
+            if isAdviceCollapsed {
+                collapsedAdvicePill
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                coachCard
+                    // Follows the finger down; resists being pulled up.
+                    .offset(y: adviceDragOffset > 0 ? adviceDragOffset : adviceDragOffset / 4)
+                    .opacity(1 - min(max(adviceDragOffset, 0) / 200, 0.6))
+                    .gesture(
+                        DragGesture(minimumDistance: 10)
+                            .onChanged { value in
+                                adviceDragOffset = value.translation.height
+                            }
+                            .onEnded { value in
+                                withAnimation(.snappy) {
+                                    if value.translation.height > adviceDragThreshold
+                                        || value.predictedEndTranslation.height > adviceDragThreshold * 3 {
+                                        isAdviceCollapsed = true
+                                        isAdviceExplained = false
+                                    }
+                                    adviceDragOffset = 0
+                                }
+                            }
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .onTapGesture(perform: advanceAdvice)
+                    .accessibilityAction(named: hasAdviceExplanation && !isAdviceExplained ? "Explain advice" : "Hide advice") {
+                        advanceAdvice()
+                    }
+            }
+        }
+    }
+
+    /// Whether the current advice has an explanation to reveal.
+    private var hasAdviceExplanation: Bool {
+        guard coach.notice == nil, objectSelection.object != nil, let feedback = coach.feedback else { return false }
+        return !feedback.isGoodEnough && feedback.why != nil
+    }
+
+    /// A tap on the card first reveals the explanation, then pushes the card back down into the pill.
+    /// Advice without an explanation goes straight back to the pill.
+    private func advanceAdvice() {
+        withAnimation(.snappy) {
+            if hasAdviceExplanation && !isAdviceExplained {
+                isAdviceExplained = true
+            } else {
+                isAdviceCollapsed = true
+                isAdviceExplained = false
+            }
+        }
+    }
+
+    /// What's left of the advice once it's pushed down. Tap it or swipe it up to bring the card back.
+    private var collapsedAdvicePill: some View {
+        let isGoodEnough = coach.feedback?.isGoodEnough == true
+        return Button {
+            withAnimation(.snappy) {
+                isAdviceCollapsed = false
+                isAdviceExplained = false
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isGoodEnough ? "checkmark.circle.fill" : "lightbulb.fill")
+                    .foregroundStyle(isGoodEnough ? .green : .yellow)
+                Text("Advice")
+                Image(systemName: "chevron.up")
+                    .font(.caption.weight(.bold))
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .glassEffect(.regular.tint(.black.opacity(0.35)).interactive(), in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .gesture(
+            DragGesture(minimumDistance: 10)
+                .onEnded { value in
+                    if value.translation.height < -adviceDragThreshold / 2
+                        || value.predictedEndTranslation.height < -adviceDragThreshold {
+                        withAnimation(.snappy) {
+                            isAdviceCollapsed = false
+                            isAdviceExplained = false
+                        }
+                    }
+                }
+        )
+        .accessibilityLabel("Show advice")
+        .accessibilityValue(isGoodEnough ? "Looks good, take it" : "")
+    }
+
     /// The auto-rendering coach's latest feedback, or a notice when it can't run.
     @ViewBuilder
     private var coachCard: some View {
         VStack(spacing: 8) {
+            // Grab handle, hinting that the card can be pushed down.
+            Capsule()
+                .fill(.white.opacity(0.5))
+                .frame(width: 36, height: 5)
+                .accessibilityHidden(true)
             // Hidden debug view: press and hold the card to see what the coach measured.
             if isCoachDebugOn, !coach.debugText.isEmpty {
                 Text(coach.debugText)
@@ -83,12 +332,68 @@ struct AutoRenderingView: View {
             }
             if let notice = coach.notice {
                 CoachTipView(text: notice)
+            } else if objectSelection.object == nil {
+                // Advice is about what the person chose, so they pick it first.
+                CoachTipView(text: selectObjectPrompt)
             } else if let feedback = coach.feedback {
-                CoachFeedbackView(feedback: feedback)
+                if let object = objectSelection.object {
+                    selectedObjectHeader(object)
+                }
+                CoachFeedbackView(feedback: feedback, showsExplanation: isAdviceExplained)
             }
         }
         .onLongPressGesture {
             isCoachDebugOn.toggle()
+        }
+    }
+
+    private var selectObjectPrompt: String {
+        if objectSelection.isFinding {
+            return "Finding what you tapped…"
+        }
+        if objectSelection.isLost {
+            return "Lost sight of it. Tap the object again to keep getting advice about it."
+        }
+        return "Select an object: tap what you want to photograph to get advice about it."
+    }
+
+    /// Says what the advice is about, with a button to choose something else.
+    private func selectedObjectHeader(_ object: SelectedObject) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "scope")
+                .foregroundStyle(.yellow)
+            Text("Advice for the \(object.name)")
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button {
+                withAnimation(.snappy) {
+                    objectSelection.clear(camera: camera)
+                    isAdviceExplained = false
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Choose a different object")
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
+    }
+
+    /// Picks the object under a tap on the viewfinder. `location` and `size` are in the upright view.
+    private func selectObject(at location: CGPoint, in size: CGSize) {
+        guard let aspect = camera.frameGrabber.uprightAspect() else { return }
+        let point = FrameMapping.framePoint(for: location, frameAspect: aspect, in: size)
+        guard (0...1).contains(point.x), (0...1).contains(point.y) else { return }
+        objectSelection.select(at: point, camera: camera)
+        // Bring the advice back out, so the person sees it's now about what they tapped.
+        withAnimation(.snappy) {
+            isAdviceCollapsed = false
+            isAdviceExplained = false
         }
     }
 
@@ -104,7 +409,9 @@ struct AutoRenderingView: View {
                 // Grids help line the scene up while composing.
                 .overlay {
                     if adviceTopic == .composition {
-                        CompositionGrid(styles: compositionGuides)
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            CompositionGrid(styles: compositionGuides)
+                        }
                     }
                 }
                 // A level in the middle of the frame while practising angle and perspective.
@@ -116,7 +423,43 @@ struct AutoRenderingView: View {
                 // The green box shows where the subject should be.
                 .overlay {
                     if showsSubjectBox, let target = subjectGuide.target {
-                        SubjectTargetOverlay(target: target, frameAspect: subjectGuide.frameAspect)
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            SubjectTargetOverlay(target: target, frameAspect: subjectGuide.frameAspect)
+                        }
+                    }
+                }
+                // Tap anything in the viewfinder to get advice about it, and see it outlined while it's followed.
+                .overlay {
+                    UprightOverlay(orientation: camera.holdOrientation) {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .contentShape(.rect)
+                                .onTapGesture { location in
+                                    selectObject(at: location, in: proxy.size)
+                                }
+                                .accessibilityHidden(true)
+                        }
+                    }
+                }
+                .overlay {
+                    if let object = objectSelection.object {
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            SelectedObjectOverlay(object: object)
+                        }
+                    }
+                }
+                // Held sideways, the advice reads along the long side, at the bottom as the person sees it.
+                .overlay {
+                    if camera.holdOrientation.isLandscape, !controls.isEditing {
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            VStack {
+                                Spacer()
+                                adviceArea
+                                    .onboardingAnchor(.advice)
+                            }
+                            .padding(.horizontal, 40)
+                            .padding(.bottom, 16)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -144,10 +487,16 @@ struct AutoRenderingView: View {
                 // Top bar: advice topic dropdown on the left, camera controls on the right.
                 HStack(alignment: .center, spacing: 8) {
                     // Hidden rather than removed while editing, so the controls bar doesn't shift.
-                    AdviceTopicMenu(selection: $adviceTopic)
+                    AdviceTopicMenu(
+                        selection: $adviceTopic,
+                        iconRotation: camera.holdOrientation.uiRotation,
+                        onSelect: { noteTopicPicked($0) },
+                        prompt: topicMenuPrompt
+                    )
                         .opacity(controls.isEditing ? 0 : 1)
                         .disabled(controls.isEditing)
                         .accessibilityHidden(controls.isEditing)
+                        .onboardingAnchor(.topicMenu)
                     PhotoControlsBar(model: controls, camera: camera, activeAdjustment: $activeAdjustment) { message in
                         statusMessage = message
                     }
@@ -174,6 +523,7 @@ struct AutoRenderingView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
+                        .rotationEffect(camera.holdOrientation.uiRotation)
                         .transition(.opacity)
                         .allowsHitTesting(false)
                 }
@@ -182,13 +532,14 @@ struct AutoRenderingView: View {
 
                 if controls.isEditing {
                     PhotoControlsSheet(model: controls)
+                        .onboardingAnchor(.editControls)
                         .padding(.bottom, 24)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
                     VStack(spacing: 10) {
                         // Zoom and composition styles share one row to keep more of the viewfinder clear.
                         HStack(spacing: 8) {
-                            ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel) { level in
+                            ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel, labelRotation: camera.holdOrientation.uiRotation) { level in
                                 if let message = camera.setZoom(level) {
                                     statusMessage = message
                                 }
@@ -200,19 +551,28 @@ struct AutoRenderingView: View {
                                     selection: Binding(get: { compositionGuides }, set: { setCompositionGuides($0) }),
                                     unavailable: coach.unavailableCompositions,
                                     recommended: coach.recommendedComposition,
-                                    onMessage: { statusMessage = $0 }
+                                    onMessage: { statusMessage = $0 },
+                                    onScroll: noteCompositionScrolled,
+                                    chipRotation: camera.holdOrientation.uiRotation
                                 )
                                     // Undo the picker's leading bleed so chips don't scroll under the zoom buttons.
                                     .padding(.leading, 16)
                                     .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
                         }
+                        .onboardingAnchor(.compositionRow)
                         // Full width, so the coach card gets room even when only the zoom buttons are showing.
                         .frame(maxWidth: .infinity)
                         .overlay(alignment: .top) {
                             // Floats above the controls, so a longer card never pushes them around.
-                            coachCard
-                                .alignmentGuide(.top) { $0[.bottom] + 12 }
+                            // Held sideways, the advice moves onto the viewfinder instead.
+                            Group {
+                                if !camera.holdOrientation.isLandscape {
+                                    adviceArea
+                                        .onboardingAnchor(.advice)
+                                }
+                            }
+                            .alignmentGuide(.top) { $0[.bottom] + 12 }
                         }
                         CaptureBar(
                             camera: camera,
@@ -230,6 +590,9 @@ struct AutoRenderingView: View {
             .padding(.horizontal)
             // Run into the home-indicator area so the shutter row sits low, like the Camera app.
             .ignoresSafeArea(.container, edges: .bottom)
+            // Get out of the way while a Camera Control slider fills the screen.
+            .opacity(camera.isCameraControlFullscreen ? 0 : 1)
+            .animation(.easeInOut(duration: 0.2), value: camera.isCameraControlFullscreen)
 
             // Self-timer countdown.
             if let countdown = camera.countdown {
@@ -239,6 +602,7 @@ struct AutoRenderingView: View {
                     // Keeps the thin numerals readable against bright scenes.
                     .shadow(color: .black.opacity(0.6), radius: 8)
                     .contentTransition(.numericText(countsDown: true))
+                    .rotationEffect(camera.holdOrientation.uiRotation)
                     .allowsHitTesting(false)
                     .accessibilityLabel("\(countdown) seconds")
             }
@@ -248,8 +612,54 @@ struct AutoRenderingView: View {
                 .opacity(isShutterBlinking ? 1 : 0)
                 .allowsHitTesting(false)
         }
+        // The first-launch tour, spotlighting the controls for one step at a time.
+        .overlayPreferenceValue(OnboardingAnchorKey.self) { anchors in
+            if let step = onboardingStep, let stepAnchors = anchors[step], !stepAnchors.isEmpty {
+                // Numbered stops are the ones on screen now, plus any already passed.
+                let stops = OnboardingStep.allCases.filter {
+                    !$0.isFollowOn && ($0.rawValue <= step.rawValue || anchors[$0] != nil)
+                }
+                let numberedStep = step.isFollowOn ? OnboardingStep.photoControls : step
+                GeometryReader { proxy in
+                    OnboardingOverlay(
+                        step: step,
+                        spots: stepAnchors.map { proxy[$0] },
+                        canvas: proxy.size,
+                        stepNumber: (stops.firstIndex(of: numberedStep) ?? 0) + 1,
+                        stepCount: stops.count,
+                        feedback: onboardingFeedback,
+                        onContinue: { continueOnboarding(from: step, available: Set(anchors.keys)) },
+                        onSkip: finishOnboarding
+                    )
+                }
+                .ignoresSafeArea()
+                .transition(.opacity)
+            }
+        }
+        .onAppear {
+            guard !hasCompletedOnboarding else { return }
+            // Make sure the advice card is out, so the tour can point at it.
+            isAdviceCollapsed = false
+            // The walk through the modes starts from Composition, the first one.
+            adviceTopic = .composition
+            tourNextTopic = AdviceTopic.allCases.dropFirst().first
+            showOnboarding(.topicMenu)
+        }
         .task {
             await camera.start()
+        }
+        .task {
+            await objectSelection.run(camera: camera)
+        }
+        // Clicking the Camera Control (or a volume button) takes a photo, like the Camera app.
+        // It fires on release, so a light press to open the overlay doesn't take one.
+        .onCameraCaptureEvent(isEnabled: !isGalleryPresented && !controls.isEditing && (onboardingStep == nil || onboardingStep == .shutter)) { event in
+            guard event.phase == .ended else { return }
+            Task {
+                if let message = await camera.shutterTapped() {
+                    statusMessage = message
+                }
+            }
         }
         // Restarts whenever the advice topic or composition selection changes, so the tips follow the pickers.
         .task(id: "\(adviceTopic.rawValue)-\(compositionSelectionID)") {
@@ -297,6 +707,21 @@ struct AutoRenderingView: View {
                     isShutterBlinking = false
                 }
             }
+            noteOnboarding(.shutter, "Nice shot! It's saved. Tap the thumbnail at the bottom left to see your photos.", isComplete: true)
+        }
+        // The tour watches what the person does and tells them what it did.
+        .onChange(of: controls.isEditing) { noteControlsEditingChanged() }
+        .onChange(of: controls.draft) { old, new in noteDraftChanged(from: old, to: new) }
+        .onChange(of: compositionGuidesRaw) { old, new in noteCompositionChanged(from: old, to: new) }
+        .onChange(of: camera.zoomLevel) { noteZoomChanged() }
+        .onChange(of: isAdviceExplained) {
+            guard isAdviceExplained else { return }
+            // Not done yet: the tour wants the second tap too, which tucks the card away.
+            noteOnboarding(.advice, "That's the idea behind the tip. Now tap the card again to tuck it away.", isComplete: false)
+        }
+        .onChange(of: isAdviceCollapsed) {
+            guard isAdviceCollapsed else { return }
+            noteOnboarding(.advice, "Tucked away. Tap the Advice pill to bring the coach back anytime.", isComplete: true)
         }
         .animation(.spring, value: controls.isEditing)
         .animation(.snappy, value: controls.draft)
@@ -304,6 +729,9 @@ struct AutoRenderingView: View {
         .animation(.snappy, value: adviceTopic)
         .animation(.easeInOut, value: statusMessage)
         .animation(.easeInOut, value: coach.feedback)
+        .animation(.snappy, value: isAdviceCollapsed)
+        .animation(.snappy, value: onboardingStep)
+        .sensoryFeedback(.selection, trigger: onboardingStep)
         .sensoryFeedback(.success, trigger: coach.isReady) { _, isReady in isReady }
         .animation(.snappy, value: camera.countdown)
         .sensoryFeedback(.impact(weight: .medium), trigger: camera.shutterCount)

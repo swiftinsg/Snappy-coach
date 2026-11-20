@@ -1,0 +1,221 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.00000,0.76393,1.00000,1.00000",
+      "display-p3:0.00000,0.21978,0.96783,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "Group-2.png",
+          "name" : "Group-2",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              311.5,
+              -362
+            ]
+          }
+        },
+        {
+          "image-name" : "Group.png",
+          "name" : "Group",
+          "position" : {
+            "scale" : 1.4,
+            "translation-in-points" : [
+              393,
+              -227.39999999999998
+            ]
+          }
+        },
+        {
+          "image-name" : "Group-1.png",
+          "name" : "Group-1",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              224.5,
+              -282.90000000000003
+            ]
+          }
+        },
+        {
+          "image-name" : "Line 1.png",
+          "name" : "Line 1",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -16.399999999999977,
+              -33.200000000000045
+            ]
+          }
+        },
+        {
+          "image-name" : "Ellipse 2.png",
+          "name" : "Ellipse 2",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              195.10000000000002,
+              -121.19999999999999
+            ]
+          }
+        },
+        {
+          "image-name" : "Vector 1.png",
+          "name" : "Vector 1",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              -32.89999999999998,
+              -218.70000000000005
+            ]
+          }
+        },
+        {
+          "image-name" : "Line 6.png",
+          "name" : "Line 6",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              22.600000000000023,
+              85.29999999999995
+            ]
+          }
+        },
+        {
+          "image-name" : "Line 5.png",
+          "name" : "Line 5",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              33.55000000000007,
+              12.549999999999955
+            ]
+          }
+        },
+        {
+          "image-name" : "Line 4.png",
+          "name" : "Line 4",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -49.39999999999998,
+              106.29999999999995
+            ]
+          }
+        },
+        {
+          "image-name" : "Line 3.png",
+          "name" : "Line 3",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -82.69999999999993,
+              -10.700000000000045
+            ]
+          }
+        },
+        {
+          "image-name" : "Line 2.png",
+          "name" : "Line 2",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -98.89999999999998,
+              57.549999999999955
+            ]
+          }
+        },
+        {
+          "image-name" : "hexagon-64 1.png",
+          "name" : "hexagon-64 1",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -32.89999999999998,
+              37.299999999999955
+            ]
+          }
+        },
+        {
+          "image-name" : "Ellipse 3.png",
+          "name" : "Ellipse 3",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -32.89999999999998,
+              37.299999999999955
+            ]
+          }
+        },
+        {
+          "image-name" : "Ellipse 1.png",
+          "name" : "Ellipse 1",
+          "position" : {
+            "scale" : 1.5,
+            "translation-in-points" : [
+              -32.89999999999998,
+              37.299999999999955
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.28810,0.44913,0.64125,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Rectangle 2.png",
+          "name" : "Rectangle 2",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              -32.89999999999998,
+              -252.90000000000003
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.28810,0.44913,0.64125,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "image-name" : "Rectangle 1.png",
+          "name" : "Rectangle 1",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              -32.89999999999998,
+              33.299999999999955
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

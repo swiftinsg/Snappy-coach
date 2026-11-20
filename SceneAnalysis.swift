@@ -344,11 +344,13 @@ extension SceneAnalysis {
         readings: CameraReadings = CameraReadings(),
         pitch: Double? = nil,
         tilt: Double? = nil,
-        shake: Double? = nil
+        shake: Double? = nil,
+        selectedSubject: CGRect? = nil
     ) async -> SceneAnalysis? {
         guard let gray = GrayImage(image) else { return nil }
         let found = SubjectFinder.find(in: image)
-        let subject = found.subject
+        // What the person tapped is the subject, whatever else stands out.
+        let subject = selectedSubject ?? found.subject
         let faces = detectFaces(in: image)
         let labels = classify(image)
         // A clearly visible body means people too, even when the face is turned away.

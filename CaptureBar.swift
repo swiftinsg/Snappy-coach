@@ -32,6 +32,7 @@ struct CaptureBar: View {
                     }
                 }
             }
+            .onboardingAnchor(.shutter)
             Spacer()
             switchCameraButton
         }
@@ -51,6 +52,7 @@ struct CaptureBar: View {
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.5), radius: 2)
                 .rotationEffect(.degrees(camera.isUsingFrontCamera ? 180 : 0))
+                .rotationEffect(camera.holdOrientation.uiRotation)
                 .frame(width: thumbnailSize, height: thumbnailSize)
                 .glassEffect(.regular.tint(.black.opacity(0.35)).interactive(), in: .circle)
         }
@@ -83,6 +85,7 @@ struct CaptureBar: View {
             }
             .frame(width: thumbnailSize, height: thumbnailSize)
             .clipShape(.rect(cornerRadius: 10))
+            .rotationEffect(camera.holdOrientation.uiRotation)
             .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 10))
         }
         .buttonStyle(.plain)

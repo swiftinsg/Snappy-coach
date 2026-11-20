@@ -9,6 +9,7 @@ import Foundation
 @preconcurrency import AVFoundation
 import Observation
 import Photos
+import SwiftUI
 import UIKit
 
 @Observable
@@ -47,6 +48,11 @@ class CameraManager {
     private(set) var lastSavedAssetIdentifier: String?
     /// Goes up by one each time the sensor fires, so the view can blink the screen.
     private(set) var shutterCount = 0
+    /// True while a Camera Control slider fills the screen, so the app can hide its own controls.
+    private(set) var isCameraControlFullscreen = false
+    /// Which way up the phone is held. The layout stays in portrait, like the Camera app,
+    /// but icons, the advice and the coach follow this.
+    private(set) var holdOrientation: HoldOrientation = .portrait
 
     // MARK: - Capture pipeline
 
@@ -69,6 +75,15 @@ class CameraManager {
     private var countdownTask: Task<Void, Never>?
     /// Tracks how the phone is held so photos are saved upright.
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    /// Follows the phone's orientation so `holdOrientation` stays current.
+    private var orientationTask: Task<Void, Never>?
+
+    // MARK: - Camera Control (the hardware button on iPhone 16 and later)
+
+    private let cameraControlsDelegate = CameraControlsDelegate()
+    private var zoomControl: AVCaptureSlider?
+    private var exposureControl: AVCaptureSlider?
+    private var styleControl: AVCaptureIndexPicker?
 
     /// True when the back camera has a physically adjustable aperture (iPhone 18 Pro / Pro Max).
     /// Checks the hardware capability instead of the model name, so it also covers future devices.
@@ -86,6 +101,9 @@ class CameraManager {
         }
         histogramProcessor.onUpdate = { bins in
             Task { @MainActor in update(bins) }
+        }
+        cameraControlsDelegate.onFullscreenChange = { [weak self] isFullscreen in
+            self?.isCameraControlFullscreen = isFullscreen
         }
     }
 
@@ -124,8 +142,41 @@ class CameraManager {
         }
         session.commitConfiguration()
         isLivePhotoOn = photoOutput.isLivePhotoCaptureEnabled
-        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
+        trackRotation(of: camera)
+        // The system only shows the Camera Control overlay once a delegate is set.
+        if session.supportsControls {
+            session.setControlsDelegate(cameraControlsDelegate, queue: .main)
+        }
         refreshZoomStops()
+    }
+
+    /// Follows how the phone is held with `device`, so photos are saved level.
+    private func trackRotation(of device: AVCaptureDevice) {
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        // The other lens may deliver frames the other way round.
+        frameGrabber.setFrameOrientation(holdOrientation.frameOrientation(isFrontCamera: device.position == .front))
+    }
+
+    /// Keeps `holdOrientation` in step with how the phone is held, for icons, the advice and the coach.
+    private func trackHoldOrientation() {
+        guard orientationTask == nil else { return }
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        updateHoldOrientation()
+        orientationTask = Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: UIDevice.orientationDidChangeNotification) {
+                self?.updateHoldOrientation()
+            }
+        }
+    }
+
+    private func updateHoldOrientation() {
+        // Flat on a table or unknown says nothing about which way is up, so keep the last one.
+        guard let orientation = HoldOrientation(UIDevice.current.orientation) else { return }
+        frameGrabber.setFrameOrientation(orientation.frameOrientation(isFrontCamera: isUsingFrontCamera))
+        guard orientation != holdOrientation else { return }
+        withAnimation(.snappy) {
+            holdOrientation = orientation
+        }
     }
 
     func start() async {
@@ -136,6 +187,7 @@ class CameraManager {
         }
        
         configure()
+        trackHoldOrientation()
         // startRunning() blocks, so keep it off the main thread.
         let session = session
         sessionQueue.async {
@@ -167,6 +219,7 @@ class CameraManager {
         if target.isVirtualDevice {
             zoomLevel = level
             applyZoomOnCurrentDevice(level)
+            syncZoomControl()
             return nil
         }
         var lensZoom = level
@@ -191,6 +244,7 @@ class CameraManager {
             let factor = min(max(lensZoom, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
             device.ramp(toVideoZoomFactor: factor, withRate: 16)
         }
+        syncZoomControl()
         return nil
     }
 
@@ -206,6 +260,8 @@ class CameraManager {
 
     /// Works out which zoom buttons this camera can offer.
     private func refreshZoomStops() {
+        // The Camera Control's zoom slider spans these stops, so rebuild it to match.
+        defer { refreshCameraControls() }
         if device?.isVirtualDevice == true {
             zoomStops = [1, 2]
             return
@@ -271,8 +327,9 @@ class CameraManager {
         shutterSeconds = nil
         whiteBalanceKelvin = nil
         aperture = nil
+        syncExposureControl()
         _ = setNightMode(isNightModeOn)
-        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: newDevice, previewLayer: nil)
+        trackRotation(of: newDevice)
         return true
     }
 
@@ -310,6 +367,7 @@ class CameraManager {
             return "Timer \(timer.title)"
         case .styles:
             style = style.next
+            styleControl?.selectedIndex = PhotoStyle.allCases.firstIndex(of: style) ?? 0
             return "Style: \(style.title)"
         case .depth:
             return setDepth(!isDepthOn)
@@ -496,6 +554,7 @@ class CameraManager {
         switch control {
         case .exposure:
             exposureBias = value
+            syncExposureControl()
             configureDevice { device in
                 device.setExposureTargetBias(min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias))
             }
@@ -698,6 +757,82 @@ class CameraManager {
         }
     }
 
+    // MARK: - Camera Control
+
+    /// Adds Zoom, Exposure and Styles to the Camera Control's light-press overlay, like the
+    /// Camera app. Each control drives the same code as the on-screen controls, so both stay in sync.
+    private func refreshCameraControls() {
+        guard session.supportsControls else { return }
+        session.beginConfiguration()
+        for control in session.controls {
+            session.removeControl(control)
+        }
+
+        // Spans the same range as pinch-to-zoom, with the lens buttons as detents.
+        let zoomRange = cameraControlZoomRange
+        let zoom = AVCaptureSlider("Zoom", symbolName: "plus.magnifyingglass", in: zoomRange)
+        zoom.prominentValues = zoomStops.map { Float($0) }
+        zoom.localizedValueFormat = "%@×"
+        zoom.value = min(max(Float(zoomLevel), zoomRange.lowerBound), zoomRange.upperBound)
+        zoom.setActionQueue(.main) { [weak self] value in
+            MainActor.assumeIsolated {
+                _ = self?.setZoom(CGFloat(value))
+            }
+        }
+
+        let exposureRange = sliderRange(for: .exposure)
+        let exposure = AVCaptureSlider("Exposure", symbolName: "plusminus.circle", in: exposureRange, step: 0.1)
+        exposure.prominentValues = [0]
+        exposure.value = min(max(exposureBias, exposureRange.lowerBound), exposureRange.upperBound)
+        exposure.setActionQueue(.main) { [weak self] value in
+            MainActor.assumeIsolated {
+                self?.setAdjustment(value, for: .exposure)
+            }
+        }
+
+        let styles = AVCaptureIndexPicker("Styles", symbolName: "camera.filters",
+                                          localizedIndexTitles: PhotoStyle.allCases.map(\.title))
+        styles.selectedIndex = PhotoStyle.allCases.firstIndex(of: style) ?? 0
+        styles.setActionQueue(.main) { [weak self] index in
+            MainActor.assumeIsolated {
+                self?.style = PhotoStyle.allCases[index]
+            }
+        }
+
+        for control in [zoom, exposure, styles] as [AVCaptureControl] where session.canAddControl(control) {
+            session.addControl(control)
+        }
+        session.commitConfiguration()
+        zoomControl = zoom
+        exposureControl = exposure
+        styleControl = styles
+    }
+
+    /// Moves the Camera Control's zoom slider when zoom changes from the screen.
+    private func syncZoomControl() {
+        guard let zoomControl else { return }
+        let range = cameraControlZoomRange
+        let value = min(max(Float(zoomLevel), range.lowerBound), range.upperBound)
+        if zoomControl.value != value {
+            zoomControl.value = value
+        }
+    }
+
+    /// Moves the Camera Control's exposure slider when exposure changes from the screen.
+    private func syncExposureControl() {
+        guard let exposureControl else { return }
+        let range = sliderRange(for: .exposure)
+        let value = min(max(exposureBias, range.lowerBound), range.upperBound)
+        if exposureControl.value != value {
+            exposureControl.value = value
+        }
+    }
+
+    /// Same limits as pinch-to-zoom.
+    private var cameraControlZoomRange: ClosedRange<Float> {
+        Float(zoomStops.first ?? 1)...Float(max(10, zoomStops.last ?? 1))
+    }
+
     // MARK: - Helpers
 
     /// Locks the device, applies `change`, and unlocks. Does nothing without a camera (e.g. the Simulator).
@@ -749,6 +884,70 @@ extension CameraManager {
         case .histogram: isHistogramOn
         case .exposure, .focus, .shutterSpeed, .whiteBalance, .lensAperture: !isAuto(control)
         case .aspect: false
+        }
+    }
+}
+
+/// Tells the camera when the Camera Control's overlay appears and goes fullscreen.
+/// Callbacks arrive on the main queue (set in `configure()`).
+nonisolated private final class CameraControlsDelegate: NSObject, AVCaptureSessionControlsDelegate, @unchecked Sendable {
+    @MainActor var onFullscreenChange: (Bool) -> Void = { _ in }
+
+    func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {}
+
+    func sessionControlsWillEnterFullscreenAppearance(_ session: AVCaptureSession) {
+        MainActor.assumeIsolated { onFullscreenChange(true) }
+    }
+
+    func sessionControlsWillExitFullscreenAppearance(_ session: AVCaptureSession) {
+        MainActor.assumeIsolated { onFullscreenChange(false) }
+    }
+
+    func sessionControlsDidBecomeInactive(_ session: AVCaptureSession) {
+        MainActor.assumeIsolated { onFullscreenChange(false) }
+    }
+}
+
+/// How the phone is held, as the Camera app sees it. Upside down counts as portrait.
+nonisolated enum HoldOrientation: Equatable, Sendable {
+    /// Upright.
+    case portrait
+    /// Turned anticlockwise, so the top of the phone is on the left.
+    case landscapeLeft
+    /// Turned clockwise, so the top of the phone is on the right.
+    case landscapeRight
+
+    /// Reads the phone's own orientation. Nil when it's flat or unknown. Upside down counts as portrait.
+    init?(_ deviceOrientation: UIDeviceOrientation) {
+        switch deviceOrientation {
+        case .portrait, .portraitUpsideDown: self = .portrait
+        case .landscapeLeft: self = .landscapeLeft
+        case .landscapeRight: self = .landscapeRight
+        default: return nil
+        }
+    }
+
+    var isLandscape: Bool {
+        self != .portrait
+    }
+
+    /// How far to turn icons and text so they read upright for the person holding the phone.
+    var uiRotation: Angle {
+        switch self {
+        case .portrait: .zero
+        // The top of the phone is on the left, so turn clockwise to stand the text up.
+        case .landscapeLeft: .degrees(90)
+        case .landscapeRight: .degrees(-90)
+        }
+    }
+
+    /// How to turn a camera frame so the scene is upright. The back camera's frames arrive upright
+    /// when the top of the phone is on the left; the front camera's when it's on the right.
+    func frameOrientation(isFrontCamera: Bool) -> CGImagePropertyOrientation {
+        switch self {
+        case .portrait: .right
+        case .landscapeLeft: isFrontCamera ? .down : .up
+        case .landscapeRight: isFrontCamera ? .up : .down
         }
     }
 }

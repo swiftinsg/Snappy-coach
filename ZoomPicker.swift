@@ -10,6 +10,8 @@ import SwiftUI
 struct ZoomPicker: View {
     let stops: [CGFloat]
     let level: CGFloat
+    /// Turns the labels to face the person when the phone is held sideways.
+    var labelRotation: Angle = .zero
     let onSelect: (CGFloat) -> Void
 
     var body: some View {
@@ -23,6 +25,7 @@ struct ZoomPicker: View {
                     Text(isSelected ? label(for: level, isSelected: true) : label(for: stop, isSelected: false))
                         .font(isSelected ? .footnote.bold() : .caption2.bold())
                         .foregroundStyle(isSelected ? .yellow : .white)
+                        .rotationEffect(labelRotation)
                         .frame(width: isSelected ? 40 : 32, height: isSelected ? 40 : 32)
                         .background(.black.opacity(0.35), in: .circle)
                 }

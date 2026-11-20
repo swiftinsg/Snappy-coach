@@ -59,18 +59,36 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
 /// Glass dropdown button for picking the advice topic.
 struct AdviceTopicMenu: View {
     @Binding var selection: AdviceTopic
+    /// Turns the topic icon to face the person when the phone is held sideways.
+    var iconRotation: Angle = .zero
+    /// Called whenever a topic is picked, even the one already selected.
+    var onSelect: (AdviceTopic) -> Void = { _ in }
+    /// Shown as a header at the top of the open menu to guide the first-launch tour.
+    /// While it's set, each topic also says what it teaches.
+    var prompt: String? = nil
 
     var body: some View {
         Menu {
-            Picker("Advice Topic", selection: $selection) {
-                ForEach(AdviceTopic.allCases) { topic in
-                    Label(topic.title, systemImage: topic.systemImage)
-                        .tag(topic)
+            if let prompt {
+                Section(prompt) {
+                    // Toggles rather than a picker, because menu toggles can show a subtitle.
+                    ForEach(AdviceTopic.allCases) { topic in
+                        Toggle(isOn: Binding(get: { selection == topic }, set: { _ in
+                            selection = topic
+                            onSelect(topic)
+                        })) {
+                            Label(topic.title, systemImage: topic.systemImage)
+                            Text(topic.tourDescription)
+                        }
+                    }
                 }
+            } else {
+                topicPicker
             }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: selection.systemImage)
+                    .rotationEffect(iconRotation)
                 Text(selection.shortTitle)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -86,5 +104,17 @@ struct AdviceTopicMenu: View {
         }
         .accessibilityLabel("Advice topic")
         .accessibilityValue(selection.title)
+    }
+
+    private var topicPicker: some View {
+        Picker("Advice Topic", selection: Binding(get: { selection }, set: { topic in
+            selection = topic
+            onSelect(topic)
+        })) {
+            ForEach(AdviceTopic.allCases) { topic in
+                Label(topic.title, systemImage: topic.systemImage)
+                    .tag(topic)
+            }
+        }
     }
 }

@@ -7,6 +7,8 @@
 
 import Testing
 import CoreGraphics
+import SwiftUI
+import UIKit
 @testable import Grp_6pm_Photo_App
 
 /// A frame with sensible defaults, so each test only states what matters to it.
@@ -429,5 +431,22 @@ struct CoachRulesTests {
             #expect(!type.suitedStyles.isEmpty)
         }
         #expect(SceneType.food.suitedStyles.first == .tableTop45)
+    }
+
+    @Test func holdOrientationFollowsThePhone() {
+        #expect(HoldOrientation(.portrait) == .portrait)
+        #expect(HoldOrientation(.portraitUpsideDown) == .portrait)
+        #expect(HoldOrientation(.landscapeLeft) == .landscapeLeft)
+        #expect(HoldOrientation(.landscapeRight) == .landscapeRight)
+        #expect(HoldOrientation(.faceUp) == nil)
+    }
+
+    @Test func landscapeTurnsIconsToFaceThePerson() {
+        #expect(HoldOrientation.portrait.uiRotation == .zero)
+        #expect(HoldOrientation.landscapeLeft.uiRotation == .degrees(90))
+        #expect(HoldOrientation.landscapeRight.uiRotation == .degrees(-90))
+        #expect(HoldOrientation.portrait.frameOrientation(isFrontCamera: false) == .right)
+        #expect(HoldOrientation.landscapeLeft.frameOrientation(isFrontCamera: false) == .up)
+        #expect(HoldOrientation.landscapeRight.frameOrientation(isFrontCamera: false) == .down)
     }
 }

@@ -20,6 +20,7 @@ struct PhotoControlsBar: View {
         HStack {
             Spacer(minLength: 0)
             controls
+                .onboardingAnchor(.photoControls, .editControls)
         }
     }
 
@@ -38,6 +39,7 @@ struct PhotoControlsBar: View {
                             text: camera.badgeText(for: control),
                             isActive: camera.isActive(control) || activeAdjustment == control
                         )
+                        .rotationEffect(camera.holdOrientation.uiRotation)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(control.title)

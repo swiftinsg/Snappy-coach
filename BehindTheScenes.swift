@@ -10,6 +10,7 @@ import FoundationModels
 import AVFoundation
 import CoreImage
 import SwiftUI
+import Vision
 import UIKit
 
 /// Keeps the newest camera frame so the coach can look at it every few seconds.
@@ -26,6 +27,19 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     private var tracksSubject = false
     private var subject: (box: CGRect, aspect: CGFloat)?
     private var lastDetection = Date.distantPast
+    /// How to turn frames upright for the way the phone is held. Portrait by default.
+    private var frameOrientation: CGImagePropertyOrientation = .right
+    // The object the person tapped, followed from frame to frame.
+    private var selected: SelectedObject?
+    /// Where the person tapped, waiting for the next frame to find what's there.
+    private var pendingTap: CGPoint?
+    private var tracker: VNTrackObjectRequest?
+    private var sequenceHandler = VNSequenceRequestHandler()
+    private var lastTrack = Date.distantPast
+    /// Checks in a row the tracker wasn't sure, so one blurry frame doesn't drop the object.
+    private var missedTracks = 0
+    /// The followed object was lost, until the next tap.
+    private var lostSelection = false
 
     override init() {
         super.init()
@@ -38,17 +52,136 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         lock.lock()
         latest = buffer
         let tracking = tracksSubject
+        let orientation = frameOrientation
+        let tap = pendingTap
+        pendingTap = nil
+        let follower = tracker
         lock.unlock()
 
-        // Looking for the subject costs a little, so only do it when the green box is on.
-        guard tracking, Date().timeIntervalSince(lastDetection) > 0.3 else { return }
+        if let tap {
+            startFollowing(at: tap, in: buffer, orientation: orientation)
+        } else if let follower, Date().timeIntervalSince(lastTrack) > 0.1 {
+            lastTrack = Date()
+            follow(follower, in: buffer, orientation: orientation)
+        }
+
+        // Looking for the subject costs a little, so only do it when the green box is on,
+        // and not at all while the person has picked the subject themselves.
+        guard tracking, follower == nil, tap == nil, Date().timeIntervalSince(lastDetection) > 0.3 else { return }
         lastDetection = Date()
-        // Frames arrive rotated by 90°, so the upright aspect is height over width.
-        let aspect = CGFloat(CVPixelBufferGetHeight(buffer)) / CGFloat(CVPixelBufferGetWidth(buffer))
-        guard let box = SubjectFinder.subject(in: buffer, orientation: .right) else { return }
+        // Frames arrive in the sensor's landscape shape, so held upright the aspect is height over width.
+        let width = CGFloat(CVPixelBufferGetWidth(buffer))
+        let height = CGFloat(CVPixelBufferGetHeight(buffer))
+        let aspect = Self.isSideways(orientation) ? height / width : width / height
+        guard let box = SubjectFinder.subject(in: buffer, orientation: orientation) else { return }
         lock.lock()
         subject = (box, aspect)
         lock.unlock()
+    }
+
+    /// Whether turning a frame this way swaps its width and height.
+    private static func isSideways(_ orientation: CGImagePropertyOrientation) -> Bool {
+        [.left, .right, .leftMirrored, .rightMirrored].contains(orientation)
+    }
+
+    func setFrameOrientation(_ orientation: CGImagePropertyOrientation) {
+        lock.lock()
+        // Turning the phone or switching cameras changes the frame, so the followed box no longer lines up.
+        if orientation != frameOrientation {
+            selected = nil
+            tracker = nil
+            pendingTap = nil
+        }
+        frameOrientation = orientation
+        lock.unlock()
+    }
+
+    // MARK: Following a tapped object
+
+    /// Finds the object at `point` (0...1 of the whole upright frame, from the top left) in the next frame, then follows it.
+    func selectObject(at point: CGPoint) {
+        lock.lock()
+        pendingTap = point
+        lostSelection = false
+        lock.unlock()
+    }
+
+    func clearSelection() {
+        lock.lock()
+        selected = nil
+        tracker = nil
+        pendingTap = nil
+        lostSelection = false
+        lock.unlock()
+    }
+
+    /// The object being followed, whether a tap is still being looked up, and whether the object was lost.
+    func selection() -> (object: SelectedObject?, isPending: Bool, isLost: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (selected, pendingTap != nil, lostSelection)
+    }
+
+    /// Width divided by height of the newest frame once turned upright.
+    func uprightAspect() -> CGFloat? {
+        lock.lock()
+        let buffer = latest
+        let orientation = frameOrientation
+        lock.unlock()
+        guard let buffer else { return nil }
+        let width = CGFloat(CVPixelBufferGetWidth(buffer))
+        let height = CGFloat(CVPixelBufferGetHeight(buffer))
+        return Self.isSideways(orientation) ? height / width : width / height
+    }
+
+    private func startFollowing(at point: CGPoint, in buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
+        // Looked up on an upright copy, so the object's outline lines up with the tap.
+        var upright = CIImage(cvPixelBuffer: buffer).oriented(orientation)
+        let scale = Self.longestSide / max(upright.extent.width, upright.extent.height)
+        if scale < 1 {
+            upright = upright.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        guard let image = context.createCGImage(upright, from: upright.extent) else { return }
+        let found = SubjectFinder.object(at: point, in: image)
+        let start = VNDetectedObjectObservation(
+            boundingBox: CGRect(x: found.box.minX, y: 1 - found.box.maxY, width: found.box.width, height: found.box.height)
+        )
+        let request = VNTrackObjectRequest(detectedObjectObservation: start)
+        request.trackingLevel = .accurate
+        lock.lock()
+        // A newer tap, a clear, or a turn of the phone while looking means this result is stale.
+        if pendingTap == nil, orientation == frameOrientation {
+            selected = SelectedObject(box: found.box, frameAspect: CGFloat(image.width) / CGFloat(image.height), name: found.name)
+            tracker = request
+            sequenceHandler = VNSequenceRequestHandler()
+            missedTracks = 0
+        }
+        lock.unlock()
+    }
+
+    private func follow(_ request: VNTrackObjectRequest, in buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
+        lock.lock()
+        let handler = sequenceHandler
+        lock.unlock()
+        guard (try? handler.perform([request], on: buffer, orientation: orientation)) != nil,
+              let observation = request.results?.first as? VNDetectedObjectObservation else { return }
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard tracker === request else { return }
+        guard observation.confidence >= 0.3 else {
+            missedTracks += 1
+            if missedTracks >= 5 {
+                selected = nil
+                tracker = nil
+                lostSelection = true
+            }
+            return
+        }
+        missedTracks = 0
+        request.inputObservation = observation
+        let box = observation.boundingBox
+        selected?.box = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
     }
 
     func setTracksSubject(_ on: Bool) {
@@ -58,24 +191,31 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         lock.unlock()
     }
 
-    /// The main subject's box in a recent frame, while tracking is on.
+    /// The main subject's box in a recent frame, while tracking is on. The tapped object, if there is one.
     func latestSubject() -> (box: CGRect, aspect: CGFloat)? {
         lock.lock()
         defer { lock.unlock() }
+        if let selected {
+            return (selected.box, selected.frameAspect)
+        }
         return subject
     }
 
-    /// The newest frame, turned upright, cropped to the viewfinder's `portraitAspect` (width ÷ height)
-    /// so the coach only judges what the person can see, and shrunk so the model can read it quickly.
+    /// The newest frame, turned upright for the way the phone is held, cropped to the viewfinder's
+    /// `portraitAspect` (width ÷ height when held upright) so the coach only judges what the person
+    /// can see, and shrunk so the model can read it quickly.
     func latestImage(portraitAspect: CGFloat? = nil) -> CGImage? {
         lock.lock()
         let buffer = latest
+        let orientation = frameOrientation
         lock.unlock()
         guard let buffer else { return nil }
 
-        // The back camera delivers frames rotated by 90°, so turn them upright.
-        var image = CIImage(cvPixelBuffer: buffer).oriented(.right)
+        // Frames arrive in the sensor's landscape orientation, so turn them upright.
+        var image = CIImage(cvPixelBuffer: buffer).oriented(orientation)
         if let portraitAspect, portraitAspect > 0 {
+            // Held sideways, the viewfinder's long side runs across.
+            let portraitAspect = Self.isSideways(orientation) ? portraitAspect : 1 / portraitAspect
             // The preview fills its frame, so it shows the centre of the sensor image.
             let extent = image.extent
             let crop: CGRect
@@ -419,8 +559,16 @@ final class PhotoCoach {
             guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
 
             let readings = CameraReadings.read(from: camera)
+            // The object the person tapped, mapped into the part of the frame the viewfinder shows.
+            let picked = camera.frameGrabber.selection().object
+            let pickedBox = picked.map { picked in
+                let portraitAspect = camera.aspectRatio.portraitAspect
+                let viewAspect = picked.frameAspect < 1 ? portraitAspect : 1 / portraitAspect
+                return FrameMapping.visibleBox(picked.box, frameAspect: picked.frameAspect, viewAspect: viewAspect)
+            }
             guard var analysis = await SceneAnalysis.analyze(
-                frame, readings: readings, pitch: attitude.pitch, tilt: attitude.tilt, shake: attitude.shake
+                frame, readings: readings, pitch: attitude.pitch, tilt: attitude.tilt, shake: attitude.shake,
+                selectedSubject: pickedBox.flatMap { $0.isEmpty ? nil : $0 }
             ), !Task.isCancelled else { continue }
             recentScenes = Array((recentScenes + [analysis.scene]).suffix(Self.sceneHistory))
             if let smoothed = SceneType.smoothed(recentScenes) {
@@ -486,7 +634,7 @@ final class PhotoCoach {
             var details: [CoachIssue: IssueDetail] = [:]
             var modelNote = "model: not asked"
             if usesModel, !issues.contains(where: \.blocksModel),
-               let judgement = await judge(frame, topic: topic, styles: styles, analysis: analysis) {
+               let judgement = await judge(frame, topic: topic, styles: styles, analysis: analysis, selectedName: picked?.name) {
                 guard !Task.isCancelled else { break }
                 modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
                 if CoachRules.allows(judgement.issue, for: topic, styles: styles),
@@ -757,8 +905,15 @@ final class PhotoCoach {
         _ frame: CGImage,
         topic: AdviceTopic,
         styles: Set<CompositionGuide>,
-        analysis: SceneAnalysis
+        analysis: SceneAnalysis,
+        selectedName: String? = nil
     ) async -> CoachJudgement? {
+        // The person chose what they're photographing, so the advice is about that.
+        let chosen = selectedName.map { name in
+            name == "person"
+                ? "The person taking the photo tapped the subject they want to photograph; judge the photo around them."
+                : "The person taking the photo tapped the \(name) as what they want to photograph; treat it as the subject and judge the photo around it."
+        }
         // A fresh session every time: earlier images would only fill the small context window,
         // and the memory sentence in the instructions carries forward what matters.
         let session = self.session ?? makeSession(for: topic, styles: styles)
@@ -772,6 +927,9 @@ final class PhotoCoach {
                     options: GenerationOptions(samplingMode: .greedy)
                 ) {
                     "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
+                    if let chosen {
+                        chosen
+                    }
                     for scene in analysis.scenes where scene != .object {
                         scene.coachingHint
                     }
@@ -885,6 +1043,8 @@ struct CoachTipView: View {
 /// Glass card listing what is good and what to improve, or telling the user to take the shot.
 struct CoachFeedbackView: View {
     let feedback: PhotoFeedback
+    /// Whether the photography idea behind the advice is shown under it.
+    var showsExplanation = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -924,7 +1084,7 @@ struct CoachFeedbackView: View {
             }
 
             // The photography idea behind the advice, so the user learns as they shoot.
-            if !feedback.isGoodEnough, let why = feedback.why {
+            if showsExplanation, !feedback.isGoodEnough, let why = feedback.why {
                 Label(why, systemImage: "graduationcap.fill")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.8))

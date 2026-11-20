@@ -201,6 +201,27 @@ struct CompositionGrid: View {
     }
 }
 
+// MARK: - Upright overlays
+
+/// Lays its content out as if the viewfinder were held the way the phone is, then turns it to match.
+/// Held sideways, grids, the subject box and the advice are drawn the right way up for the person.
+struct UprightOverlay<Content: View>: View {
+    let orientation: HoldOrientation
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = orientation.isLandscape
+                ? CGSize(width: proxy.size.height, height: proxy.size.width)
+                : proxy.size
+            content
+                .frame(width: size.width, height: size.height)
+                .rotationEffect(orientation.uiRotation)
+                .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+        }
+    }
+}
+
 // MARK: - Level
 
 /// A level like the Camera app's: two fixed marks with a line between them that follows the
@@ -254,6 +275,11 @@ struct CompositionPicker: View {
     var recommended: CompositionGuide?
     /// Called with an explanation when a style can't be used.
     var onMessage: (String) -> Void = { _ in }
+    /// Called when the person scrolls the row themselves.
+    var onScroll: () -> Void = {}
+    /// Turns each card to read upright when the phone is held sideways. The row itself stays put,
+    /// so held sideways it runs up and down for the person. The cards are about square, so they turn in place.
+    var chipRotation: Angle = .zero
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -261,6 +287,8 @@ struct CompositionPicker: View {
                 HStack(spacing: 8) {
                     ForEach(CompositionGuide.allCases) { guide in
                         chip(for: guide)
+                            .rotationEffect(chipRotation)
+                            .animation(.snappy, value: chipRotation)
                             .id(guide)
                     }
                 }
@@ -269,6 +297,12 @@ struct CompositionPicker: View {
             // Let the row run to the screen edges while the first and last chips keep a margin.
             .contentMargins(.horizontal, 16, for: .scrollContent)
             .padding(.horizontal, -16)
+            // Only a finger drag counts; scrolling to the selection in code doesn't.
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting {
+                    onScroll()
+                }
+            }
             .onAppear {
                 scrollToFirstSelection(proxy)
             }
