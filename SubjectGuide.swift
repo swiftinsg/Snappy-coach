@@ -113,9 +113,16 @@ nonisolated enum SubjectFinder {
         request.regionOfInterest = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
         request.runOnCPUInSimulator()
         try? VNImageRequestHandler(cgImage: image).perform([request])
-        let label = request.results?.first { $0.confidence >= 0.2 }?.identifier
-        return label?.replacingOccurrences(of: "_", with: " ") ?? "object"
+        guard let label = request.results?.first(where: { $0.confidence >= 0.2 })?.identifier else { return "object" }
+        if personLabels.contains(label) { return "person" }
+        if vagueLabels.contains(label) { return "object" }
+        return label.replacingOccurrences(of: "_", with: " ")
     }
+
+    /// Vision labels that mean people, who are never described.
+    private static let personLabels: Set<String> = ["people", "person", "adult", "child", "baby", "teen", "portrait", "selfie", "crowd"]
+    /// Vision labels too broad to call something by, like "structure".
+    private static let vagueLabels: Set<String> = ["structure", "material", "container", "object", "textile", "wood_processed", "liquid", "indoor", "outdoor", "consumer_electronics", "furniture", "machine", "art", "document"]
 
     /// Vision measures from the bottom left, the screen from the top left.
     private static func topLeft(_ box: CGRect) -> CGRect {
@@ -174,6 +181,27 @@ nonisolated enum FrameMapping {
     }
 }
 
+/// The four corners of a rectangle, like a camera's focus frame.
+private struct CornerBrackets: Shape {
+    func path(in rect: CGRect) -> Path {
+        let arm = min(rect.width, rect.height) * 0.25
+        var path = Path()
+        // Top left, top right, bottom right, bottom left: each corner and its two arms.
+        let corners: [(CGPoint, CGFloat, CGFloat)] = [
+            (CGPoint(x: rect.minX, y: rect.minY), 1, 1),
+            (CGPoint(x: rect.maxX, y: rect.minY), -1, 1),
+            (CGPoint(x: rect.maxX, y: rect.maxY), -1, -1),
+            (CGPoint(x: rect.minX, y: rect.maxY), 1, -1),
+        ]
+        for (corner, xSign, ySign) in corners {
+            path.move(to: CGPoint(x: corner.x + arm * xSign, y: corner.y))
+            path.addLine(to: corner)
+            path.addLine(to: CGPoint(x: corner.x, y: corner.y + arm * ySign))
+        }
+        return path
+    }
+}
+
 /// Follows the object the person tapped, for its outline and the advice card.
 @Observable
 final class ObjectSelection {
@@ -216,10 +244,12 @@ struct SelectedObjectOverlay: View {
     var body: some View {
         GeometryReader { proxy in
             let rect = FrameMapping.viewRect(for: object.box, frameAspect: object.frameAspect, in: proxy.size)
+            // At the top edge the tag would be cut off above the box, so it goes underneath instead.
+            let tagBelow = rect.minY < 24
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(.yellow, lineWidth: 2)
                 .frame(width: rect.width, height: rect.height)
-                .overlay(alignment: .topLeading) {
+                .overlay(alignment: tagBelow ? .bottomLeading : .topLeading) {
                     Text(object.name.capitalized)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.black)
@@ -227,6 +257,7 @@ struct SelectedObjectOverlay: View {
                         .padding(.vertical, 2)
                         .background(.yellow, in: .capsule)
                         .alignmentGuide(.top) { $0[.bottom] + 4 }
+                        .alignmentGuide(.bottom) { $0[.top] - 4 }
                 }
                 .offset(x: rect.minX, y: rect.minY)
                 .animation(.snappy, value: object)
@@ -359,11 +390,62 @@ struct SubjectTarget: Equatable {
         if abs(dy) >= Self.axisThreshold {
             steps.append("Move the camera\(amount(dy)) \(dy > 0 ? "up" : "down")")
         }
+        // The goal goes on the last step only, so it isn't repeated.
+        if let last = steps.popLast() {
+            steps.append(last + " until the dot is in the circle")
+        }
         return steps
     }
 
     private func amount(_ shift: CGFloat) -> String {
         abs(shift) < 0.12 ? " a little" : ""
+    }
+}
+
+/// Stepping towards or away from the subject, shown as a badge on the viewfinder.
+/// Moves across the frame are shown by the dot and circle instead.
+enum CameraMove: Equatable {
+    case closer, back
+
+    var symbol: String {
+        switch self {
+        case .closer: "arrow.up.left.and.arrow.down.right"
+        case .back: "arrow.down.right.and.arrow.up.left"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .closer: "Step closer"
+        case .back: "Step back"
+        }
+    }
+}
+
+/// A pulsing badge at the top of the viewfinder for stepping closer or back, clear of the subject.
+/// Put it inside an `UprightOverlay`, so it sits at the top as the phone is held.
+struct CameraMoveArrow: View {
+    let move: CameraMove
+
+    var body: some View {
+        Label(move.label, systemImage: move.symbol)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.4), in: .capsule)
+            .phaseAnimator([false, true]) { badge, isOut in
+                badge.scaleEffect(isOut ? 1.08 : 1)
+            } animation: { _ in
+                .easeInOut(duration: 0.6)
+            }
+            // Clears the top bar, so the badge never sits under the controls.
+            .padding(.top, 70)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .id(move)
+            .transition(.opacity)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -437,32 +519,63 @@ final class SubjectGuide {
     }
 }
 
-/// Draws the green target box, and a faint outline of where the subject is now.
-/// Put it on top of the preview, sized exactly like the preview.
+/// Shows where the subject should go, like Samsung's shot suggestions: corner brackets frame the
+/// target, a ring marks its centre, and a dot marks the subject's centre now. Line the dot up
+/// in the ring and everything turns green. Put it on top of the preview, sized exactly like the preview.
 struct SubjectTargetOverlay: View {
     let target: SubjectTarget
     let frameAspect: CGFloat
+
+    private let ringSize: CGFloat = 56
+    private let dotSize: CGFloat = 16
 
     var body: some View {
         GeometryReader { proxy in
             let targetRect = viewRect(for: target.target, in: proxy.size)
             let subjectRect = viewRect(for: target.subject, in: proxy.size)
+            let aim = CGPoint(x: targetRect.midX, y: targetRect.midY)
+            let dot = CGPoint(x: subjectRect.midX, y: subjectRect.midY)
+            let tint: Color = target.isAligned ? .green : .white
 
             ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(.white.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [5, 5]))
-                    .frame(width: subjectRect.width, height: subjectRect.height)
-                    .offset(x: subjectRect.minX, y: subjectRect.minY)
-
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.green.opacity(target.isAligned ? 0.3 : 0.12))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(.green, lineWidth: target.isAligned ? 4 : 3)
-                    }
+                CornerBrackets()
+                    .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     .frame(width: targetRect.width, height: targetRect.height)
                     .offset(x: targetRect.minX, y: targetRect.minY)
+
+                // A dashed line from the subject to where it should be, until they meet.
+                if !target.isAligned {
+                    Path { path in
+                        path.move(to: dot)
+                        path.addLine(to: aim)
+                    }
+                    .stroke(.white.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+
+                    // Chevrons along the line show which way the dot has to travel.
+                    let angle = Angle(radians: atan2(aim.y - dot.y, aim.x - dot.x))
+                    ForEach([0.3, 0.5, 0.7], id: \.self) { fraction in
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .rotationEffect(angle)
+                            .position(x: dot.x + (aim.x - dot.x) * fraction, y: dot.y + (aim.y - dot.y) * fraction)
+                    }
+                    .opacity(hypot(aim.x - dot.x, aim.y - dot.y) > ringSize ? 1 : 0)
+                }
+
+                Circle()
+                    .fill(tint.opacity(target.isAligned ? 0.3 : 0))
+                    .strokeBorder(tint, lineWidth: 3)
+                    .frame(width: ringSize, height: ringSize)
+                    .position(aim)
+
+                Circle()
+                    .fill(target.isAligned ? .green : .yellow)
+                    .overlay(Circle().strokeBorder(.white, lineWidth: 2))
+                    .frame(width: dotSize, height: dotSize)
+                    .position(dot)
             }
+            .shadow(color: .black.opacity(0.4), radius: 2)
             .animation(.snappy, value: target)
         }
         .clipped()

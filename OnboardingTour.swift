@@ -13,6 +13,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     /// Follows on from `photoControls` once the panel is open, so it shares its number.
     case editControls
     case compositionRow
+    case selectObject
     case advice
     case shutter
 
@@ -27,6 +28,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .photoControls: "Your camera buttons"
         case .editControls: "Pick your buttons"
         case .compositionRow: "Composition styles"
+        case .selectObject: "Pick your subject"
         case .advice: "Your coach"
         case .shutter: "Take your first shot"
         }
@@ -43,6 +45,8 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
             "Tap a control below to add it to the bar, or tap − on one in the bar to remove it. The bar holds up to 3. Tap ✓ when you're done."
         case .compositionRow:
             "Each card is a way to frame your photo. Scroll the row to see them all, then tap one to practise it. You can select more than one. The ✨ icon marks the style the coach recommends for this scene."
+        case .selectObject:
+            "Tap the thing you want to photograph. The coach will follow it and give advice about it."
         case .advice:
             "The coach gives live tips as you frame. Tap the card once to see why it's suggesting this, then tap again to tuck it away."
         case .shutter:

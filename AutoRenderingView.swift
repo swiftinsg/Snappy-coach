@@ -214,13 +214,23 @@ struct AutoRenderingView: View {
         }
     }
 
+    /// Topics whose advice is about one subject, so they wait for the person to tap it.
+    private var needsObject: Bool {
+        [.composition, .subjectPosition, .focus].contains(adviceTopic)
+    }
+
+    /// The advice is about a subject that hasn't been chosen yet.
+    private var isWaitingForObject: Bool {
+        needsObject && objectSelection.object == nil
+    }
+
     /// How far the advice has to be dragged before it collapses or expands.
     private let adviceDragThreshold: CGFloat = 50
 
     /// The coach's advice, which can be pushed down into a small pill and pulled back up.
     @ViewBuilder
     private var adviceArea: some View {
-        if coach.notice != nil || coach.feedback != nil || objectSelection.object == nil {
+        if coach.notice != nil || coach.feedback != nil || isWaitingForObject {
             if isAdviceCollapsed {
                 collapsedAdvicePill
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -256,7 +266,7 @@ struct AutoRenderingView: View {
 
     /// Whether the current advice has an explanation to reveal.
     private var hasAdviceExplanation: Bool {
-        guard coach.notice == nil, objectSelection.object != nil, let feedback = coach.feedback else { return false }
+        guard coach.notice == nil, !isWaitingForObject, let feedback = coach.feedback else { return false }
         return !feedback.isGoodEnough && feedback.why != nil
     }
 
@@ -332,12 +342,18 @@ struct AutoRenderingView: View {
             }
             if let notice = coach.notice {
                 CoachTipView(text: notice)
-            } else if objectSelection.object == nil {
-                // Advice is about what the person chose, so they pick it first.
+            } else if isWaitingForObject {
+                // Advice about the subject needs the person to pick it first.
                 CoachTipView(text: selectObjectPrompt)
             } else if let feedback = coach.feedback {
                 if let object = objectSelection.object {
                     selectedObjectHeader(object)
+                } else {
+                    // Optional for this topic, but it still tailors the advice.
+                    Label("Tip: tap an object for advice about it.", systemImage: "hand.tap")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .shadow(color: .black.opacity(0.5), radius: 2)
                 }
                 CoachFeedbackView(feedback: feedback, showsExplanation: isAdviceExplained)
             }
@@ -362,7 +378,7 @@ struct AutoRenderingView: View {
         HStack(spacing: 6) {
             Image(systemName: "scope")
                 .foregroundStyle(.yellow)
-            Text("Advice for the \(object.name)")
+            Text(object.name == "person" ? "Advice for your subject" : "Advice for the \(object.name)")
                 .lineLimit(1)
             Spacer(minLength: 4)
             Button {
@@ -406,6 +422,8 @@ struct AutoRenderingView: View {
             // around it, so what you see matches the photo that's saved.
             CameraPreview(session: camera.session)
                 .aspectRatio(camera.aspectRatio.portraitAspect, contentMode: .fit)
+                // The tour spotlights the whole viewfinder, so the tap reaches the object.
+                .onboardingAnchor(.selectObject)
                 // Grids help line the scene up while composing.
                 .overlay {
                     if adviceTopic == .composition {
@@ -422,7 +440,7 @@ struct AutoRenderingView: View {
                 }
                 // The green box shows where the subject should be.
                 .overlay {
-                    if showsSubjectBox, let target = subjectGuide.target {
+                    if showsSubjectBox, !isWaitingForObject, let target = subjectGuide.target {
                         UprightOverlay(orientation: camera.holdOrientation) {
                             SubjectTargetOverlay(target: target, frameAspect: subjectGuide.frameAspect)
                         }
@@ -448,6 +466,15 @@ struct AutoRenderingView: View {
                         }
                     }
                 }
+                // A big arrow for the camera move the advice asks for, once the advice is about a chosen object.
+                .overlay {
+                    if !isWaitingForObject, coach.notice == nil, let move = coach.feedback?.move {
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            CameraMoveArrow(move: move)
+                        }
+                    }
+                }
+                .animation(.snappy, value: coach.feedback?.move)
                 // Held sideways, the advice reads along the long side, at the bottom as the person sees it.
                 .overlay {
                     if camera.holdOrientation.isLandscape, !controls.isEditing {
@@ -714,6 +741,11 @@ struct AutoRenderingView: View {
         .onChange(of: controls.draft) { old, new in noteDraftChanged(from: old, to: new) }
         .onChange(of: compositionGuidesRaw) { old, new in noteCompositionChanged(from: old, to: new) }
         .onChange(of: camera.zoomLevel) { noteZoomChanged() }
+        .onChange(of: objectSelection.object?.name) {
+            guard let name = objectSelection.object?.name else { return }
+            let subject = name == "person" ? "your subject" : "the \(name)"
+            noteOnboarding(.selectObject, "Got it: \(subject). The outline follows it, and the advice is now about it.", isComplete: true)
+        }
         .onChange(of: isAdviceExplained) {
             guard isAdviceExplained else { return }
             // Not done yet: the tour wants the second tap too, which tucks the card away.

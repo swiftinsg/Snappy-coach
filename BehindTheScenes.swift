@@ -86,14 +86,60 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
 
     func setFrameOrientation(_ orientation: CGImagePropertyOrientation) {
         lock.lock()
-        // Turning the phone or switching cameras changes the frame, so the followed box no longer lines up.
         if orientation != frameOrientation {
-            selected = nil
+            // Turning the phone turns the frame: carry the followed box across, then look the
+            // object up again at its new spot. Switching cameras shows a different scene, so it's dropped.
+            if let current = selected,
+               let box = Self.rotate(current.box, from: frameOrientation, to: orientation) {
+                selected = SelectedObject(box: box, frameAspect: 1 / current.frameAspect, name: current.name)
+                pendingTap = CGPoint(x: box.midX, y: box.midY)
+            } else {
+                selected = nil
+                pendingTap = nil
+            }
             tracker = nil
-            pendingTap = nil
         }
         frameOrientation = orientation
         lock.unlock()
+    }
+
+    /// A box in one upright frame, in another upright frame of the same sensor image.
+    /// Nil for mirrored (front camera) orientations, which aren't mapped.
+    private static func rotate(_ box: CGRect, from old: CGImagePropertyOrientation, to new: CGImagePropertyOrientation) -> CGRect? {
+        let corners = [CGPoint(x: box.minX, y: box.minY), CGPoint(x: box.maxX, y: box.maxY)]
+        let mapped = corners.compactMap { corner in
+            sensorPoint(corner, in: old).flatMap { uprightPoint($0, in: new) }
+        }
+        guard mapped.count == 2 else { return nil }
+        return CGRect(
+            x: min(mapped[0].x, mapped[1].x),
+            y: min(mapped[0].y, mapped[1].y),
+            width: abs(mapped[0].x - mapped[1].x),
+            height: abs(mapped[0].y - mapped[1].y)
+        )
+    }
+
+    /// A sensor-frame point (0...1 from the top left) once the frame is turned upright with `orientation`.
+    private static func uprightPoint(_ point: CGPoint, in orientation: CGImagePropertyOrientation) -> CGPoint? {
+        switch orientation {
+        case .up: point
+        case .down: CGPoint(x: 1 - point.x, y: 1 - point.y)
+        // Turned a quarter clockwise: the sensor's top edge becomes the right side.
+        case .right: CGPoint(x: 1 - point.y, y: point.x)
+        case .left: CGPoint(x: point.y, y: 1 - point.x)
+        default: nil
+        }
+    }
+
+    /// The reverse of `uprightPoint`.
+    private static func sensorPoint(_ point: CGPoint, in orientation: CGImagePropertyOrientation) -> CGPoint? {
+        switch orientation {
+        case .up: point
+        case .down: CGPoint(x: 1 - point.x, y: 1 - point.y)
+        case .right: CGPoint(x: point.y, y: 1 - point.x)
+        case .left: CGPoint(x: 1 - point.y, y: point.x)
+        default: nil
+        }
     }
 
     // MARK: Following a tapped object
@@ -367,6 +413,8 @@ struct PhotoFeedback: Equatable {
     var why: String?
     /// An arrow for the first improvement, when it has a direction.
     var symbol: String? = nil
+    /// The camera move the first improvement asks for, shown as a big arrow on the viewfinder.
+    var move: CameraMove? = nil
     /// True when the shot is ready to take.
     var isGoodEnough: Bool
     /// What to practise next, shown once the current section is complete.
@@ -775,6 +823,7 @@ final class PhotoCoach {
             improve: improve,
             why: advice.why,
             symbol: advice.symbol,
+            move: top.asksToMove.map { $0 == .closer ? .closer : .back },
             isGoodEnough: false
         )
     }
