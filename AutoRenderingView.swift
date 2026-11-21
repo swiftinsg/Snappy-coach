@@ -734,7 +734,8 @@ struct AutoRenderingView: View {
                         // Zoom and composition styles share one row to keep more of the viewfinder clear.
                         HStack(spacing: 8) {
                             ZoomPicker(stops: camera.zoomStops, level: camera.zoomLevel, labelRotation: camera.holdOrientation.uiRotation) { level in
-                                if let message = camera.setZoom(level) {
+                                // A tap on a lens button glides there, like the Camera app.
+                                if let message = camera.setZoom(level, smoothly: true) {
                                     statusMessage = message
                                 }
                             }

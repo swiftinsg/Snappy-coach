@@ -139,7 +139,8 @@ class CameraManager {
     }
 
     func configure(){
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for:.video, position:.back) else{
+        // The back lenses as one camera, so zooming past 0.5×, 1× and the telephoto is smooth.
+        guard let camera = Self.smoothBackCamera() ?? AVCaptureDevice.default(.builtInWideAngleCamera, for:.video, position:.back) else{
             problem = CameraProblem(message: "The camera couldn't start. Close the app and open it again.", opensSettings: false)
             return
         }
@@ -179,6 +180,10 @@ class CameraManager {
             session.setControlsDelegate(cameraControlsDelegate, queue: .main)
         }
         refreshZoomStops()
+        // A combined camera starts on its widest lens; 1× is the main lens.
+        if camera.isVirtualDevice {
+            applyZoomOnCurrentDevice(1, smoothly: false)
+        }
     }
 
     /// Follows how the phone is held with `device`, so photos are saved level.
@@ -272,24 +277,30 @@ class CameraManager {
     func switchCamera() -> String? {
         guard videoInput != nil else { return "The camera isn't available" }
         let newPosition: AVCaptureDevice.Position = isUsingFrontCamera ? .back : .front
-        guard let newDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition) else {
+        let smooth = newPosition == .back ? Self.smoothBackCamera() : nil
+        guard let newDevice = smooth ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition) else {
             return "That camera isn't available"
         }
         guard use(newDevice) else { return "Couldn't switch cameras" }
         isUsingFrontCamera = newPosition == .front
         zoomLevel = 1
         refreshZoomStops()
+        if newDevice.isVirtualDevice {
+            applyZoomOnCurrentDevice(1, smoothly: false)
+        }
         return nil
     }
 
-    /// Zooms like the Camera app's lens buttons: below 1× uses the ultra wide lens, the
-    /// telephoto's native zoom uses the telephoto, and everything else zooms the main lens.
-    func setZoom(_ level: CGFloat) -> String? {
+    /// Zooms like the Camera app. The combined back camera switches lenses by itself, smoothly.
+    /// A single lens (used while a manual control is set) swaps to the ultra wide below 1× and
+    /// the telephoto at its native zoom.
+    /// `smoothly` glides there, for the zoom buttons; pinches and the Camera Control follow the
+    /// finger exactly instead, since each tiny step would otherwise start a new glide and lag behind.
+    func setZoom(_ level: CGFloat, smoothly: Bool = false) -> String? {
         guard videoInput != nil, var target = device else { return "The camera isn't available" }
-        // The two-lens depth camera handles its own lens switching.
         if target.isVirtualDevice {
             zoomLevel = level
-            applyZoomOnCurrentDevice(level)
+            applyZoomOnCurrentDevice(level, smoothly: smoothly)
             syncZoomControl()
             return nil
         }
@@ -313,28 +324,85 @@ class CameraManager {
         zoomLevel = level
         configureDevice { device in
             let factor = min(max(lensZoom, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-            device.ramp(toVideoZoomFactor: factor, withRate: 16)
+            Self.zoom(device, to: factor, smoothly: smoothly)
         }
         syncZoomControl()
         return nil
     }
 
-    /// Zooms a multi-lens (virtual) camera, where zoom factor 1 is its widest lens, so
-    /// "1×" sits at the first lens switch-over point.
-    private func applyZoomOnCurrentDevice(_ level: CGFloat) {
+    /// Zooms a combined camera. When it includes the ultra wide, zoom factor 1 is that lens,
+    /// so "1×" (the main lens) sits at the first switch-over point.
+    private func applyZoomOnCurrentDevice(_ level: CGFloat, smoothly: Bool = true) {
         configureDevice { device in
-            let oneX = device.virtualDeviceSwitchOverVideoZoomFactors.first.map { CGFloat(truncating: $0) } ?? 1
+            let hasUltraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+            let oneX = hasUltraWide ? (device.virtualDeviceSwitchOverVideoZoomFactors.first.map { CGFloat(truncating: $0) } ?? 1) : 1
             let factor = min(max(level * oneX, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-            device.ramp(toVideoZoomFactor: factor, withRate: 16)
+            Self.zoom(device, to: factor, smoothly: smoothly)
         }
+    }
+
+    /// Glides to `factor`, or jumps straight there. Call with the device locked.
+    private static func zoom(_ device: AVCaptureDevice, to factor: CGFloat, smoothly: Bool) {
+        if smoothly {
+            device.ramp(toVideoZoomFactor: factor, withRate: 16)
+        } else {
+            // Stop any glide still running, or it fights the finger.
+            if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
+            device.videoZoomFactor = factor
+        }
+    }
+
+    /// The back lenses as one camera, which switches between them by itself as the zoom changes,
+    /// like the Camera app. It can't take manual shutter, ISO, focus or white balance, though.
+    private static func smoothBackCamera() -> AVCaptureDevice? {
+        backCamera(.builtInTripleCamera) ?? backCamera(.builtInDualWideCamera) ?? backCamera(.builtInDualCamera)
+    }
+
+    /// Manual shutter, aperture, focus and white balance only work on a single lens, so move from the
+    /// combined camera to whichever lens shows the current zoom. The view stays the same; only
+    /// zooming across lenses is less smooth while a manual value is set.
+    private func usePhysicalLensForManualControl() {
+        guard let current = device, current.isVirtualDevice, current.position == .back, !isDepthOn,
+              let wide = Self.backCamera(.builtInWideAngleCamera) else { return }
+        let level = zoomLevel
+        let bias = exposureBias
+        guard use(wide) else { return }
+        refreshZoomStops()
+        _ = setZoom(level)
+        // Swapping lenses resets the exposure bias; keep the person's setting.
+        if bias != 0 { setAdjustment(bias, for: .exposure) }
+    }
+
+    /// Back to the smooth combined camera once every manual control is on auto again.
+    private func returnToSmoothCameraIfAuto() {
+        guard let current = device, !current.isVirtualDevice, current.position == .back,
+              focusPosition == nil, shutterSeconds == nil, whiteBalanceKelvin == nil, aperture == nil,
+              let smooth = Self.smoothBackCamera() else { return }
+        let level = zoomLevel
+        let bias = exposureBias
+        guard use(smooth) else { return }
+        refreshZoomStops()
+        zoomLevel = level
+        applyZoomOnCurrentDevice(level, smoothly: false)
+        if bias != 0 { setAdjustment(bias, for: .exposure) }
     }
 
     /// Works out which zoom buttons this camera can offer.
     private func refreshZoomStops() {
         // The Camera Control's zoom slider spans these stops, so rebuild it to match.
         defer { refreshCameraControls() }
-        if device?.isVirtualDevice == true {
-            zoomStops = [1, 2]
+        if let device, device.isVirtualDevice {
+            // The combined camera's own lenses decide the buttons.
+            let lenses = device.constituentDevices
+            var stops: [CGFloat] = []
+            if lenses.contains(where: { $0.deviceType == .builtInUltraWideCamera }) { stops.append(0.5) }
+            stops += [1, 2]
+            if let wide = lenses.first(where: { $0.deviceType == .builtInWideAngleCamera }),
+               let telephoto = lenses.first(where: { $0.deviceType == .builtInTelephotoCamera }),
+               let teleZoom = Self.magnification(of: telephoto, relativeTo: wide), teleZoom > 2 {
+                stops.append(teleZoom.rounded())
+            }
+            zoomStops = stops
             return
         }
         guard !isUsingFrontCamera, let wide = Self.backCamera(.builtInWideAngleCamera) else {
@@ -479,11 +547,12 @@ class CameraManager {
             zoomLevel = 1
             refreshZoomStops()
             applyZoomOnCurrentDevice(1)
-        } else if !on && device?.isVirtualDevice == true {
-            // Back to the main lens, which allows full manual control.
-            if let wide = Self.backCamera(.builtInWideAngleCamera), use(wide) {
+        } else if !on && device?.isVirtualDevice == true && device?.deviceType != Self.smoothBackCamera()?.deviceType {
+            // Off a depth-only camera and back to the smooth combined one.
+            if let smooth = Self.smoothBackCamera() ?? Self.backCamera(.builtInWideAngleCamera), use(smooth) {
                 zoomLevel = 1
                 refreshZoomStops()
+                if smooth.isVirtualDevice { applyZoomOnCurrentDevice(1, smoothly: false) }
             }
             isDepthOn = false
             return "Depth Off"
@@ -630,6 +699,7 @@ class CameraManager {
                 device.setExposureTargetBias(min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias))
             }
         case .focus:
+            usePhysicalLensForManualControl()
             focusPosition = value
             configureDevice { device in
                 if device.isLockingFocusWithCustomLensPositionSupported {
@@ -638,6 +708,7 @@ class CameraManager {
             }
         case .shutterSpeed:
             // Shutter priority: lock the duration and keep the current ISO.
+            usePhysicalLensForManualControl()
             shutterSeconds = pow(2, Double(value))
             aperture = nil
             let target = CMTime(seconds: pow(2, Double(value)), preferredTimescale: 1_000_000)
@@ -648,6 +719,7 @@ class CameraManager {
                 device.setExposureModeCustom(duration: duration, iso: AVCaptureDevice.currentISO, completionHandler: nil)
             }
         case .whiteBalance:
+            usePhysicalLensForManualControl()
             whiteBalanceKelvin = value
             configureDevice { device in
                 guard device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else { return }
@@ -661,6 +733,7 @@ class CameraManager {
             }
         case .lensAperture:
             // Aperture priority: lock the aperture and let auto-exposure pick shutter and ISO.
+            usePhysicalLensForManualControl()
             aperture = value
             shutterSeconds = nil
             configureDevice { device in
@@ -710,6 +783,7 @@ class CameraManager {
         default:
             break
         }
+        returnToSmoothCameraIfAuto()
     }
 
     // MARK: - Capture
