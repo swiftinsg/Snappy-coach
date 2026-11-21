@@ -694,7 +694,7 @@ final class SubjectGuide {
 
         var wasPaused = false
         while !Task.isCancelled {
-            // A call, another app or heat: stop looking for the subject until the camera is back.
+            // A call or another app: stop looking for the subject until the camera is back.
             let isPaused = camera.isCoachPaused
             if isPaused != wasPaused {
                 camera.frameGrabber.setTracksSubject(!isPaused)

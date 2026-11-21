@@ -60,6 +60,8 @@ struct AutoRenderingView: View {
         onboardingFeedback = nil
         tourScrolledStyles = false
         tourPickedStyle = false
+        // A style explanation left over from the press-and-hold stop would sit over the next stop's spotlight.
+        compositionExplanation = nil
     }
 
     /// The header inside the open topic menu while the tour is on that stop, since the menu covers the tour card.
@@ -203,7 +205,7 @@ struct AutoRenderingView: View {
 
     /// The third lines the advice on screen names, lit up on the grid while the advice is showing.
     private var highlightedThirdsLines: Set<ThirdsLine> {
-        guard !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil else { return [] }
+        guard !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, coach.lensBlock == nil else { return [] }
         return coach.feedback?.thirdsLines ?? []
     }
 
@@ -233,7 +235,7 @@ struct AutoRenderingView: View {
     /// The coach's advice, which can be pushed down into a small pill and pulled back up.
     @ViewBuilder
     private var adviceArea: some View {
-        if coach.notice != nil || coach.feedback != nil || isWaitingForObject {
+        if coach.notice != nil || coach.lensBlock != nil || coach.feedback != nil || isWaitingForObject {
             if isAdviceCollapsed {
                 collapsedAdvicePill
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -269,7 +271,7 @@ struct AutoRenderingView: View {
 
     /// Whether the current advice has an explanation to reveal.
     private var hasAdviceExplanation: Bool {
-        guard coach.notice == nil, !isWaitingForObject, let feedback = coach.feedback else { return false }
+        guard coach.notice == nil, coach.lensBlock == nil, !isWaitingForObject, let feedback = coach.feedback else { return false }
         return !feedback.isGoodEnough && feedback.why != nil
     }
 
@@ -345,6 +347,9 @@ struct AutoRenderingView: View {
             }
             if let notice = coach.notice {
                 CoachTipView(text: notice)
+            } else if let lensBlock = coach.lensBlockMessage {
+                // Comes before everything else: advice about a partly blocked frame would be wrong.
+                CoachTipView(text: lensBlock)
             } else if isWaitingForObject {
                 // Advice about the subject needs the person to pick it first.
                 CoachTipView(text: selectObjectPrompt)
@@ -526,6 +531,14 @@ struct AutoRenderingView: View {
                         }
                     }
                 }
+                // The tour spotlights the viewfinder for lining up, but only for styles that have a dot and circle.
+                .overlay {
+                    if showsSubjectBox {
+                        Color.clear
+                            .allowsHitTesting(false)
+                            .onboardingAnchor(.alignSubject)
+                    }
+                }
                 // Tap anything in the viewfinder to get advice about it, and see it outlined while it's followed.
                 .overlay {
                     UprightOverlay(orientation: camera.holdOrientation) {
@@ -548,7 +561,7 @@ struct AutoRenderingView: View {
                 }
                 // Outlines what the advice names, like "the lamp post", so it's clear what it means.
                 .overlay {
-                    if !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, let highlight = coach.feedback?.highlight {
+                    if !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, coach.lensBlock == nil, let highlight = coach.feedback?.highlight {
                         UprightOverlay(orientation: camera.holdOrientation) {
                             CoachHighlightOverlay(highlight: highlight)
                         }
@@ -556,9 +569,19 @@ struct AutoRenderingView: View {
                     }
                 }
                 .animation(.easeInOut, value: coach.feedback?.highlight)
+                // Shades where a finger seems to be over the lens, so it's clear which corner to clear.
+                .overlay {
+                    if coach.notice == nil, let block = coach.lensBlock {
+                        UprightOverlay(orientation: camera.holdOrientation) {
+                            CoachHighlightOverlay(highlight: CoachHighlight(box: block, label: "finger", isArea: true))
+                        }
+                        .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut, value: coach.lensBlock)
                 // A big arrow for the camera move the advice asks for, once the advice is about a chosen object.
                 .overlay {
-                    if !isWaitingForObject, coach.notice == nil, let move = coach.feedback?.move {
+                    if !isWaitingForObject, coach.notice == nil, coach.lensBlock == nil, let move = coach.feedback?.move {
                         UprightOverlay(orientation: camera.holdOrientation) {
                             CameraMoveArrow(move: move)
                         }
@@ -689,6 +712,8 @@ struct AutoRenderingView: View {
                         .accessibilityLabel("Close explanation")
                     }
                     .rotationEffect(camera.holdOrientation.uiRotation)
+                    // Lit up too while the tour is on this stop, so the explanation isn't dimmed.
+                    .onboardingAnchor(.explainStyle)
                     .transition(.opacity)
                     .id(compositionExplanation)
                 }
@@ -726,7 +751,7 @@ struct AutoRenderingView: View {
                                     .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
                         }
-                        .onboardingAnchor(.compositionRow)
+                        .onboardingAnchor(.compositionRow, .explainStyle)
                         // Full width, so the coach card gets room even when only the zoom buttons are showing.
                         .frame(maxWidth: .infinity)
                         .overlay(alignment: .top) {
@@ -789,14 +814,22 @@ struct AutoRenderingView: View {
                     !$0.isFollowOn && ($0.rawValue <= step.rawValue || anchors[$0] != nil)
                 }
                 let numberedStep = step.isFollowOn ? OnboardingStep.photoControls : step
+                let rowAnchor = step.placesCardOnControls ? anchors[.compositionRow]?.first : nil
                 GeometryReader { proxy in
+                    let spots = stepAnchors.map { proxy[$0] }
+                    // Covers the composition row, with the bottom of the viewfinder above it,
+                    // or sits just inside the bottom of the controls panel while it's open.
+                    // Once ✓ closes the panel, only the bar is lit, so the card goes back beside it.
+                    let cardBottom = rowAnchor.map { proxy[$0].maxY }
+                        ?? (step.placesCardInPanel && controls.isEditing ? spots.map(\.maxY).max().map { $0 - 12 } : nil)
                     OnboardingOverlay(
                         step: step,
-                        spots: stepAnchors.map { proxy[$0] },
+                        spots: spots,
                         canvas: proxy.size,
                         stepNumber: (stops.firstIndex(of: numberedStep) ?? 0) + 1,
                         stepCount: stops.count,
                         feedback: onboardingFeedback,
+                        cardBottom: cardBottom,
                         onContinue: { continueOnboarding(from: step, available: Set(anchors.keys)) },
                         onSkip: finishOnboarding
                     )
@@ -907,6 +940,19 @@ struct AutoRenderingView: View {
             guard let name = objectSelection.object?.name else { return }
             let subject = name == "person" ? "your subject" : "the \(name)"
             noteOnboarding(.selectObject, "Got it: \(subject). The outline follows it, and the advice is now about it.", isComplete: true)
+        }
+        .onChange(of: compositionExplanation) {
+            guard let guide = compositionExplanation else { return }
+            noteOnboarding(.explainStyle, "\(guide.title): \(guide.tourDescription) Hold another card to compare, or tap Continue.", isComplete: true)
+        }
+        .onChange(of: subjectGuide.target?.isAligned) {
+            guard onboardingStep == .alignSubject, let target = subjectGuide.target else { return }
+            if target.isAligned {
+                noteOnboarding(.alignSubject, "Lined up! The frame turns green and you'll feel a tick when your subject is in place.", isComplete: true)
+            } else if onboardingFeedback?.isComplete == true {
+                // Drifting off after lining up keeps the step done, but says how to get back.
+                noteOnboarding(.alignSubject, "You drifted off. Follow the arrows to bring the dot back into the circle.", isComplete: true)
+            }
         }
         .onChange(of: isAdviceExplained) {
             guard isAdviceExplained else { return }

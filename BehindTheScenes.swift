@@ -562,6 +562,14 @@ final class PhotoCoach {
     private(set) var memory = CoachMemory()
     /// What kind of photo the camera is looking at, smoothed over the last few checks.
     private(set) var scene: SceneType?
+    /// Where a finger seems to be over the lens, outlined on the viewfinder. While it's set, the
+    /// card asks to move it instead of giving advice about a frame that's partly blocked.
+    private(set) var lensBlock: CGRect?
+
+    /// What the card says while a finger is over the lens.
+    var lensBlockMessage: String? {
+        lensBlock.map { "A finger might be over the lens at \(LensBlockFinder.placeName(of: $0)). Move it off the camera." }
+    }
 
     var isReady: Bool { feedback?.isGoodEnough ?? false }
 
@@ -630,6 +638,18 @@ final class PhotoCoach {
     private var reframeAmount = 0.0
     /// Model-only tips done during this topic, so the model can't ask for them again.
     private var reframedDone: Set<CoachIssue> = []
+    // A finger over the lens must be seen twice in a row before it's mentioned, and the lens clear
+    // twice in a row before the warning goes, so one odd frame does neither.
+    private var lensBlockPasses = 0
+    private var lensClearPasses = 0
+    /// When the current warning appeared.
+    private var lensBlockShownAt: ContinuousClock.Instant?
+    /// The finger stayed put long after being asked to move it, so it's there on purpose.
+    /// Not mentioned again until the lens has been clear for a moment.
+    private var isLensBlockIgnored = false
+    /// How long a finger can stay after the warning before it's taken as deliberate.
+    private static let lensBlockPatience: Duration = .seconds(12)
+
     /// Moves done during this topic. Once someone has stepped closer, no tip asks again.
     private var movesDone: Set<DistanceMove> = []
     /// Recent backdrops (nil for none), smoothed like the scene so it doesn't flicker.
@@ -645,6 +665,10 @@ final class PhotoCoach {
         reframedDone = []
         sectionProgress = 0
         sectionRecommendation = nil
+        lensBlock = nil
+        lensBlockPasses = 0
+        lensClearPasses = 0
+        lensBlockShownAt = nil
         // A new topic is a new section; the memory sentence carries what was done before.
         endSection()
         memory.notePractising(topic, styles: styles)
@@ -675,7 +699,7 @@ final class PhotoCoach {
             isFirstPass = false
             guard !Task.isCancelled else { continue }
 
-            // A call, another app or heat: say so, and don't spend effort on a frozen frame.
+            // A call or another app: say so, and don't spend effort on a frozen frame.
             if let pause = camera.pauseNotice {
                 notice = pause
                 showsCameraNotice = true
@@ -716,6 +740,13 @@ final class PhotoCoach {
             let backdropCounts = Dictionary(recentBackdrops.compactMap(\.self).map { ($0, 1) }, uniquingKeysWith: +)
             let steadyBackdrop = backdropCounts.first { $0.value * 2 > recentBackdrops.count }?.key
             analysis.backdrop = analysis.scene == .people ? steadyBackdrop : nil
+
+            // Part of the frame is a finger, so advice about it would be wrong: ask to move it first.
+            updateLensBlock(analysis.lensBlock)
+            if lensBlock != nil {
+                debugText = analysis.debugDescription
+                continue
+            }
 
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
@@ -847,6 +878,36 @@ final class PhotoCoach {
                 analysis: analysis,
                 keepsPlacement: keepsPlacement
             )
+        }
+    }
+
+    /// Shows or clears the finger warning, once what's been seen has held for a couple of checks.
+    private func updateLensBlock(_ found: CGRect?) {
+        guard let found else {
+            lensBlockPasses = 0
+            lensClearPasses += 1
+            if lensClearPasses >= 2 {
+                lensBlock = nil
+                lensBlockShownAt = nil
+                isLensBlockIgnored = false
+            }
+            return
+        }
+        lensClearPasses = 0
+        lensBlockPasses += 1
+        guard !isLensBlockIgnored else { return }
+        if let shownAt = lensBlockShownAt {
+            if ContinuousClock.now - shownAt > Self.lensBlockPatience {
+                // Still there after all this time: it's in the shot on purpose.
+                isLensBlockIgnored = true
+                lensBlock = nil
+                lensBlockShownAt = nil
+            } else {
+                lensBlock = found
+            }
+        } else if lensBlockPasses >= 2 {
+            lensBlock = found
+            lensBlockShownAt = .now
         }
     }
 

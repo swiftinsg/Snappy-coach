@@ -53,24 +53,21 @@ class CameraManager {
     private(set) var cameraAccess: AVAuthorizationStatus = .notDetermined
     /// A phone call, Siri or another app has the camera for now.
     private(set) var isInterrupted = false
-    /// The phone is hot enough that the coach should rest.
-    private(set) var isOverheating = false
     /// Something went wrong that the person needs to know about, and may be able to fix.
     private(set) var problem: CameraProblem?
     /// True once the session has been set up, so starting again doesn't add inputs twice.
     private var isConfigured = false
-    /// Watch for interruptions and heat while the camera runs.
+    /// Watch for interruptions while the camera runs.
     private var lifecycleTasks: [Task<Void, Never>] = []
 
-    /// True when the coach shouldn't spend effort on frames: the camera is paused or the phone is hot.
+    /// True when the coach shouldn't spend effort on frames because the camera is paused.
     var isCoachPaused: Bool {
-        isInterrupted || isOverheating
+        isInterrupted
     }
 
     /// What to tell the person while the coach is paused, or nil when it isn't.
     var pauseNotice: String? {
         if isInterrupted { return "Camera paused while a call or another app is using it." }
-        if isOverheating { return "Your iPhone is warm, so coaching is paused to let it cool down." }
         return nil
     }
 
@@ -241,11 +238,10 @@ class CameraManager {
         }
     }
 
-    /// Follows interruptions (calls, Siri, other apps), camera errors and the phone's heat,
+    /// Follows interruptions (calls, Siri, other apps) and camera errors,
     /// so the screen can say what's happening and the coach can rest.
     private func watchLifecycle() {
         guard lifecycleTasks.isEmpty else { return }
-        isOverheating = Self.isHot(ProcessInfo.processInfo.thermalState)
         let center = NotificationCenter.default
         lifecycleTasks = [
             Task { [weak self] in
@@ -264,17 +260,7 @@ class CameraManager {
                     self?.runSession()
                 }
             },
-            Task { [weak self] in
-                for await _ in center.notifications(named: ProcessInfo.thermalStateDidChangeNotification) {
-                    self?.isOverheating = Self.isHot(ProcessInfo.processInfo.thermalState)
-                }
-            },
         ]
-    }
-
-    /// Serious or critical heat: the coach rests so the phone can cool down.
-    private static func isHot(_ state: ProcessInfo.ThermalState) -> Bool {
-        state == .serious || state == .critical
     }
 
     // MARK: - Switching cameras and lenses

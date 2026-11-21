@@ -13,8 +13,11 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     /// Follows on from `photoControls` once the panel is open, so it shares its number.
     case editControls
     case compositionRow
+    case explainStyle
     case selectObject
     case advice
+    /// Comes after `selectObject`, since the dot and circle only show once there's a subject.
+    case alignSubject
     case shutter
 
     var id: Int { rawValue }
@@ -22,13 +25,23 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     /// Steps that continue the one before rather than counting as a stop of their own.
     var isFollowOn: Bool { self == .editControls }
 
+    /// Steps that spotlight nearly the whole viewfinder, leaving no room for the card beside it.
+    /// Their card sits on the composition row instead, over the bottom of the viewfinder.
+    var placesCardOnControls: Bool { self == .selectObject || self == .alignSubject }
+
+    /// Steps whose lowest spotlight is a tall panel with no room beside it.
+    /// Their card sits inside the bottom of that panel, leaving its top and the bar above it clear.
+    var placesCardInPanel: Bool { self == .editControls }
+
     var title: String {
         switch self {
         case .topicMenu: "Choose what to learn"
         case .photoControls: "Your camera buttons"
         case .editControls: "Pick your buttons"
         case .compositionRow: "Composition styles"
+        case .explainStyle: "Learn a style"
         case .selectObject: "Pick your subject"
+        case .alignSubject: "Line it up"
         case .advice: "Your coach"
         case .shutter: "Take your first shot"
         }
@@ -45,8 +58,12 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
             "Tap a control below to add it to the bar, or tap − on one in the bar to remove it. The bar holds up to 3. Tap ✓ when you're done."
         case .compositionRow:
             "Each card is a way to frame your photo. Scroll the row to see them all, then tap one to practise it. You can select more than one. The ✨ icon marks the style the coach recommends for this scene."
+        case .explainStyle:
+            "Press and hold any card to see what the style means."
         case .selectObject:
             "Tap the thing you want to photograph. The coach will follow it and give advice about it."
+        case .alignSubject:
+            "The dot is where your phone points, and the circle is where it should point. Move the phone until the dot is inside the circle."
         case .advice:
             "The coach gives live tips as you frame. Tap the card once to see why it's suggesting this, then tap again to tuck it away."
         case .shutter:
@@ -154,6 +171,8 @@ struct OnboardingOverlay: View {
     let stepNumber: Int
     let stepCount: Int
     let feedback: OnboardingFeedback?
+    /// When set, the card's bottom edge sits here, with no arrow, instead of beside the spotlight.
+    var cardBottom: CGFloat? = nil
     let onContinue: () -> Void
     let onSkip: () -> Void
 
@@ -199,7 +218,10 @@ struct OnboardingOverlay: View {
     }
 
     /// Where the card goes: in the biggest free band of the screen, pointing at the control next to it.
-    private var placement: (pointsUp: Bool, arrowX: CGFloat, inset: CGFloat) {
+    private var placement: (pointsUp: Bool, arrowX: CGFloat?, inset: CGFloat) {
+        if let cardBottom {
+            return (false, nil, canvas.height - cardBottom)
+        }
         let sorted = cutouts.sorted { $0.minY < $1.minY }
         var bands: [(top: CGFloat, bottom: CGFloat, above: CGRect?, below: CGRect?)] = []
         var top: CGFloat = 0
@@ -224,12 +246,12 @@ struct OnboardingOverlay: View {
     private var callout: some View {
         let placement = placement
         return VStack(spacing: 6) {
-            if placement.pointsUp {
-                arrow(pointsUp: true, x: placement.arrowX)
+            if placement.pointsUp, let x = placement.arrowX {
+                arrow(pointsUp: true, x: x)
             }
             card
-            if !placement.pointsUp {
-                arrow(pointsUp: false, x: placement.arrowX)
+            if !placement.pointsUp, let x = placement.arrowX {
+                arrow(pointsUp: false, x: x)
             }
         }
         .padding(placement.pointsUp ? .top : .bottom, placement.inset)
@@ -315,6 +337,8 @@ struct OnboardingOverlay: View {
         .padding(16)
         .frame(maxWidth: 360)
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 20))
+        // The card can sit inside the spotlight, so it takes touches itself rather than letting them reach the viewfinder.
+        .contentShape(.rect(cornerRadius: 20))
         .padding(.horizontal, 20)
         .animation(.snappy, value: feedback)
         .accessibilityElement(children: .contain)

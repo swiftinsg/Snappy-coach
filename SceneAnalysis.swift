@@ -309,6 +309,8 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var backgroundBusyness: Double? = nil
     /// How much the brightness varies inside the subject, 0...0.5. Low for plain, smooth things.
     var subjectContrast: Double? = nil
+    /// Where a finger seems to be over the lens, from the top left. Nil when the lens looks clear.
+    var lensBlock: CGRect? = nil
 
     /// How many people are in the frame, whether their faces or only their bodies show.
     var personCount: Int {
@@ -421,6 +423,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
             String(format: "background busy %.3f (plain below %.3f)", backgroundBusyness ?? -1, CoachRules.plainBackgroundLimit),
             String(format: "subject contrast %.3f (flat below %.3f)", subjectContrast ?? -1, CoachRules.flatContrast),
+            "lens block " + (lensBlock.map { LensBlockFinder.placeName(of: $0) } ?? "none"),
         ].joined(separator: "\n")
     }
 
@@ -458,6 +461,15 @@ extension SceneAnalysis {
         let inside = gray.mean(in: region)
         let outside = subject == nil ? nil : gray.mean(outside: region)
 
+        // A finger over the lens, unless it's what the person tapped or a face.
+        var lensBlock = ColorGrid(image).flatMap { colors in
+            LensBlockFinder.find(cells: LensBlockFinder.cells(gray: gray, colors: colors), exempt: faces + [selectedSubject].compactMap(\.self))
+        }
+        // A hand Vision can make out is in focus, so it's in the shot on purpose.
+        if let block = lensBlock, LensBlockFinder.overlapsMost(block, detectHands(in: image)) {
+            lensBlock = nil
+        }
+
         return SceneAnalysis(
             brightness: gray.mean(in: CGRect(x: 0, y: 0, width: 1, height: 1)),
             highlightClip: gray.share { $0 >= 248 },
@@ -478,7 +490,8 @@ extension SceneAnalysis {
             },
             backdrop: backdrop,
             backgroundBusyness: subject.map { gray.edgeShare(in: $0.insetBy(dx: -0.15, dy: -0.15), excluding: $0) },
-            subjectContrast: gray.contrast(in: region)
+            subjectContrast: gray.contrast(in: region),
+            lensBlock: lensBlock
         )
     }
 
@@ -492,6 +505,23 @@ extension SceneAnalysis {
             .map { ($0.identifier, $0.confidence) }
     }
 
+    /// Hands Vision can make out, from the top left. A finger right on the lens is too blurred to find.
+    private nonisolated static func detectHands(in image: CGImage) -> [CGRect] {
+        let request = VNDetectHumanHandPoseRequest()
+        request.maximumHandCount = 2
+        request.runOnCPUInSimulator()
+        guard (try? VNImageRequestHandler(cgImage: image).perform([request])) != nil else { return [] }
+        return (request.results ?? []).compactMap { hand in
+            let points = ((try? hand.recognizedPoints(.all)) ?? [:]).values.filter { $0.confidence > 0.5 }
+            guard points.count >= 6 else { return nil }
+            let xs = points.map(\.location.x)
+            let ys = points.map(\.location.y)
+            guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return nil }
+            // Vision measures from the bottom left, the screen from the top left.
+            return CGRect(x: minX, y: 1 - maxY, width: maxX - minX, height: maxY - minY).insetBy(dx: -0.05, dy: -0.05)
+        }
+    }
+
     private nonisolated static func detectFaces(in image: CGImage) -> [CGRect] {
         let request = VNDetectFaceRectanglesRequest()
         request.runOnCPUInSimulator()
@@ -503,8 +533,195 @@ extension SceneAnalysis {
     }
 }
 
+// MARK: - A finger over the lens
+
+/// Finds a finger resting over the lens. Right on the glass it can't be focused, so it shows up
+/// as a large, very blurry, skin-toned patch running in from the edge of the frame while the rest
+/// of the scene stays sharp. A finger held up in the shot on purpose is in focus, so it doesn't count.
+nonisolated enum LensBlockFinder {
+    /// One cell of the grid laid over the frame.
+    struct Cell: Equatable, Sendable {
+        /// Variance of the Laplacian, as in `SceneAnalysis.subjectSharpness`.
+        var sharpness: Double
+        /// Average red, green and blue, 0...1.
+        var red: Double
+        var green: Double
+        var blue: Double
+
+        /// Skin colour, from pale to dark, and the red-orange glow of light shining through a fingertip.
+        var isSkinToned: Bool {
+            guard red >= 0.05 else { return false }
+            return red > green * 1.05 && green >= blue * 0.85 && (red - blue) / red > 0.18
+        }
+    }
+
+    static let columns = 8
+    static let rows = 8
+    /// Scenes with less detail than this in their sharper parts are soft all over: nothing to compare against.
+    static let detailedScene = 60.0
+    /// A cell this much softer than the scene's detailed parts is as blurred as something on the lens.
+    static let blurShare = 0.06
+    /// Between about 5% and half the frame: smaller is a speck, bigger is the scene itself.
+    static let cellRange = 3...32
+
+    /// The patch covered by a finger, from the top left, or nil when the lens looks clear.
+    /// `exempt` is what's in the shot on purpose, like faces or the tapped subject.
+    static func find(cells: [[Cell]], exempt: [CGRect] = []) -> CGRect? {
+        let all = cells.flatMap(\.self)
+        guard cells.count == rows, cells.allSatisfy({ $0.count == columns }) else { return nil }
+        let sorted = all.map(\.sharpness).sorted()
+        // The sharper quarter of the frame stands for how detailed the scene is.
+        let detail = sorted[sorted.count * 3 / 4]
+        guard detail >= detailedScene else { return nil }
+        let blurLimit = max(6, detail * blurShare)
+        let isBlocked = { (cell: Cell) in cell.sharpness < blurLimit && cell.isSkinToned }
+
+        // Grow the patch in from blocked cells on the edge of the frame.
+        var inPatch = Array(repeating: Array(repeating: false, count: columns), count: rows)
+        var queue: [(row: Int, column: Int)] = []
+        for row in 0..<rows {
+            for column in 0..<columns where row == 0 || row == rows - 1 || column == 0 || column == columns - 1 {
+                if isBlocked(cells[row][column]) {
+                    inPatch[row][column] = true
+                    queue.append((row, column))
+                }
+            }
+        }
+        var index = 0
+        while index < queue.count {
+            let (row, column) = queue[index]
+            index += 1
+            for (dr, dc) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let r = row + dr, c = column + dc
+                guard (0..<rows).contains(r), (0..<columns).contains(c), !inPatch[r][c], isBlocked(cells[r][c]) else { continue }
+                inPatch[r][c] = true
+                queue.append((r, c))
+            }
+        }
+
+        // Only the largest patch counts; a few stray cells along different edges aren't a finger.
+        let patch = largestGroup(of: queue.map { ($0.row, $0.column) })
+        guard cellRange.contains(patch.count) else { return nil }
+
+        // The rest of the frame has to be clearly sharp, so a soft scene isn't mistaken for a finger.
+        let patchSet = Set(patch.map { $0.0 * columns + $0.1 })
+        let sharpElsewhere = all.indices.filter { !patchSet.contains($0) && all[$0].sharpness >= blurLimit * 4 }.count
+        guard sharpElsewhere >= 8 else { return nil }
+
+        let minRow = patch.map(\.0).min() ?? 0, maxRow = patch.map(\.0).max() ?? 0
+        let minColumn = patch.map(\.1).min() ?? 0, maxColumn = patch.map(\.1).max() ?? 0
+        let box = CGRect(
+            x: Double(minColumn) / Double(columns), y: Double(minRow) / Double(rows),
+            width: Double(maxColumn - minColumn + 1) / Double(columns), height: Double(maxRow - minRow + 1) / Double(rows)
+        )
+        return overlapsMost(box, exempt) ? nil : box
+    }
+
+    /// Whether a third or more of `box` is covered by one of `others`.
+    static func overlapsMost(_ box: CGRect, _ others: [CGRect]) -> Bool {
+        let area = box.width * box.height
+        guard area > 0 else { return false }
+        return others.contains { other in
+            let shared = box.intersection(other)
+            return !shared.isNull && shared.width * shared.height >= area / 3
+        }
+    }
+
+    /// Where the patch is, for the advice: "the top left corner", "the bottom edge".
+    static func placeName(of box: CGRect) -> String {
+        let vertical = box.minY <= 0.01 && box.maxY < 0.99 ? "top" : (box.maxY >= 0.99 && box.minY > 0.01 ? "bottom" : nil)
+        let horizontal = box.minX <= 0.01 && box.maxX < 0.99 ? "left" : (box.maxX >= 0.99 && box.minX > 0.01 ? "right" : nil)
+        switch (vertical, horizontal) {
+        case let (v?, h?): return "the \(v) \(h) corner"
+        case let (v?, nil): return "the \(v) edge"
+        case let (nil, h?): return "the \(h) edge"
+        default: return "the edge"
+        }
+    }
+
+    /// Measures each cell of the grid.
+    static func cells(gray: GrayImage, colors: ColorGrid) -> [[Cell]] {
+        (0..<rows).map { row in
+            (0..<columns).map { column in
+                let rect = CGRect(
+                    x: Double(column) / Double(columns), y: Double(row) / Double(rows),
+                    width: 1 / Double(columns), height: 1 / Double(rows)
+                )
+                let color = colors.mean(row: row, column: column)
+                return Cell(sharpness: gray.sharpness(in: rect), red: color.red, green: color.green, blue: color.blue)
+            }
+        }
+    }
+
+    /// The biggest set of cells joined side by side.
+    private static func largestGroup(of cells: [(Int, Int)]) -> [(Int, Int)] {
+        var remaining = Set(cells.map { $0.0 * columns + $0.1 })
+        var best: [(Int, Int)] = []
+        while let start = remaining.first {
+            remaining.remove(start)
+            var group = [start]
+            var index = 0
+            while index < group.count {
+                let cell = group[index]
+                index += 1
+                let row = cell / columns, column = cell % columns
+                for (dr, dc) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let r = row + dr, c = column + dc
+                    guard (0..<rows).contains(r), (0..<columns).contains(c) else { continue }
+                    if remaining.remove(r * columns + c) != nil { group.append(r * columns + c) }
+                }
+            }
+            if group.count > best.count { best = group.map { ($0 / columns, $0 % columns) } }
+        }
+        return best
+    }
+}
+
+/// The average colour of each cell of the `LensBlockFinder` grid.
+nonisolated struct ColorGrid {
+    private let width: Int
+    private let height: Int
+    private let pixels: [UInt8]
+
+    init?(_ image: CGImage) {
+        // Four pixels per cell each way is plenty for an average colour.
+        width = LensBlockFinder.columns * 4
+        height = LensBlockFinder.rows * 4
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let (w, h) = (width, height)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: w, height: h,
+                bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return nil }
+        self.pixels = pixels
+    }
+
+    /// Rows count from the top, like the rest of the analysis.
+    func mean(row: Int, column: Int) -> (red: Double, green: Double, blue: Double) {
+        let size = 4
+        var sums = (0.0, 0.0, 0.0)
+        for y in row * size..<(row + 1) * size {
+            for x in column * size..<(column + 1) * size {
+                let i = (y * width + x) * 4
+                sums.0 += Double(pixels[i])
+                sums.1 += Double(pixels[i + 1])
+                sums.2 += Double(pixels[i + 2])
+            }
+        }
+        let count = Double(size * size) * 255
+        return (sums.0 / count, sums.1 / count, sums.2 / count)
+    }
+}
+
 /// A small grayscale copy of a frame for quick pixel measurements.
-private nonisolated struct GrayImage {
+nonisolated struct GrayImage {
     let width: Int
     let height: Int
     let pixels: [UInt8]

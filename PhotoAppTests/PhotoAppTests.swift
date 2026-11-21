@@ -810,3 +810,55 @@ struct CoachRulesTests {
         #expect(HoldOrientation.landscapeRight.frameOrientation(isFrontCamera: false) == .down)
     }
 }
+
+/// The finger-on-lens check, on made-up grids so each test states only what matters.
+struct LensBlockTests {
+    /// A detailed, neutral scene.
+    private let scene = LensBlockFinder.Cell(sharpness: 300, red: 0.45, green: 0.45, blue: 0.45)
+    /// What a finger right on the glass looks like: smooth and skin-toned.
+    private let finger = LensBlockFinder.Cell(sharpness: 2, red: 0.55, green: 0.32, blue: 0.22)
+
+    /// The scene, with `cell` in the top left `size`×`size` corner.
+    private func grid(corner cell: LensBlockFinder.Cell, size: Int = 3, rest: LensBlockFinder.Cell? = nil) -> [[LensBlockFinder.Cell]] {
+        (0..<LensBlockFinder.rows).map { row in
+            (0..<LensBlockFinder.columns).map { column in
+                row < size && column < size ? cell : (rest ?? scene)
+            }
+        }
+    }
+
+    @Test func findsAFingerInTheCorner() throws {
+        let box = try #require(LensBlockFinder.find(cells: grid(corner: finger)))
+        #expect(box.minX == 0 && box.minY == 0)
+        #expect(abs(box.width - 3.0 / 8) < 0.001)
+        #expect(LensBlockFinder.placeName(of: box) == "the top left corner")
+    }
+
+    @Test func aFingerInFocusIsInTheShotOnPurpose() {
+        var sharpFinger = finger
+        sharpFinger.sharpness = 200
+        #expect(LensBlockFinder.find(cells: grid(corner: sharpFinger)) == nil)
+    }
+
+    @Test func theTappedSubjectIsNotAFinger() {
+        let tapped = CGRect(x: 0, y: 0, width: 0.4, height: 0.4)
+        #expect(LensBlockFinder.find(cells: grid(corner: finger), exempt: [tapped]) == nil)
+    }
+
+    @Test func plainSkyAndWallsAreNotFingers() {
+        let sky = LensBlockFinder.Cell(sharpness: 1, red: 0.5, green: 0.7, blue: 0.95)
+        let wall = LensBlockFinder.Cell(sharpness: 1, red: 0.8, green: 0.8, blue: 0.78)
+        #expect(LensBlockFinder.find(cells: grid(corner: sky, size: 4)) == nil)
+        #expect(LensBlockFinder.find(cells: grid(corner: wall, size: 4)) == nil)
+    }
+
+    @Test func aSoftSceneIsNotMistakenForAFinger() {
+        let soft = LensBlockFinder.Cell(sharpness: 20, red: 0.45, green: 0.45, blue: 0.45)
+        #expect(LensBlockFinder.find(cells: grid(corner: finger, rest: soft)) == nil)
+    }
+
+    @Test func tooSmallOrTooBigIsNotAFinger() {
+        #expect(LensBlockFinder.find(cells: grid(corner: finger, size: 1)) == nil)
+        #expect(LensBlockFinder.find(cells: grid(corner: finger, size: 7)) == nil)
+    }
+}
