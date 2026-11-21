@@ -28,6 +28,9 @@ struct AutoRenderingView: View {
     @AppStorage("compositionGuides") private var compositionGuidesRaw = CompositionGuide.ruleOfThirdsOne.rawValue
     @State private var activeAdjustment: PhotoControl?
     @State private var statusMessage: String?
+    /// What the coach knew at each shutter press, waiting for its photo to finish saving. Oldest first,
+    /// so quick shots in a row each keep their own story.
+    @State private var pendingShots: [ShotRecord] = []
     /// The composition style being explained after a press and hold, shown for a few seconds.
     @State private var compositionExplanation: CompositionGuide?
     /// Briefly blacks out the screen when a photo is taken, like the Camera app.
@@ -68,7 +71,7 @@ struct AutoRenderingView: View {
     private var topicMenuPrompt: String? {
         guard onboardingStep == .topicMenu else { return nil }
         if let next = tourNextTopic {
-            return "Each mode coaches a different skill. Select \(next.title) next."
+            return "Each mode coaches a different skill. Select \(next.displayTitle) next."
         }
         return "That's every mode. Go back to Composition."
     }
@@ -100,7 +103,7 @@ struct AutoRenderingView: View {
     /// Whichever topic is picked gets explained.
     private func noteTopicPicked(_ topic: AdviceTopic) {
         guard onboardingStep == .topicMenu else { return }
-        let explained = "\(topic.title): \(topic.tourDescription)"
+        let explained = "\(topic.displayTitle): \(topic.tourDescription)"
         guard let next = tourNextTopic else {
             if topic == .composition {
                 noteOnboarding(.topicMenu, "Back to Composition. \(topic.tourDescription)", isComplete: true)
@@ -110,14 +113,14 @@ struct AutoRenderingView: View {
             return
         }
         guard topic == next else {
-            noteOnboarding(.topicMenu, "\(explained) For this tour, open the menu and select \(next.title).", isComplete: false)
+            noteOnboarding(.topicMenu, "\(explained) For this tour, open the menu and select \(next.displayTitle).", isComplete: false)
             return
         }
         let modes = AdviceTopic.allCases
         let after = modes.firstIndex(of: topic).map { modes.index(after: $0) }
         tourNextTopic = after.flatMap { $0 < modes.endIndex ? modes[$0] : nil }
         if let upcoming = tourNextTopic {
-            noteOnboarding(.topicMenu, "\(explained) Open the menu again and select \(upcoming.title).", isComplete: false)
+            noteOnboarding(.topicMenu, "\(explained) Open the menu again and select \(upcoming.displayTitle).", isComplete: false)
         } else {
             noteOnboarding(.topicMenu, "\(explained) That's every mode. Open the menu once more and go back to Composition.", isComplete: false)
         }
@@ -161,10 +164,10 @@ struct AutoRenderingView: View {
             : "Now scroll the row to see the other styles."
         if let added = CompositionGuide.allCases.first(where: { after.contains($0) && !before.contains($0) }) {
             tourPickedStyle = true
-            noteOnboarding(.compositionRow, "\(added.title): \(added.tourDescription) The grid on screen shows you how. \(next)", isComplete: tourScrolledStyles)
+            noteOnboarding(.compositionRow, "\(added.title.keptTogether): \(added.tourDescription) The grid on screen shows you how. \(next)", isComplete: tourScrolledStyles)
         } else if let removed = CompositionGuide.allCases.first(where: { before.contains($0) && !after.contains($0) }) {
             tourPickedStyle = true
-            noteOnboarding(.compositionRow, "Turned off \(removed.title). You can practise a few styles at once. \(next)", isComplete: tourScrolledStyles)
+            noteOnboarding(.compositionRow, "Turned off \(removed.title.keptTogether). You can practise a few styles at once. \(next)", isComplete: tourScrolledStyles)
         }
     }
 
@@ -640,6 +643,7 @@ struct AutoRenderingView: View {
                         onSelect: { noteTopicPicked($0) },
                         prompt: topicMenuPrompt
                     )
+                        .equatable()
                         .opacity(controls.isEditing ? 0 : 1)
                         .disabled(controls.isEditing)
                         .accessibilityHidden(controls.isEditing)
@@ -684,7 +688,7 @@ struct AutoRenderingView: View {
                 // What a composition style means, after pressing and holding its card.
                 if let compositionExplanation {
                     VStack(spacing: 4) {
-                        Text(compositionExplanation.title)
+                        Text(compositionExplanation.title.keptTogether)
                             .font(.subheadline.bold())
                         Text(compositionExplanation.explanation)
                             .font(.subheadline)
@@ -877,7 +881,12 @@ struct AutoRenderingView: View {
         // Add each newly saved photo to the in-app gallery.
         .onChange(of: camera.lastSavedAssetIdentifier) {
             guard let identifier = camera.lastSavedAssetIdentifier else { return }
-            Task { await gallery.add(identifier) }
+            let record = pendingShots.isEmpty ? nil : pendingShots.removeFirst()
+            Task { await gallery.add(identifier, record: record) }
+        }
+        // A shot that never reached the library takes its story with it, so the next photo gets its own.
+        .onChange(of: camera.unsavedCaptureCount) {
+            if !pendingShots.isEmpty { pendingShots.removeFirst() }
         }
         .fullScreenCover(isPresented: $isGalleryPresented) {
             GalleryView(gallery: gallery)
@@ -920,6 +929,8 @@ struct AutoRenderingView: View {
             }
         }
         .onChange(of: camera.shutterCount) {
+            // Keep what the coach knew for the photo's story, before the section it describes ends.
+            pendingShots.append(coach.shotRecord(topic: adviceTopic, styles: compositionGuides))
             // Taking the photo finishes the coach's current section.
             coach.noteShutter()
             isShutterBlinking = true
@@ -943,7 +954,7 @@ struct AutoRenderingView: View {
         }
         .onChange(of: compositionExplanation) {
             guard let guide = compositionExplanation else { return }
-            noteOnboarding(.explainStyle, "\(guide.title): \(guide.tourDescription) Hold another card to compare, or tap Continue.", isComplete: true)
+            noteOnboarding(.explainStyle, "\(guide.title.keptTogether): \(guide.tourDescription) Hold another card to compare, or tap Continue.", isComplete: true)
         }
         .onChange(of: subjectGuide.target?.isAligned) {
             guard onboardingStep == .alignSubject, let target = subjectGuide.target else { return }

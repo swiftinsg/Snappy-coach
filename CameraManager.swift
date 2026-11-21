@@ -46,6 +46,9 @@ class CameraManager {
     private(set) var countdown: Int?
     /// Photos library identifier of the most recently saved photo, picked up by the gallery.
     private(set) var lastSavedAssetIdentifier: String?
+    /// Goes up by one each time a photo was taken but not saved to the library, so whatever was
+    /// waiting to go with it can be dropped.
+    private(set) var unsavedCaptureCount = 0
 
     // MARK: - When the camera can't work
 
@@ -811,9 +814,14 @@ class CameraManager {
                 self?.isCapturing = false
                 switch result {
                 case .success(let assetIdentifier):
-                    self?.lastSavedAssetIdentifier = assetIdentifier
+                    if let assetIdentifier {
+                        self?.lastSavedAssetIdentifier = assetIdentifier
+                    } else {
+                        self?.unsavedCaptureCount += 1
+                    }
                     continuation.resume(returning: nil)
                 case .failure(let error):
+                    self?.unsavedCaptureCount += 1
                     self?.problem = CameraProblem(message: "Couldn't save the photo: \(error.localizedDescription)", opensSettings: false)
                     continuation.resume(returning: nil)
                 }

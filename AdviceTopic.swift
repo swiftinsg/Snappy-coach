@@ -21,6 +21,10 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The name as shown on screen: never split across lines, so "Angle & Perspective" moves to the
+    /// next line whole rather than breaking as "Per-spective". `title` stays plain for the model.
+    var displayTitle: String { title.keptTogether }
+
     /// Shorter name for the dropdown button, so it fits beside the camera controls.
     var shortTitle: String {
         switch self {
@@ -73,7 +77,7 @@ struct AdviceTopicMenu: View {
                             selection = topic
                             onSelect(topic)
                         })) {
-                            Label(topic.title, systemImage: topic.systemImage)
+                            Label(topic.displayTitle, systemImage: topic.systemImage)
                             Text(topic.tourDescription)
                         }
                     }
@@ -108,9 +112,40 @@ struct AdviceTopicMenu: View {
             onSelect(topic)
         })) {
             ForEach(AdviceTopic.allCases) { topic in
-                Label(topic.title, systemImage: topic.systemImage)
+                Label(topic.displayTitle, systemImage: topic.systemImage)
                     .tag(topic)
             }
         }
+    }
+}
+
+// Only redrawn when what it shows changes. The camera screen around it updates many times a second,
+// and an open menu that gets rebuilt jumps back to the top while it's being scrolled.
+extension AdviceTopicMenu: Equatable {
+    static func == (lhs: AdviceTopicMenu, rhs: AdviceTopicMenu) -> Bool {
+        lhs.selection == rhs.selection && lhs.prompt == rhs.prompt && lhs.iconRotation == rhs.iconRotation
+    }
+}
+
+extension String {
+    /// The same text, but the system never hyphenates its words when wrapping: an invisible
+    /// word joiner sits between each pair of letters. Spaces can still wrap.
+    var unhyphenated: String {
+        var result = ""
+        var previous: Character?
+        for character in self {
+            if let previous, previous.isLetter || previous.isNumber, character.isLetter || character.isNumber {
+                result.append("\u{2060}")
+            }
+            result.append(character)
+            previous = character
+        }
+        return result
+    }
+
+    /// The same text, never split across lines at all: no hyphens, and no breaks at its spaces.
+    /// For short names inside sentences, which then move to the next line whole.
+    var keptTogether: String {
+        unhyphenated.replacingOccurrences(of: " ", with: "\u{00A0}")
     }
 }

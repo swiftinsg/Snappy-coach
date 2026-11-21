@@ -535,9 +535,11 @@ extension SceneAnalysis {
 
 // MARK: - A finger over the lens
 
-/// Finds a finger resting over the lens. Right on the glass it can't be focused, so it shows up
-/// as a large, very blurry, skin-toned patch running in from the edge of the frame while the rest
-/// of the scene stays sharp. A finger held up in the shot on purpose is in focus, so it doesn't count.
+/// Finds a finger resting over the lens. Right on the glass it can't be focused, and it blocks the
+/// light, so it shows up as a large, very blurry patch coming in from a corner or part of one side,
+/// clearly redder than the rest of the picture and darker than it (or glowing red where light shines
+/// through). The rest of the scene stays sharp. A finger held up in the shot on purpose is in focus,
+/// so it doesn't count. Smooth things that span the frame, like a ceiling, sky or table, don't either.
 nonisolated enum LensBlockFinder {
     /// One cell of the grid laid over the frame.
     struct Cell: Equatable, Sendable {
@@ -548,10 +550,11 @@ nonisolated enum LensBlockFinder {
         var green: Double
         var blue: Double
 
-        /// Skin colour, from pale to dark, and the red-orange glow of light shining through a fingertip.
-        var isSkinToned: Bool {
-            guard red >= 0.05 else { return false }
-            return red > green * 1.05 && green >= blue * 0.85 && (red - blue) / red > 0.18
+        var brightness: Double { 0.299 * red + 0.587 * green + 0.114 * blue }
+
+        /// Skin's order of colours, red over green over blue, whatever the lighting.
+        var hasSkinHue: Bool {
+            red >= 0.04 && red > green && green >= blue * 0.8
         }
     }
 
@@ -563,6 +566,13 @@ nonisolated enum LensBlockFinder {
     static let blurShare = 0.06
     /// Between about 5% and half the frame: smaller is a speck, bigger is the scene itself.
     static let cellRange = 3...32
+    /// How much redder than the whole picture a finger is. Comparing with the picture rather than
+    /// a fixed colour means warm lighting, which makes everything look warm, doesn't count.
+    static let redderThanScene = 1.15
+    /// A finger blocks light, so it's at least this much darker than the picture overall...
+    static let darkerThanScene = 0.8
+    /// ...unless light shines through it, which makes it glow far redder than anything else.
+    static let glowRedness = 1.4
 
     /// The patch covered by a finger, from the top left, or nil when the lens looks clear.
     /// `exempt` is what's in the shot on purpose, like faces or the tapped subject.
@@ -574,7 +584,15 @@ nonisolated enum LensBlockFinder {
         let detail = sorted[sorted.count * 3 / 4]
         guard detail >= detailedScene else { return nil }
         let blurLimit = max(6, detail * blurShare)
-        let isBlocked = { (cell: Cell) in cell.sharpness < blurLimit && cell.isSkinToned }
+        // The picture's typical colour and brightness, so each cell is judged against its own scene.
+        let sceneRedness = median(all.map { $0.red / max($0.green, 0.01) })
+        let sceneBrightness = median(all.map(\.brightness))
+        let isBlocked = { (cell: Cell) -> Bool in
+            guard cell.sharpness < blurLimit, cell.hasSkinHue else { return false }
+            let redness = (cell.red / max(cell.green, 0.01)) / max(sceneRedness, 0.01)
+            guard redness >= redderThanScene else { return false }
+            return redness >= glowRedness || cell.brightness <= sceneBrightness * darkerThanScene
+        }
 
         // Grow the patch in from blocked cells on the edge of the frame.
         var inPatch = Array(repeating: Array(repeating: false, count: columns), count: rows)
@@ -602,6 +620,12 @@ nonisolated enum LensBlockFinder {
         // Only the largest patch counts; a few stray cells along different edges aren't a finger.
         let patch = largestGroup(of: queue.map { ($0.row, $0.column) })
         guard cellRange.contains(patch.count) else { return nil }
+        // A finger comes in from a corner or part of one side. Something running right across the
+        // frame, edge to edge, is part of the scene: a ceiling, the sky, a floor or a table top.
+        let patchRows = Set(patch.map(\.0)), patchColumns = Set(patch.map(\.1))
+        let spansAcross = patch.contains { $0.1 == 0 } && patch.contains { $0.1 == columns - 1 }
+        let spansDown = patch.contains { $0.0 == 0 } && patch.contains { $0.0 == rows - 1 }
+        guard !spansAcross, !spansDown, patchRows.count < rows, patchColumns.count < columns else { return nil }
 
         // The rest of the frame has to be clearly sharp, so a soft scene isn't mistaken for a finger.
         let patchSet = Set(patch.map { $0.0 * columns + $0.1 })
@@ -615,6 +639,20 @@ nonisolated enum LensBlockFinder {
             width: Double(maxColumn - minColumn + 1) / Double(columns), height: Double(maxRow - minRow + 1) / Double(rows)
         )
         return overlapsMost(box, exempt) ? nil : box
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        return sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+    }
+
+    /// How much two patches overlap, 0...1 (intersection over union).
+    static func overlap(_ a: CGRect, _ b: CGRect) -> Double {
+        let shared = a.intersection(b)
+        guard !shared.isNull else { return 0 }
+        let sharedArea = shared.width * shared.height
+        let union = a.width * a.height + b.width * b.height - sharedArea
+        return union > 0 ? sharedArea / union : 0
     }
 
     /// Whether a third or more of `box` is covered by one of `others`.

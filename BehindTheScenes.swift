@@ -560,6 +560,8 @@ final class PhotoCoach {
     private(set) var debugText = ""
     /// What has been done so far, kept across topics and photos.
     private(set) var memory = CoachMemory()
+    /// Issues fixed since the last photo, for that photo's story in the gallery.
+    private(set) var fixedSinceShot: [CoachIssue] = []
     /// What kind of photo the camera is looking at, smoothed over the last few checks.
     private(set) var scene: SceneType?
     /// Where a finger seems to be over the lens, outlined on the viewfinder. While it's set, the
@@ -638,10 +640,12 @@ final class PhotoCoach {
     private var reframeAmount = 0.0
     /// Model-only tips done during this topic, so the model can't ask for them again.
     private var reframedDone: Set<CoachIssue> = []
-    // A finger over the lens must be seen twice in a row before it's mentioned, and the lens clear
-    // twice in a row before the warning goes, so one odd frame does neither.
+    // A finger over the lens must be seen in the same spot three times in a row before it's
+    // mentioned, and the lens clear twice in a row before the warning goes, so one odd frame does neither.
     private var lensBlockPasses = 0
     private var lensClearPasses = 0
+    /// Where the possible finger was last check, to see that it stays put.
+    private var lensBlockCandidate: CGRect?
     /// When the current warning appeared.
     private var lensBlockShownAt: ContinuousClock.Instant?
     /// The finger stayed put long after being asked to move it, so it's there on purpose.
@@ -669,6 +673,7 @@ final class PhotoCoach {
         lensBlockPasses = 0
         lensClearPasses = 0
         lensBlockShownAt = nil
+        lensBlockCandidate = nil
         // A new topic is a new section; the memory sentence carries what was done before.
         endSection()
         memory.notePractising(topic, styles: styles)
@@ -885,6 +890,7 @@ final class PhotoCoach {
     private func updateLensBlock(_ found: CGRect?) {
         guard let found else {
             lensBlockPasses = 0
+            lensBlockCandidate = nil
             lensClearPasses += 1
             if lensClearPasses >= 2 {
                 lensBlock = nil
@@ -894,7 +900,11 @@ final class PhotoCoach {
             return
         }
         lensClearPasses = 0
-        lensBlockPasses += 1
+        // A finger stays in the same spot while the scene moves past it; a patch that jumps about
+        // between checks is the scene, so the count starts again.
+        let isSameSpot = lensBlockCandidate.map { LensBlockFinder.overlap($0, found) >= 0.5 } ?? true
+        lensBlockPasses = isSameSpot ? lensBlockPasses + 1 : 1
+        lensBlockCandidate = found
         guard !isLensBlockIgnored else { return }
         if let shownAt = lensBlockShownAt {
             if ContinuousClock.now - shownAt > Self.lensBlockPatience {
@@ -905,7 +915,7 @@ final class PhotoCoach {
             } else {
                 lensBlock = found
             }
-        } else if lensBlockPasses >= 2 {
+        } else if lensBlockPasses >= 3 {
             lensBlock = found
             lensBlockShownAt = .now
         }
@@ -914,6 +924,26 @@ final class PhotoCoach {
     /// Call when a photo is taken: that finishes the current section.
     func noteShutter() {
         endSection()
+        fixedSinceShot = []
+    }
+
+    /// What the coach knew when the shutter fired, kept with the photo for its story in the gallery.
+    /// Call before `noteShutter()`, which ends the section this describes.
+    func shotRecord(topic: AdviceTopic, styles: Set<CompositionGuide>) -> ShotRecord {
+        var praised = feedback?.good ?? []
+        if let sectionStrength, !praised.contains(sectionStrength) {
+            praised.append(sectionStrength)
+        }
+        return ShotRecord(
+            topicID: topic.rawValue,
+            styles: topic == .composition ? CompositionGuide.allCases.filter(styles.contains).map(\.title) : [],
+            scene: scene?.title,
+            wasReady: isReady,
+            fixed: fixedSinceShot.map(\.accomplishment),
+            praised: praised,
+            suggestion: isReady ? nil : feedback?.improve.first,
+            date: .now
+        )
     }
 
     // MARK: - Sections and memory
@@ -922,6 +952,7 @@ final class PhotoCoach {
     private func endSection(fixed issue: CoachIssue? = nil) {
         if let issue {
             memory.noteFixed(issue)
+            if !fixedSinceShot.contains(issue) { fixedSinceShot.append(issue) }
         }
         if let sectionStrength {
             memory.noteStrength(sectionStrength)
@@ -1086,7 +1117,7 @@ final class PhotoCoach {
                 !styles.contains($0) && unavailable[$0] == nil
             }
             if let next = Self.preferredNextStyle(for: analysis, from: candidates) {
-                return "Section complete. Try the \(next.title) style next."
+                return "Section complete. Try the \(next.title.keptTogether) style next."
             }
             return "Section complete. Try another topic from the menu."
         }
@@ -1094,7 +1125,7 @@ final class PhotoCoach {
         let topics = AdviceTopic.allCases
         guard topics.count > 1, let index = topics.firstIndex(of: topic) else { return nil }
         let next = topics[(index + 1) % topics.count]
-        return "Section complete. Try the \(next.title) topic next."
+        return "Section complete. Try the \(next.displayTitle) topic next."
     }
 
     /// Picks the style that best matches the scene, falling back to the first available one.

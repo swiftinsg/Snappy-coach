@@ -862,3 +862,102 @@ struct LensBlockTests {
         #expect(LensBlockFinder.find(cells: grid(corner: finger, size: 7)) == nil)
     }
 }
+
+/// Each photo's story, and grouping the gallery by the mode it was taken in.
+struct GalleryStoryTests {
+    private let record = ShotRecord(
+        topicID: AdviceTopic.light.rawValue,
+        styles: [],
+        scene: "Food",
+        wasReady: false,
+        fixed: ["found better light"],
+        praised: ["Soft side light"],
+        suggestion: "Turn so the window is beside you",
+        date: Date(timeIntervalSince1970: 1_000_000)
+    )
+
+    @Test func recordsSurviveSavingAndLoading() throws {
+        let data = try JSONEncoder().encode([ "photo": record ])
+        let loaded = try JSONDecoder().decode([String: ShotRecord].self, from: data)
+        #expect(loaded["photo"] == record)
+        #expect(loaded["photo"]?.topic == .light)
+    }
+
+    @Test func anUnknownModeIsTreatedAsAnEarlierPhoto() {
+        var renamed = record
+        renamed.topicID = "somethingRemoved"
+        #expect(renamed.topic == nil)
+    }
+
+    @Test @MainActor func coachRecordsWhatWasFixedUntilTheNextShot() {
+        let coach = PhotoCoach()
+        let shot = coach.shotRecord(topic: .composition, styles: [.ruleOfThirdsOne, .centre])
+        #expect(shot.topic == .composition)
+        #expect(shot.styles == CompositionGuide.allCases.filter([.ruleOfThirdsOne, .centre].contains).map(\.title))
+        #expect(coach.shotRecord(topic: .light, styles: [.ruleOfThirdsOne]).styles.isEmpty)
+        coach.noteShutter()
+        #expect(coach.fixedSinceShot.isEmpty)
+    }
+}
+
+extension GalleryStoryTests {
+    @Test func galleryGroupsPhotosByModeNewestFirst() {
+        // Newest first, as the gallery keeps them; "old" has no story.
+        let photos = ["c2", "l1", "old", "c1"]
+        let topics: [String: AdviceTopic] = ["c2": .composition, "c1": .composition, "l1": .light]
+        let sections = GallerySection.grouped(photos, topicOf: { topics[$0] })
+        #expect(sections.map(\.topic) == [.composition, .light, nil])
+        #expect(sections.first?.items == ["c2", "c1"])
+        #expect(sections.last?.items == ["old"])
+
+        let lightOnly = GallerySection.grouped(photos, topicOf: { topics[$0] }, filter: .light)
+        #expect(lightOnly.count == 1)
+        #expect(lightOnly.first?.items == ["l1"])
+    }
+}
+
+extension LensBlockTests {
+    /// A white ceiling under warm lamps: everything looks warm, and the ceiling is smooth and bright.
+    @Test func aCeilingInWarmLightIsNotAFinger() {
+        let room = LensBlockFinder.Cell(sharpness: 300, red: 0.55, green: 0.45, blue: 0.32)
+        let ceiling = LensBlockFinder.Cell(sharpness: 1, red: 0.85, green: 0.72, blue: 0.52)
+        // Across the top of the frame.
+        let band = (0..<LensBlockFinder.rows).map { row in
+            (0..<LensBlockFinder.columns).map { _ in row < 2 ? ceiling : room }
+        }
+        #expect(LensBlockFinder.find(cells: band) == nil)
+        // Even just in the corner, it's as warm as the rest of the room and brighter, so it's not a finger.
+        #expect(LensBlockFinder.find(cells: grid(corner: ceiling, rest: room)) == nil)
+    }
+
+    @Test func aDarkSmoothFingerInWarmLightIsStillFound() {
+        let room = LensBlockFinder.Cell(sharpness: 300, red: 0.55, green: 0.45, blue: 0.32)
+        // Darker than the room and redder than its warm cast.
+        let finger = LensBlockFinder.Cell(sharpness: 2, red: 0.38, green: 0.22, blue: 0.14)
+        #expect(LensBlockFinder.find(cells: grid(corner: finger, rest: room)) != nil)
+    }
+
+    @Test func somethingRunningEdgeToEdgeIsTheScene() {
+        let table = LensBlockFinder.Cell(sharpness: 2, red: 0.5, green: 0.28, blue: 0.18)
+        let band = (0..<LensBlockFinder.rows).map { row in
+            (0..<LensBlockFinder.columns).map { _ in row >= 6 ? table : scene }
+        }
+        #expect(LensBlockFinder.find(cells: band) == nil)
+    }
+}
+
+/// Names on screen wrap whole, never as "Per-spective".
+struct TextWrappingTests {
+    @Test func namesAreKeptTogetherButReadTheSame() {
+        let shown = "Angle & Perspective".keptTogether
+        #expect(!shown.contains(" "))
+        #expect(shown.replacingOccurrences(of: "\u{2060}", with: "").replacingOccurrences(of: "\u{00A0}", with: " ") == "Angle & Perspective")
+        #expect(AdviceTopic.anglePerspective.title == "Angle & Perspective")
+    }
+
+    @Test func unhyphenatedTextCanStillWrapBetweenWords() {
+        let shown = "One Point Perspective".unhyphenated
+        #expect(shown.components(separatedBy: " ").count == 3)
+        #expect(shown.contains("P\u{2060}e"))
+    }
+}

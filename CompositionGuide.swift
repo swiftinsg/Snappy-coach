@@ -400,7 +400,8 @@ struct CompositionPicker: View {
                             .foregroundStyle(isSelected ? .black : .yellow)
                     }
                     // Two lines are always reserved so every card is the same height.
-                    Text(guide.title)
+                    // Wraps between words, but never hyphenates a long one like "Perspective".
+                    Text(guide.title.unhyphenated)
                         .lineLimit(2, reservesSpace: true)
                         .multilineTextAlignment(.center)
                 }
