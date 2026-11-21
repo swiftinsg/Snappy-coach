@@ -40,6 +40,9 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     private var missedTracks = 0
     /// The followed object was lost, until the next tap.
     private var lostSelection = false
+    /// Goes up on every tap, clear and turn of the phone, so a lookup that finishes after
+    /// one of those knows it's out of date and doesn't bring back an old selection.
+    private var selectionGeneration = 0
 
     override init() {
         super.init()
@@ -56,10 +59,11 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         let tap = pendingTap
         pendingTap = nil
         let follower = tracker
+        let generation = selectionGeneration
         lock.unlock()
 
         if let tap {
-            startFollowing(at: tap, in: buffer, orientation: orientation)
+            startFollowing(at: tap, in: buffer, orientation: orientation, generation: generation)
         } else if let follower, Date().timeIntervalSince(lastTrack) > 0.1 {
             lastTrack = Date()
             follow(follower, in: buffer, orientation: orientation)
@@ -100,6 +104,7 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
                 pendingTap = nil
             }
             tracker = nil
+            selectionGeneration += 1
         }
         frameOrientation = orientation
         lock.unlock()
@@ -169,6 +174,7 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         lock.lock()
         pendingTap = point
         lostSelection = false
+        selectionGeneration += 1
         lock.unlock()
     }
 
@@ -178,6 +184,7 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         tracker = nil
         pendingTap = nil
         lostSelection = false
+        selectionGeneration += 1
         lock.unlock()
     }
 
@@ -200,7 +207,12 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         return Self.isSideways(orientation) ? height / width : width / height
     }
 
-    private func startFollowing(at point: CGPoint, in buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
+    private func startFollowing(
+        at point: CGPoint,
+        in buffer: CVPixelBuffer,
+        orientation: CGImagePropertyOrientation,
+        generation: Int
+    ) {
         // Looked up on an upright copy, so the object's outline lines up with the tap.
         var upright = CIImage(cvPixelBuffer: buffer).oriented(orientation)
         let scale = Self.longestSide / max(upright.extent.width, upright.extent.height)
@@ -216,7 +228,7 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
         request.trackingLevel = .accurate
         lock.lock()
         // A newer tap, a clear, or a turn of the phone while looking means this result is stale.
-        if pendingTap == nil, orientation == frameOrientation {
+        if generation == selectionGeneration, orientation == frameOrientation {
             selected = SelectedObject(box: found.box, frameAspect: CGFloat(image.width) / CGFloat(image.height), name: found.name)
             tracker = request
             sequenceHandler = VNSequenceRequestHandler()
@@ -553,6 +565,18 @@ final class PhotoCoach {
 
     var isReady: Bool { feedback?.isGoodEnough ?? false }
 
+    /// The Apple Intelligence notice is shown once per launch, not every time the topic changes.
+    private static var hasExplainedModel = false
+
+    /// Shows `text` instead of the advice for a while, unless something else replaced it first.
+    private func showNotice(_ text: String, for duration: Duration) {
+        notice = text
+        Task { [weak self] in
+            try? await Task.sleep(for: duration)
+            if self?.notice == text { self?.notice = nil }
+        }
+    }
+
     /// How often the model looks at the frame.
     private static let modelInterval: Duration = .seconds(2)
     /// How often measured-only topics refresh. Measuring is cheap, so it can be quicker.
@@ -633,14 +657,42 @@ final class PhotoCoach {
             session = makeSession(for: topic, styles: styles)
             session?.prewarm()
         }
+        // Say once why the tips are simpler when Apple Intelligence can't help.
+        if CoachRules.usesModel(topic), !Self.hasExplainedModel,
+           let text = CoachRules.modelNotice(for: SystemLanguageModel.default.availability) {
+            Self.hasExplainedModel = true
+            showNotice(text, for: .seconds(4))
+        }
 
         var isFirstPass = true
+        var lastFrame = ContinuousClock.now
+        // True while the notice says the camera is paused or missing, so it's cleared once it's back.
+        var showsCameraNotice = false
         while !Task.isCancelled {
             if !isFirstPass {
                 try? await Task.sleep(for: usesModel ? Self.modelInterval : Self.measureInterval)
             }
             isFirstPass = false
-            guard !Task.isCancelled, let frame = currentFrame(from: camera) else { continue }
+            guard !Task.isCancelled else { continue }
+
+            // A call, another app or heat: say so, and don't spend effort on a frozen frame.
+            if let pause = camera.pauseNotice {
+                notice = pause
+                showsCameraNotice = true
+                continue
+            }
+            guard let frame = currentFrame(from: camera) else {
+                if ContinuousClock.now - lastFrame > .seconds(3) {
+                    notice = "Waiting for the camera…"
+                    showsCameraNotice = true
+                }
+                continue
+            }
+            lastFrame = .now
+            if showsCameraNotice {
+                notice = nil
+                showsCameraNotice = false
+            }
 
             let readings = CameraReadings.read(from: camera)
             // The object the person tapped, mapped into the part of the frame the viewfinder shows.
@@ -1058,6 +1110,8 @@ final class PhotoCoach {
             Never describe people: call one person the subject and several people the subjects.
             Also name one thing that already works, in 2 to 5 words.\(praised)
             \(CoachRules.plainSurfaceRule)
+            Only report horizonThroughMiddle when you can see a real horizon, where land or sea meets the sky. \
+            Indoor scenes, desks and close-ups have no horizon.
             Brightness, sharpness and tilt are measured by the camera and handled separately, so never report them. \
             The measurements given with each photo, including where the subject is and how big it is, are always correct.
             Examples:
@@ -1129,9 +1183,11 @@ final class PhotoCoach {
                 }.content
             }
         } catch {
+            #if DEBUG
             if !Task.isCancelled {
                 print("Coach error: \(error)")
             }
+            #endif
             return nil
         }
     }

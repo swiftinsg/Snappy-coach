@@ -53,7 +53,10 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         if let error {
+            // The capture then finishes without photo data and reports that as a failure.
+            #if DEBUG
             print("Photo processing failed: \(error)")
+            #endif
             return
         }
         // RAW captures deliver the DNG and the processed image as separate photos.
@@ -80,26 +83,30 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
             completion(.failure(error))
             return
         }
-        guard var mainData = photoData ?? rawData else {
+        guard let capturedData = photoData ?? rawData else {
             completion(.failure(CaptureError.noPhotoData))
             return
         }
 
-        var movieURL = livePhotoMovieURL
         // The sensor shoots 4:3, so other ratios are a centre crop; styles are a colour grade.
         // Both edit the processed image only; RAW files are left untouched.
-        if aspectRatio != .fourByThree || style != .standard, photoData != nil,
-           let edited = Self.edit(mainData, ratio: aspectRatio, style: style, asJPEG: encodeAsJPEG) {
-            mainData = edited
-            // A re-encoded still no longer pairs with its Live Photo movie, so save it as a still.
-            movieURL = nil
-        }
+        let needsEdit = (aspectRatio != .fourByThree || style != .standard) && photoData != nil
         // Only keep the DNG alongside a processed image; a RAW-only capture is already mainData.
         let alternateRAW = photoData != nil ? rawData : nil
         let originalMovieURL = livePhotoMovieURL
         let completion = completion
+        let ratio = aspectRatio, style = style, asJPEG = encodeAsJPEG
 
+        // Editing a full-size photo takes a moment, so it happens here rather than in this
+        // callback, which would hold up the camera's next capture.
         Task {
+            var mainData = capturedData
+            var movieURL = originalMovieURL
+            if needsEdit, let edited = Self.edit(mainData, ratio: ratio, style: style, asJPEG: asJPEG) {
+                mainData = edited
+                // A re-encoded still no longer pairs with its Live Photo movie, so save it as a still.
+                movieURL = nil
+            }
             do {
                 let identifier = try await Self.save(photo: mainData, raw: alternateRAW, livePhotoMovie: movieURL)
                 completion(.success(identifier))
@@ -139,12 +146,33 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]),
               let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         let cropped = crop(image, to: ratio)
-        let styled = apply(style, to: cropped)
+        // Filters drop the photo's metadata, so put it back: date, place, camera and lens.
+        let styled = apply(style, to: cropped).settingProperties(metadata(from: image.properties))
 
         if asJPEG {
             return context.jpegRepresentation(of: styled, colorSpace: colorSpace)
         }
         return context.heifRepresentation(of: styled, format: .RGBA8, colorSpace: colorSpace)
+    }
+
+    /// The original photo's metadata, fixed up for the edited image: it's already turned
+    /// upright, and cropping changed its size, so those fields are reset or dropped.
+    static func metadata(from properties: [String: Any]) -> [String: Any] {
+        var metadata = properties
+        metadata[kCGImagePropertyOrientation as String] = 1
+        metadata.removeValue(forKey: kCGImagePropertyPixelWidth as String)
+        metadata.removeValue(forKey: kCGImagePropertyPixelHeight as String)
+        if var exif = metadata[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+            exif.removeValue(forKey: kCGImagePropertyExifPixelXDimension as String)
+            exif.removeValue(forKey: kCGImagePropertyExifPixelYDimension as String)
+            metadata[kCGImagePropertyExifDictionary as String] = exif
+        }
+        // The TIFF orientation must agree with the main one.
+        if var tiff = metadata[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+            tiff[kCGImagePropertyTIFFOrientation as String] = 1
+            metadata[kCGImagePropertyTIFFDictionary as String] = tiff
+        }
+        return metadata
     }
 
     /// Approximates the iPhone's Photographic Styles with a simple colour grade.

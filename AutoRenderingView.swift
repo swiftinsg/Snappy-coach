@@ -17,6 +17,11 @@ struct AutoRenderingView: View {
     @State private var objectSelection = ObjectSelection()
     @State private var gallery = PhotoGallery()
     @State private var isGalleryPresented = false
+    /// How far the zoom row, composition styles and shutter reach up from the bottom of the screen,
+    /// so the sideways advice card can stop short of them.
+    @State private var bottomControlsHeight: CGFloat = 0
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     /// Remembered between launches.
     @AppStorage("adviceTopic") private var adviceTopic: AdviceTopic = .composition
     /// Raw values of the selected composition styles, joined with commas, so the selection persists.
@@ -354,10 +359,87 @@ struct AutoRenderingView: View {
                         .shadow(color: .black.opacity(0.5), radius: 2)
                 }
                 CoachFeedbackView(feedback: feedback, showsExplanation: isAdviceExplained)
+            } else {
+                // The first look takes a moment; say so rather than showing an empty space.
+                CoachTipView(text: "Looking at your shot…")
             }
         }
+        // The coach's raw numbers, for tuning. Only in development builds, so a long press in the
+        // released app never shows them.
+        #if DEBUG
         .onLongPressGesture {
             isCoachDebugOn.toggle()
+        }
+        #endif
+    }
+
+    /// Room at each end of the advice card when the phone is held sideways. The card runs along
+    /// the screen's long side, so one end points at the bottom of the phone, where the zoom row,
+    /// composition styles and shutter are: that end stops short of them. Turned clockwise, the
+    /// card's trailing end is at the bottom of the phone; turned the other way, its leading end.
+    private var sidewaysAdviceInsets: EdgeInsets {
+        let clear = max(40, bottomControlsHeight + 12)
+        return camera.holdOrientation == .landscapeLeft
+            ? EdgeInsets(top: 0, leading: 40, bottom: 0, trailing: clear)
+            : EdgeInsets(top: 0, leading: clear, bottom: 0, trailing: 40)
+    }
+
+    /// Shown over the black viewfinder when camera access is off.
+    private var cameraAccessMessage: some View {
+        ContentUnavailableView {
+            Label("Camera access is off", systemImage: "camera.fill")
+        } description: {
+            Text(camera.cameraAccess == .restricted
+                 ? "Camera access is restricted on this iPhone."
+                 : "Allow camera access to take photos and get coaching.")
+        } actions: {
+            if camera.cameraAccess == .denied {
+                Button("Open Settings", action: openSettings)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .foregroundStyle(.white)
+    }
+
+    /// A problem that stays until it's read, with a way to fix it in Settings when that's where the fix is.
+    private func problemBanner(_ problem: CameraProblem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+                .accessibilityHidden(true)
+            Text(problem.message)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+            if problem.opensSettings {
+                Button("Settings", action: openSettings)
+                    .font(.subheadline.bold())
+                    .buttonStyle(.borderedProminent)
+                    .frame(minHeight: 44)
+            }
+            Button {
+                camera.clearProblem()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(width: 44, height: 44)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(.leading, 16)
+        .padding(.vertical, 4)
+        .frame(maxWidth: 360)
+        .glassEffect(.regular.tint(.black.opacity(0.5)), in: .rect(cornerRadius: 18))
+        .rotationEffect(camera.holdOrientation.uiRotation)
+        .transition(.opacity)
+    }
+
+    private func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            openURL(url)
         }
     }
 
@@ -483,6 +565,13 @@ struct AutoRenderingView: View {
                     }
                 }
                 .animation(.snappy, value: coach.feedback?.move)
+                // Without camera access the viewfinder is black, so explain why and how to fix it.
+                .overlay {
+                    if camera.cameraAccess == .denied || camera.cameraAccess == .restricted {
+                        cameraAccessMessage
+                            .rotationEffect(camera.holdOrientation.uiRotation)
+                    }
+                }
                 // Held sideways, the advice reads along the long side, at the bottom as the person sees it.
                 .overlay {
                     if camera.holdOrientation.isLandscape, !controls.isEditing {
@@ -492,7 +581,7 @@ struct AutoRenderingView: View {
                                 adviceArea
                                     .onboardingAnchor(.advice)
                             }
-                            .padding(.horizontal, 40)
+                            .padding(sidewaysAdviceInsets)
                             .padding(.bottom, 16)
                         }
                     }
@@ -561,6 +650,12 @@ struct AutoRenderingView: View {
                         .rotationEffect(camera.holdOrientation.uiRotation)
                         .transition(.opacity)
                         .allowsHitTesting(false)
+                }
+
+                // Something the person needs to fix, like Photos access. It stays longer than the
+                // confirmation banner, and links to Settings when that's where the fix is.
+                if let problem = camera.problem {
+                    problemBanner(problem)
                 }
 
                 // What a composition style means, after pressing and holding its card.
@@ -656,6 +751,9 @@ struct AutoRenderingView: View {
                         }
                     }
                     .padding(.bottom, 20)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        bottomControlsHeight = height
+                    }
                 }
             }
             .padding(.horizontal)
@@ -751,6 +849,17 @@ struct AutoRenderingView: View {
         .fullScreenCover(isPresented: $isGalleryPresented) {
             GalleryView(gallery: gallery)
         }
+        .task(id: camera.problem) {
+            guard camera.problem != nil else { return }
+            try? await Task.sleep(for: .seconds(6))
+            camera.clearProblem()
+        }
+        // Coming back to the app: make sure the camera is running again.
+        .onChange(of: scenePhase) {
+            if scenePhase == .active {
+                camera.resumeIfNeeded()
+            }
+        }
         .task(id: statusMessage) {
             guard statusMessage != nil else { return }
             try? await Task.sleep(for: .seconds(1.5))
@@ -813,6 +922,8 @@ struct AutoRenderingView: View {
         .animation(.snappy, value: activeAdjustment)
         .animation(.snappy, value: adviceTopic)
         .animation(.easeInOut, value: statusMessage)
+        .animation(.easeInOut, value: camera.problem)
+        .animation(.easeInOut, value: coach.notice)
         .animation(.easeInOut, value: compositionExplanation)
         .animation(.easeInOut, value: coach.feedback)
         .animation(.snappy, value: isAdviceCollapsed)

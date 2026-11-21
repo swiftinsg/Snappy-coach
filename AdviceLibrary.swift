@@ -367,7 +367,7 @@ extension CoachIssue {
     private func sceneAdvice(for scene: SceneType?) -> Advice? {
         switch (self, scene) {
         case (.clutteredBackground, .food):
-            Advice(action: "Move the plate so only the table is behind it", why: "A plain surface keeps the eye on the food.")
+            Advice(action: "Move it so only the table is behind it", why: "A plain surface keeps the eye on the food.")
         case (.horizonThroughMiddle, .landscape):
             Advice(action: "Put the horizon on the bottom third for more sky", why: "Giving the sky or the land two thirds makes a clear choice.", thirdsLines: [.bottom])
         case (.subjectTooSmall, .nature):
@@ -375,21 +375,19 @@ extension CoachIssue {
         case (.harshContrast, .people):
             Advice(action: "Move the subject into shade for soft light", why: "Shade stops squinting and harsh shadows on the face.")
         case (.tooDark, .food), (.highISO, .food):
-            Advice(action: "Move the plate next to a window", why: "Soft window light shows the texture of food.")
+            Advice(action: "Move the food next to a window", why: "Soft window light shows the texture of food.")
         case (.distractingEdges, .food):
             Advice(action: "Move cups and phones out of the frame", why: "Only what belongs to the meal should share the plate's space.")
         case (.subjectCutOff, .people):
             Advice(action: "Step back so you don't crop at joints", why: "Cutting at the neck, elbows or knees looks like a mistake.")
         case (.clutteredBackground, .people):
             Advice(action: "Move them a few steps away from the background", why: "Distance softens the background and lifts the subject off it.")
-        case (.subjectTooSmall, .landscape), (.tooMuchEmptySpace, .landscape):
-            Advice(action: "Add a rock or flower in the foreground", why: "Something close gives a landscape depth and a place to start.")
         case (.distractingEdges, .city):
             Advice(action: "Step closer to drop cars and signs at the edges", why: "Busy streets crowd the edges and pull the eye out.")
         case (.linesDontLead, .city):
             Advice(action: "Stand so the street runs toward the subject", why: "Streets and kerbs are lines that lead the eye.")
         case (.clutteredBackground, .nature):
-            Advice(action: "Get low so the sky is behind it", why: "A plain sky makes a flower or animal stand out.")
+            Advice(action: "Change your angle so a plain area is behind it", why: "A plain background makes a flower or animal stand out.")
         default:
             nil
         }
@@ -629,6 +627,13 @@ nonisolated enum CoachRules {
     /// measured instead), the Negative Space size, which is measured too, and the vertex tip,
     /// whose Single and Double Vertex styles were removed.
     static let unusedModelIssues: Set<VisualIssue> = [.noClearSubject, .tooMuchEmptySpace, .subjectTooBig, .noClearVertex]
+    /// Below this brightness spread (see `SceneAnalysis.subjectContrast`) the subject is too plain
+    /// to tell whether it's in focus.
+    static let flatContrast = 0.05
+    /// Faces smaller than this share of the frame's height are a full-body or distant shot, where
+    /// the space above the head is part of the scene, not "too much headroom".
+    static let portraitFaceHeight = 0.06
+
     /// Below this share of edges (see `SceneAnalysis.backgroundBusyness`) the background is
     /// measurably plain, so the model's "cluttered background" isn't believed.
     static let plainBackgroundLimit = 0.08
@@ -651,6 +656,23 @@ nonisolated enum CoachRules {
         }
         guard !handled.isEmpty else { return nil }
         return "Already handled by the camera: " + handled.joined(separator: "; ") + "."
+    }
+
+    /// What to tell the person when Apple Intelligence can't help, so they know why the tips are simpler.
+    /// Nil when it's available.
+    static func modelNotice(for availability: SystemLanguageModel.Availability) -> String? {
+        switch availability {
+        case .available:
+            return nil
+        case .unavailable(.appleIntelligenceNotEnabled):
+            return "Apple Intelligence is off, so tips use camera measurements only. Turn it on in Settings for smarter tips."
+        case .unavailable(.deviceNotEligible):
+            return "This iPhone can't run Apple Intelligence, so tips use camera measurements only."
+        case .unavailable(.modelNotReady):
+            return "Apple Intelligence is still getting ready. Tips use camera measurements for now."
+        case .unavailable:
+            return "Apple Intelligence isn't available, so tips use camera measurements only."
+        }
     }
 
     /// Composition shows one tip, because its tips can come from the rules or the model and two
@@ -715,6 +737,15 @@ nonisolated enum CoachRules {
     /// Whether the model's verdict fits what the camera measured. The model sometimes calls plain
     /// glass doors or a wall a distraction, so background verdicts must agree with the measurement.
     static func believes(_ issue: CoachIssue, detail: IssueDetail?, analysis: SceneAnalysis) -> Bool {
+        // A horizon only exists outdoors, where land or sea meets the sky. The model sometimes
+        // imagines one in a desk or room, so it's only believed when Vision sees a wide outdoor scene.
+        if issue == .horizonThroughMiddle {
+            return analysis.isWideScene
+        }
+        // Elbows and knees belong to people: a cup can't be "cropped at the joints".
+        if issue == .jointsCropped {
+            return analysis.personCount > 0
+        }
         guard issue == .clutteredBackground || issue == .distractingEdges else { return true }
         let busyness = analysis.backgroundBusyness
         let namesPlainSurface = detail?.thing.map { name in
@@ -797,7 +828,8 @@ nonisolated enum CoachRules {
         case .focus:
             // Shake blurs everything, so fix it before blaming the focus.
             if let shake = a.shake, shake >= shakeThreshold { found.append(.cameraShaking) }
-            if a.subjectSharpness < softThreshold { found.append(.subjectSoft) }
+            // A plain subject has little detail even when it's in focus, so it can't be called soft.
+            if a.subjectSharpness < softThreshold, !a.subjectIsFlat { found.append(.subjectSoft) }
             // A slow shutter is only a problem while the phone moves. The tip is to hold still,
             // and holding still is what clears it; the shutter speed itself can't be changed by hand.
             let isSteady = a.shake.map { $0 < shakeThreshold / 2 } ?? false
@@ -810,17 +842,25 @@ nonisolated enum CoachRules {
             if let pitch = a.pitch {
                 // Wide limits, so holding the phone near one doesn't flick the tip on and off.
                 if pitch < -35, a.personCount > 0 { found.append(.shootingDown) }
-                if pitch > 25 { found.append(.pointingUp) }
+                // Tilting up only bends straight lines like walls and buildings. Shooting up at
+                // the sky, a tree or a bird is fine.
+                if pitch > 25, a.scenes.contains(.city) { found.append(.pointingUp) }
             }
         case .composition:
             // Everyone counts: any head at the top edge is cut off, and headroom is
             // measured above the highest head, so it works for groups too.
             if a.headAtTopEdge {
                 found.append(.headCutOff)
-            } else if let topmost = a.faces.min(by: { $0.minY < $1.minY }), topmost.minY > 0.35 {
+            } else if let topmost = a.faces.min(by: { $0.minY < $1.minY }), topmost.minY > 0.35,
+                      // Small faces are a full-body or distant shot: the space above is the scene.
+                      topmost.height >= portraitFaceHeight, !a.isWideScene {
                 found.append(.tooMuchHeadroom)
             }
-            if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene { found.append(.subjectTooSmall) }
+            // Negative Space wants a small subject, so "get closer" would undo the style.
+            if let subject = a.subject, subject.width * subject.height < 0.02, !a.isWideScene,
+               !styles.contains(.negativeSpace) {
+                found.append(.subjectTooSmall)
+            }
             // Negative Space wants a small subject in lots of empty space.
             if styles.contains(.negativeSpace), let subject = a.subject,
                Double(subject.width * subject.height) > negativeSpaceLimit {
@@ -848,7 +888,8 @@ nonisolated enum CoachRules {
             if a.tilt != nil, !problems.contains(.phoneTilted) { good.append("Phone is level") }
         case .composition:
             // Other framing strengths come from the model and the target guide, not from how the phone is held.
-            if !a.faces.isEmpty, !problems.contains(.headCutOff), !problems.contains(.tooMuchHeadroom) {
+            let isPortrait = a.faces.contains { $0.height >= portraitFaceHeight } && !a.isWideScene
+            if isPortrait, !problems.contains(.headCutOff), !problems.contains(.tooMuchHeadroom) {
                 good.append("Good headroom")
             }
         }

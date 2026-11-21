@@ -7,6 +7,8 @@
 
 import Testing
 import CoreGraphics
+import ImageIO
+import FoundationModels
 import SwiftUI
 import UIKit
 @testable import Grp_6pm_Photo_App
@@ -55,7 +57,7 @@ struct CoachRulesTests {
     }
 
     @Test func darkSubjectOnBrightBackgroundIsBacklit() {
-        let backlit = scene(subjectBrightness: 0.2, backgroundBrightness: 0.8)
+        let backlit = scene(highlightClip: 0.05, subjectBrightness: 0.2, backgroundBrightness: 0.8)
         #expect(backlit.isBacklit)
         #expect(CoachRules.issues(for: .light, in: backlit).contains(.backlitSubject))
         // The same problem gets topic-specific advice.
@@ -94,7 +96,7 @@ struct CoachRulesTests {
     }
 
     @Test func brighteningABacklitSubjectClearsTheExposureTip() {
-        #expect(CoachRules.issues(for: .exposure, in: scene(subjectBrightness: 0.2, backgroundBrightness: 0.8)).contains(.backlitSubject))
+        #expect(CoachRules.issues(for: .exposure, in: scene(highlightClip: 0.05, subjectBrightness: 0.2, backgroundBrightness: 0.8)).contains(.backlitSubject))
         // After dragging Exposure right the background is still brighter, but the subject is fine.
         #expect(!CoachRules.issues(for: .exposure, in: scene(subjectBrightness: 0.5, backgroundBrightness: 0.95)).contains(.backlitSubject))
     }
@@ -440,7 +442,7 @@ struct CoachRulesTests {
             return analysis
         }
         #expect(CoachIssue.subjectCutOff.advice(for: .composition, analysis: kind(.people)).action.contains("joints"))
-        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: kind(.nature)).action.contains("sky"))
+        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: kind(.nature)).action.contains("plain area"))
         #expect(CoachIssue.linesDontLead.advice(for: .composition, analysis: kind(.city)).action.contains("street"))
         #expect(CoachIssue.distractingEdges.advice(for: .composition, analysis: kind(.food)).action.contains("cups"))
     }
@@ -472,6 +474,82 @@ struct CoachRulesTests {
         // Composition mixes rule and model tips, so it shows one; other topics' tips are all rules.
         #expect(!CoachRules.showsSecondTip(for: .composition))
         #expect(CoachRules.showsSecondTip(for: .exposure))
+    }
+
+    @Test func coachSaysWhyAppleIntelligenceIsMissing() {
+        #expect(CoachRules.modelNotice(for: .available) == nil)
+        #expect(CoachRules.modelNotice(for: .unavailable(.appleIntelligenceNotEnabled))?.contains("Turn it on in Settings") == true)
+        #expect(CoachRules.modelNotice(for: .unavailable(.deviceNotEligible))?.contains("can't run") == true)
+        #expect(CoachRules.modelNotice(for: .unavailable(.modelNotReady))?.contains("getting ready") == true)
+    }
+
+    @Test func editedPhotosKeepTheirMetadata() {
+        let original: [String: Any] = [
+            kCGImagePropertyOrientation as String: 6,
+            kCGImagePropertyPixelWidth as String: 4032,
+            kCGImagePropertyPixelHeight as String: 3024,
+            kCGImagePropertyGPSDictionary as String: [kCGImagePropertyGPSLatitude as String: 1.29],
+            kCGImagePropertyExifDictionary as String: [
+                kCGImagePropertyExifLensModel as String: "iPhone back camera",
+                kCGImagePropertyExifPixelXDimension as String: 4032,
+            ],
+            kCGImagePropertyTIFFDictionary as String: [kCGImagePropertyTIFFOrientation as String: 6],
+        ]
+        let kept = PhotoCaptureProcessor.metadata(from: original)
+        // The edited pixels are already upright and cropped, so those fields are reset or dropped.
+        #expect(kept[kCGImagePropertyOrientation as String] as? Int == 1)
+        #expect(kept[kCGImagePropertyPixelWidth as String] == nil)
+        let exif = kept[kCGImagePropertyExifDictionary as String] as? [String: Any]
+        #expect(exif?[kCGImagePropertyExifPixelXDimension as String] == nil)
+        #expect(exif?[kCGImagePropertyExifLensModel as String] as? String == "iPhone back camera")
+        let tiff = kept[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
+        #expect(tiff?[kCGImagePropertyTIFFOrientation as String] as? Int == 1)
+        // Where it was taken is kept.
+        #expect(kept[kCGImagePropertyGPSDictionary as String] != nil)
+    }
+
+    @Test func horizonTipNeedsAnOutdoorScene() {
+        // A computer on a desk has no horizon, whatever the model says.
+        #expect(!CoachRules.believes(.horizonThroughMiddle, detail: nil, analysis: scene()))
+        var landscape = scene()
+        landscape.scene = .landscape
+        #expect(CoachRules.believes(.horizonThroughMiddle, detail: nil, analysis: landscape))
+    }
+
+    @Test func adviceOnlyFiresWhereItMakesSense() {
+        // A dark laptop on a white desk is darker than the desk, but it isn't backlit.
+        #expect(!scene(subjectBrightness: 0.15, backgroundBrightness: 0.8).isBacklit)
+        #expect(scene(subjectBrightness: 0.15, backgroundBrightness: 0.9).isBacklit)
+
+        // A plain mug can't be called soft: there's no detail to judge.
+        var plainMug = scene(sharpness: 10)
+        plainMug.subjectContrast = 0.02
+        #expect(!CoachRules.issues(for: .focus, in: plainMug).contains(.subjectSoft))
+        var blurryBook = scene(sharpness: 10)
+        blurryBook.subjectContrast = 0.15
+        #expect(CoachRules.issues(for: .focus, in: blurryBook).contains(.subjectSoft))
+
+        // Pointing up only matters for buildings, not the sky or a tree.
+        #expect(!CoachRules.issues(for: .anglePerspective, in: scene(pitch: 40)).contains(.pointingUp))
+        var building = scene(pitch: 40)
+        building.scene = .city
+        #expect(CoachRules.issues(for: .anglePerspective, in: building).contains(.pointingUp))
+
+        // A small, distant face is a full-body shot, not too much headroom.
+        let farAway = CGRect(x: 0.45, y: 0.5, width: 0.03, height: 0.04)
+        #expect(!CoachRules.issues(for: .composition, in: scene(faces: [farAway])).contains(.tooMuchHeadroom))
+
+        // Negative Space wants the subject small.
+        let tiny = scene(subject: CGRect(x: 0.6, y: 0.6, width: 0.1, height: 0.1))
+        #expect(CoachRules.issues(for: .composition, in: tiny).contains(.subjectTooSmall))
+        #expect(!CoachRules.issues(for: .composition, in: tiny, styles: [.negativeSpace]).contains(.subjectTooSmall))
+
+        // Joints belong to people.
+        #expect(!CoachRules.believes(.jointsCropped, detail: nil, analysis: scene()))
+        #expect(CoachRules.believes(.jointsCropped, detail: nil, analysis: scene(faces: [CGRect(x: 0.4, y: 0.2, width: 0.2, height: 0.2)])))
+
+        // Desks and toy cars aren't city scenes.
+        #expect(SceneType.classify(labels: [("structure", 0.8), ("car", 0.6)], faces: []) == .object)
     }
 
     @Test func subjectCutOffNeedsAnEdge() {
@@ -694,7 +772,7 @@ struct CoachRulesTests {
     @Test func adviceFitsTheScene() {
         var food = scene()
         food.scene = .food
-        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: food).action.contains("plate"))
+        #expect(CoachIssue.clutteredBackground.advice(for: .composition, analysis: food).action.contains("table"))
         var landscape = scene()
         landscape.scene = .landscape
         #expect(CoachIssue.horizonThroughMiddle.advice(for: .composition, analysis: landscape).action.contains("bottom third"))

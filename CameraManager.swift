@@ -46,6 +46,37 @@ class CameraManager {
     private(set) var countdown: Int?
     /// Photos library identifier of the most recently saved photo, picked up by the gallery.
     private(set) var lastSavedAssetIdentifier: String?
+
+    // MARK: - When the camera can't work
+
+    /// Whether the person allowed camera access. Shown as an explanation when they didn't.
+    private(set) var cameraAccess: AVAuthorizationStatus = .notDetermined
+    /// A phone call, Siri or another app has the camera for now.
+    private(set) var isInterrupted = false
+    /// The phone is hot enough that the coach should rest.
+    private(set) var isOverheating = false
+    /// Something went wrong that the person needs to know about, and may be able to fix.
+    private(set) var problem: CameraProblem?
+    /// True once the session has been set up, so starting again doesn't add inputs twice.
+    private var isConfigured = false
+    /// Watch for interruptions and heat while the camera runs.
+    private var lifecycleTasks: [Task<Void, Never>] = []
+
+    /// True when the coach shouldn't spend effort on frames: the camera is paused or the phone is hot.
+    var isCoachPaused: Bool {
+        isInterrupted || isOverheating
+    }
+
+    /// What to tell the person while the coach is paused, or nil when it isn't.
+    var pauseNotice: String? {
+        if isInterrupted { return "Camera paused while a call or another app is using it." }
+        if isOverheating { return "Your iPhone is warm, so coaching is paused to let it cool down." }
+        return nil
+    }
+
+    func clearProblem() {
+        problem = nil
+    }
     /// Goes up by one each time the sensor fires, so the view can blink the screen.
     private(set) var shutterCount = 0
     /// True while a Camera Control slider fills the screen, so the app can hide its own controls.
@@ -109,9 +140,8 @@ class CameraManager {
 
     func configure(){
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for:.video, position:.back) else{
-            print("Sorry the camera got munched")
+            problem = CameraProblem(message: "The camera couldn't start. Close the app and open it again.", opensSettings: false)
             return
-            
         }
         device = camera
         session.beginConfiguration()
@@ -123,7 +153,8 @@ class CameraManager {
                 videoInput = input
             }
         } catch {
-            print("Something went wrong: \(error)")
+            // Without an input the viewfinder stays black, so say so rather than failing quietly.
+            problem = CameraProblem(message: "The camera couldn't start. Close the app and open it again.", opensSettings: false)
         }
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
@@ -180,19 +211,70 @@ class CameraManager {
     }
 
     func start() async {
-        let granted = await AVCaptureDevice.requestAccess(for:.video)
-        guard granted else {
-            print("sorry ur device does not like us")
-            return
+        _ = await AVCaptureDevice.requestAccess(for: .video)
+        // Denied or restricted: the screen explains it and links to Settings.
+        cameraAccess = AVCaptureDevice.authorizationStatus(for: .video)
+        guard cameraAccess == .authorized else { return }
+
+        if !isConfigured {
+            configure()
+            isConfigured = true
         }
-       
-        configure()
         trackHoldOrientation()
+        watchLifecycle()
+        runSession()
+    }
+
+    /// Starts the session if it isn't running, e.g. after coming back to the app.
+    func resumeIfNeeded() {
+        guard isConfigured, cameraAccess == .authorized else { return }
+        runSession()
+    }
+
+    private func runSession() {
         // startRunning() blocks, so keep it off the main thread.
         let session = session
         sessionQueue.async {
-            session.startRunning()
+            if !session.isRunning {
+                session.startRunning()
+            }
         }
+    }
+
+    /// Follows interruptions (calls, Siri, other apps), camera errors and the phone's heat,
+    /// so the screen can say what's happening and the coach can rest.
+    private func watchLifecycle() {
+        guard lifecycleTasks.isEmpty else { return }
+        isOverheating = Self.isHot(ProcessInfo.processInfo.thermalState)
+        let center = NotificationCenter.default
+        lifecycleTasks = [
+            Task { [weak self] in
+                for await _ in center.notifications(named: AVCaptureSession.wasInterruptedNotification) {
+                    self?.isInterrupted = true
+                }
+            },
+            Task { [weak self] in
+                for await _ in center.notifications(named: AVCaptureSession.interruptionEndedNotification) {
+                    self?.isInterrupted = false
+                }
+            },
+            Task { [weak self] in
+                // After a media-services reset or another error, the session has stopped: start it again.
+                for await _ in center.notifications(named: AVCaptureSession.runtimeErrorNotification) {
+                    self?.runSession()
+                }
+            },
+            Task { [weak self] in
+                for await _ in center.notifications(named: ProcessInfo.thermalStateDidChangeNotification) {
+                    self?.isOverheating = Self.isHot(ProcessInfo.processInfo.thermalState)
+                }
+            },
+        ]
+    }
+
+    /// Serious or critical heat: the coach rests so the phone can cool down.
+    private static func isHot(_ state: ProcessInfo.ThermalState) -> Bool {
+        state == .serious || state == .critical
     }
 
     // MARK: - Switching cameras and lenses
@@ -710,12 +792,16 @@ class CameraManager {
     }
 
     private func capturePhoto() async -> String? {
-        guard device != nil, session.isRunning else { return "The camera isn't available" }
+        guard device != nil, session.isRunning else {
+            problem = CameraProblem(message: "The camera isn't available right now", opensSettings: false)
+            return nil
+        }
 
         // Read/write access (not add-only) so the in-app gallery can show and delete these photos.
         let access = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard access == .authorized || access == .limited else {
-            return "Allow Photos access in Settings to save photos"
+            problem = CameraProblem(message: "Allow Photos access in Settings to save photos", opensSettings: true)
+            return nil
         }
 
         // Keep the photo level with the horizon, whichever way the phone is held.
@@ -742,7 +828,8 @@ class CameraManager {
                     self?.lastSavedAssetIdentifier = assetIdentifier
                     continuation.resume(returning: nil)
                 case .failure(let error):
-                    continuation.resume(returning: "Couldn't save photo: \(error.localizedDescription)")
+                    self?.problem = CameraProblem(message: "Couldn't save the photo: \(error.localizedDescription)", opensSettings: false)
+                    continuation.resume(returning: nil)
                 }
             }
             let processor = PhotoCaptureProcessor(
@@ -843,7 +930,9 @@ class CameraManager {
             change(device)
             device.unlockForConfiguration()
         } catch {
+            #if DEBUG
             print("Couldn't configure the camera: \(error)")
+            #endif
         }
     }
 }
@@ -952,4 +1041,11 @@ nonisolated enum HoldOrientation: Equatable, Sendable {
         case .landscapeRight: isFrontCamera ? .upMirrored : .down
         }
     }
+}
+
+/// Something the person needs to know went wrong, like Photos access being off.
+struct CameraProblem: Equatable {
+    let message: String
+    /// True when the fix is in Settings, so the message offers a button to go there.
+    let opensSettings: Bool
 }

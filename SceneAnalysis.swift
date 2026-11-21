@@ -227,8 +227,10 @@ nonisolated enum SceneType: String, CaseIterable, Sendable {
                 "sushi", "salad", "coffee", "beverage", "breakfast", "sandwich", "pasta", "plate", "dish"],
         .landscape: ["landscape", "mountain", "beach", "shore", "sky", "sunset", "sunrise", "desert", "lake",
                      "ocean", "sea", "hill", "valley", "field", "horizon", "waterfall", "cloud", "snow"],
-        .city: ["cityscape", "city", "building", "skyscraper", "street", "structure", "bridge", "road",
-                "vehicle", "car", "architecture", "tower", "house", "downtown", "urban"],
+        // Not "structure", "vehicle" or "car": Vision gives those to desks, rooms and toy cars too,
+        // which then got city advice, like a horizon tip for a computer.
+        .city: ["cityscape", "city", "building", "skyscraper", "street", "bridge", "road",
+                "architecture", "tower", "house", "downtown", "urban"],
         .nature: ["plant", "flower", "tree", "foliage", "forest", "animal", "bird", "insect", "leaf",
                   "garden", "grass", "mammal", "cat", "dog", "butterfly"],
     ]
@@ -305,6 +307,8 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// How busy the background right around the subject is: the share of it on a clear edge, 0...1.
     /// Nil without a subject. Walls, doors and glass score low; clutter scores high.
     var backgroundBusyness: Double? = nil
+    /// How much the brightness varies inside the subject, 0...0.5. Low for plain, smooth things.
+    var subjectContrast: Double? = nil
 
     /// How many people are in the frame, whether their faces or only their bodies show.
     var personCount: Int {
@@ -339,7 +343,16 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// The subject is clearly darker than what's behind it.
     var isBacklit: Bool {
         guard let subjectBrightness, let backgroundBrightness else { return false }
-        return backgroundBrightness - subjectBrightness > 0.25
+        // A dark laptop on a white desk is darker than its background but isn't backlit. Light
+        // from behind shows as a glaring background: blown-out patches, or very bright overall.
+        let brightBehind = highlightClip > 0.02 || backgroundBrightness > 0.85
+        return brightBehind && backgroundBrightness - subjectBrightness > 0.25
+    }
+
+    /// The subject has too little detail to judge sharpness: a plain mug or a wall looks the
+    /// same in focus or not, so the focus tip would be a guess.
+    var subjectIsFlat: Bool {
+        (subjectContrast ?? 1) < CoachRules.flatContrast
     }
 
     /// Short facts for the model and the debug overlay.
@@ -407,6 +420,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             String(format: "EV %.2f  1/%.0fs  ISO %.0f", readings.exposureOffset ?? 0, 1 / (readings.exposureSeconds ?? 1), readings.iso ?? 0),
             String(format: "pitch %.0f°  tilt %.1f°  shake %.2f", pitch ?? 0, tilt ?? 0, shake ?? 0),
             String(format: "background busy %.3f (plain below %.3f)", backgroundBusyness ?? -1, CoachRules.plainBackgroundLimit),
+            String(format: "subject contrast %.3f (flat below %.3f)", subjectContrast ?? -1, CoachRules.flatContrast),
         ].joined(separator: "\n")
     }
 
@@ -463,7 +477,8 @@ extension SceneAnalysis {
                 gray.mean(in: CGRect(x: Double(cell % 8) / 8, y: Double(cell / 8) / 8, width: 1.0 / 8, height: 1.0 / 8))
             },
             backdrop: backdrop,
-            backgroundBusyness: subject.map { gray.edgeShare(in: $0.insetBy(dx: -0.15, dy: -0.15), excluding: $0) }
+            backgroundBusyness: subject.map { gray.edgeShare(in: $0.insetBy(dx: -0.15, dy: -0.15), excluding: $0) },
+            subjectContrast: gray.contrast(in: region)
         )
     }
 
@@ -564,6 +579,23 @@ private nonisolated struct GrayImage {
         guard count > 0 else { return 0 }
         let average = sum / count
         return sumOfSquares / count - average * average
+    }
+
+    /// The spread of brightness inside `rect` (standard deviation, 0...0.5).
+    func contrast(in rect: CGRect) -> Double {
+        let (xs, ys) = bounds(of: rect)
+        var sum = 0.0
+        var sumOfSquares = 0.0
+        for y in ys {
+            for x in xs {
+                let value = Double(pixels[y * width + x]) / 255
+                sum += value
+                sumOfSquares += value * value
+            }
+        }
+        let count = Double(xs.count * ys.count)
+        let mean = sum / count
+        return max(0, sumOfSquares / count - mean * mean).squareRoot()
     }
 
     /// Share of pixels inside `rect` but outside `excluded` that sit on a clear edge, 0...1.

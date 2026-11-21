@@ -437,7 +437,7 @@ extension VNRequest {
 }
 
 /// Where a composition style wants the subject.
-enum SubjectPlacement: Equatable {
+nonisolated enum SubjectPlacement: Equatable, Sendable {
     /// The nearest of the four points where the thirds lines cross.
     case thirdsPoint
     /// A vertical thirds line (x is 1/3 or 2/3), at whatever height the subject is.
@@ -692,8 +692,15 @@ final class SubjectGuide {
         camera.frameGrabber.setTracksSubject(placement != nil)
         guard let placement else { return }
 
+        var wasPaused = false
         while !Task.isCancelled {
-            if let found = latestSubject(from: camera) {
+            // A call, another app or heat: stop looking for the subject until the camera is back.
+            let isPaused = camera.isCoachPaused
+            if isPaused != wasPaused {
+                camera.frameGrabber.setTracksSubject(!isPaused)
+                wasPaused = isPaused
+            }
+            if !isPaused, let found = latestSubject(from: camera) {
                 // Turning the phone changes the frame's shape, and the old box no longer lines up.
                 if (found.aspect > 1) != (frameAspect > 1) {
                     smoothed = nil
