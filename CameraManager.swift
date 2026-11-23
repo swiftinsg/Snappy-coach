@@ -313,13 +313,16 @@ class CameraManager {
     private func runSession() {
         // startRunning() blocks, so keep it off the main thread.
         let session = session
-        sessionQueue.async { [weak self] in
+        // The photo output finishes setting up once the session runs, and only then
+        // reports Live Photos as supported, so check again now.
+        let onRunning: @MainActor () -> Void = { [weak self] in
+            self?.turnOnLivePhotosIfNowSupported()
+        }
+        sessionQueue.async {
             if !session.isRunning {
                 session.startRunning()
             }
-            // The photo output finishes setting up once the session runs, and only then
-            // reports Live Photos as supported, so check again now.
-            Task { @MainActor in self?.turnOnLivePhotosIfNowSupported() }
+            Task { @MainActor in onRunning() }
         }
     }
 
