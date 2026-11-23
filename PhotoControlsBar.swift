@@ -14,6 +14,9 @@ struct PhotoControlsBar: View {
     @Binding var activeAdjustment: PhotoControl?
     /// Called with a short message (e.g. "Flash Auto") after a control is tapped.
     var onStatus: (String) -> Void = { _ in }
+    /// A press and hold just opened the controls panel. The finger lifting afterwards still
+    /// fires the button it was on, and that release mustn't change the setting.
+    @State private var didLongPress = false
 
     var body: some View {
         // Push the controls into the top-right corner.
@@ -21,6 +24,10 @@ struct PhotoControlsBar: View {
             Spacer(minLength: 0)
             controls
                 .onboardingAnchor(.photoControls, .editControls)
+        }
+        // If the finger left the button before lifting, no release reached it; start fresh after editing.
+        .onChange(of: model.isEditing) { _, isEditing in
+            if !isEditing { didLongPress = false }
         }
         // A slider whose button just hid (Aperture after switching to the front camera, say) closes too.
         .onChange(of: isActiveAdjustmentAvailable) { _, isAvailable in
@@ -76,6 +83,7 @@ struct PhotoControlsBar: View {
         // doesn't compete with dragging icons.
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                didLongPress = true
                 model.beginEditing()
             },
             isEnabled: !model.isEditing
@@ -99,6 +107,11 @@ struct PhotoControlsBar: View {
 
     /// Slider controls open or close their slider; everything else toggles or cycles straight away.
     private func handleTap(on control: PhotoControl) {
+        // The release after a press and hold only ends the hold.
+        if didLongPress {
+            didLongPress = false
+            return
+        }
         if control.usesSlider {
             activeAdjustment = activeAdjustment == control ? nil : control
         } else {

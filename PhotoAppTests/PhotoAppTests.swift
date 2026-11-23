@@ -511,6 +511,8 @@ struct CoachRulesTests {
 
     @Test func portraitBlursTheSavedPhoto() {
         #expect(PhotoControl.depth.title == "Portrait")
+        // Every iPhone gets Portrait: without depth hardware it blurs behind people instead.
+        #expect(!CameraManager.unsupportedControls.contains(.depth))
         // Portrait alone is enough to edit the photo; a plain 4:3 standard shot is saved as taken.
         #expect(PhotoCaptureProcessor.needsEdit(ratio: .fourByThree, style: .standard, portrait: true))
         #expect(!PhotoCaptureProcessor.needsEdit(ratio: .fourByThree, style: .standard, portrait: false))

@@ -12,6 +12,7 @@ import UIKit
 import Photos
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import Vision
 
 enum CaptureError: LocalizedError {
     case noPhotoData
@@ -153,7 +154,7 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]),
               let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         // Without depth in the file (a far-away scene, say) the photo is kept sharp rather than lost.
-        let base = portrait ? (portraitBlur(data) ?? image) : image
+        let base = portrait ? (portraitBlur(data) ?? personBlur(image) ?? image) : image
         let cropped = crop(base, to: ratio)
         // Filters drop the photo's metadata, so put it back: date, place, camera and lens.
         let styled = apply(style, to: cropped).settingProperties(metadata(from: image.properties))
@@ -204,6 +205,47 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
 
     /// How strong the Portrait blur is, as an f-number: lower is blurrier.
     private static let portraitAperture: Float = 2.8
+
+    /// For cameras that can't measure depth: blurs everything but the people in an upright photo,
+    /// like the Camera app's Portrait on single-lens iPhones. Nil when there's nobody in it, so
+    /// the photo is kept sharp.
+    private static func personBlur(_ image: CIImage) -> CIImage? {
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        guard (try? VNImageRequestHandler(ciImage: image).perform([request])) != nil,
+              let maskBuffer = request.results?.first?.pixelBuffer else { return nil }
+        // The mask comes back smaller than the photo; stretch it over the whole photo.
+        let small = CIImage(cvPixelBuffer: maskBuffer)
+        let mask = small
+            .transformed(by: CGAffineTransform(scaleX: image.extent.width / small.extent.width,
+                                               y: image.extent.height / small.extent.height))
+            .transformed(by: CGAffineTransform(translationX: image.extent.minX, y: image.extent.minY))
+        guard coverage(of: mask) >= minimumPersonCoverage else { return nil }
+        // Scaled to the photo's size, so the blur looks the same at any resolution.
+        let sigma = max(image.extent.width, image.extent.height) * 0.008
+        let background = image.clampedToExtent().applyingGaussianBlur(sigma: sigma).cropped(to: image.extent)
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = image
+        blend.backgroundImage = background
+        blend.maskImage = mask
+        return blend.outputImage?.cropped(to: image.extent)
+    }
+
+    /// Below this share of the frame, nobody is really there: a stray speck isn't a person.
+    private static let minimumPersonCoverage = 0.01
+
+    /// How much of the frame a mask covers, 0...1.
+    private static func coverage(of mask: CIImage) -> Double {
+        let average = CIFilter.areaAverage()
+        average.inputImage = mask
+        average.extent = mask.extent
+        guard let output = average.outputImage else { return 0 }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(output, toBitmap: &pixel, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                       format: .RGBA8, colorSpace: nil)
+        return Double(pixel[0]) / 255
+    }
 
     /// Approximates the iPhone's Photographic Styles with a simple colour grade.
     private static func apply(_ style: PhotoStyle, to image: CIImage) -> CIImage {

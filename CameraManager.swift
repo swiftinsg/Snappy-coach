@@ -144,13 +144,8 @@ class CameraManager {
         if !supportsVariableAperture {
             unsupported.insert(.lensAperture)
         }
-        // Depth needs two back lenses or the front TrueDepth camera.
-        let hasDepthCamera = backCamera(.builtInDualWideCamera) != nil || backCamera(.builtInDualCamera) != nil
-            || backCamera(.builtInTripleCamera) != nil
-            || AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) != nil
-        if !hasDepthCamera {
-            unsupported.insert(.depth)
-        }
+        // Portrait is always offered: without depth hardware it blurs the background behind
+        // people instead, like the Camera app on single-lens iPhones.
         if !cameras.contains(where: { $0.formats.contains(where: \.isCenterStageSupported) }) {
             unsupported.insert(.centerStage)
         }
@@ -171,11 +166,6 @@ class CameraManager {
             return manualLens?.isLockingFocusWithCustomLensPositionSupported ?? false
         case .centerStage:
             return device.activeFormat.isCenterStageSupported
-        case .depth:
-            // On the back, `setDepth` switches to a two-lens camera when the current one can't measure depth.
-            let canSwitchToDepth = !isUsingFrontCamera
-                && (Self.backCamera(.builtInDualWideCamera) ?? Self.backCamera(.builtInDualCamera)) != nil
-            return isDepthOn || photoOutput.isDepthDataDeliverySupported || canSwitchToDepth
         case .flash:
             return photoOutput.supportedFlashModes.contains(.on)
         default:
@@ -619,7 +609,7 @@ class CameraManager {
         if format == .proRAW && !swapped.keepsProRAW {
             format = .heif
         }
-        isDepthOn = swapped.keepsDepth
+        // Portrait stays on: a camera without depth blurs the background behind people instead.
         isCenterStageOn = newDevice.activeFormat.isCenterStageSupported && AVCaptureDevice.isCenterStageEnabled
         // Manual values belonged to the old lens, so hand them back to auto.
         exposureBias = 0
@@ -707,12 +697,10 @@ class CameraManager {
 
     private func setDepth(_ on: Bool) -> String {
         guard videoInput != nil else { return "The camera isn't available" }
-        if on && !isUsingFrontCamera && !photoOutput.isDepthDataDeliverySupported {
-            // A single lens can't measure depth, so switch to the two-lens back camera.
-            guard let depthCamera = Self.backCamera(.builtInDualWideCamera) ?? Self.backCamera(.builtInDualCamera),
-                  use(depthCamera) else {
-                return "Portrait isn't available on this camera"
-            }
+        // A single lens can't measure depth, so switch to the two-lens back camera when there is one.
+        if on && !isUsingFrontCamera && !photoOutput.isDepthDataDeliverySupported,
+           let depthCamera = Self.backCamera(.builtInDualWideCamera) ?? Self.backCamera(.builtInDualCamera),
+           use(depthCamera) {
             zoomLevel = 1
             refreshZoomStops()
             applyZoomOnCurrentDevice(1)
@@ -726,13 +714,18 @@ class CameraManager {
             isDepthOn = false
             return "Portrait Off"
         }
-        guard photoOutput.isDepthDataDeliverySupported else { return "Portrait isn't available on this camera" }
-        session.beginConfiguration()
-        photoOutput.isDepthDataDeliveryEnabled = on
-        photoOutput.isPortraitEffectsMatteDeliveryEnabled = on && photoOutput.isPortraitEffectsMatteDeliverySupported
-        session.commitConfiguration()
+        if photoOutput.isDepthDataDeliverySupported {
+            session.beginConfiguration()
+            photoOutput.isDepthDataDeliveryEnabled = on
+            photoOutput.isPortraitEffectsMatteDeliveryEnabled = on && photoOutput.isPortraitEffectsMatteDeliverySupported
+            session.commitConfiguration()
+        }
         isDepthOn = on
-        return on ? "Portrait On: the background blurs when you take the photo" : "Portrait Off"
+        guard on else { return "Portrait Off" }
+        // Without depth, only people can be told apart from the background, as in the Camera app.
+        return photoOutput.isDepthDataDeliveryEnabled
+            ? "Portrait On: the background blurs when you take the photo"
+            : "Portrait On: the background behind people blurs when you take the photo"
     }
 
     /// Night mode lets auto-exposure use much longer shutter times (brighter in the dark,
