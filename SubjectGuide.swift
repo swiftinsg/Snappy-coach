@@ -195,6 +195,23 @@ nonisolated enum FrameMapping {
         return CGPoint(x: (point.x - frame.minX) / frame.width, y: (point.y - frame.minY) / frame.height)
     }
 
+    /// A point in the upright frame, 0...1 from the top left, in the camera sensor's own
+    /// coordinates, which is what focus and exposure points use. `orientation` is how the
+    /// sensor's frames are turned upright (`HoldOrientation.frameOrientation`).
+    static func sensorPoint(forUpright point: CGPoint, orientation: CGImagePropertyOrientation) -> CGPoint {
+        let (x, y) = (point.x, point.y)
+        switch orientation {
+        case .up: return CGPoint(x: x, y: y)
+        case .down: return CGPoint(x: 1 - x, y: 1 - y)
+        case .right: return CGPoint(x: y, y: 1 - x)
+        case .left: return CGPoint(x: 1 - y, y: x)
+        case .upMirrored: return CGPoint(x: 1 - x, y: y)
+        case .downMirrored: return CGPoint(x: x, y: 1 - y)
+        case .leftMirrored: return CGPoint(x: y, y: x)
+        case .rightMirrored: return CGPoint(x: 1 - y, y: 1 - x)
+        }
+    }
+
     /// A frame box in 0...1 coordinates of only the part the viewfinder shows, which is what the coach judges.
     static func visibleBox(_ box: CGRect, frameAspect: CGFloat, viewAspect: CGFloat) -> CGRect {
         let rect = viewRect(for: box, frameAspect: frameAspect, in: CGSize(width: viewAspect, height: 1))
@@ -721,21 +738,8 @@ final class SubjectGuide {
     }
 
     private func latestSubject(from camera: CameraManager) -> (box: CGRect, aspect: CGFloat)? {
-        if let live = camera.frameGrabber.latestSubject() {
-            return live
-        }
-        #if targetEnvironment(simulator)
-        return Self.simulatorSubject
-        #else
-        return nil
-        #endif
+        camera.frameGrabber.latestSubject()
     }
-
-    /// The Simulator has no camera, so it finds the subject in the test photo instead.
-    private static let simulatorSubject: (box: CGRect, aspect: CGFloat)? = {
-        guard let photo = PhotoCoach.testPhoto(), let box = SubjectFinder.subject(in: photo) else { return nil }
-        return (box, CGFloat(photo.width) / CGFloat(photo.height))
-    }()
 
     /// Blends each new box with the last one so the green box doesn't jitter.
     private func smooth(_ box: CGRect) -> CGRect {

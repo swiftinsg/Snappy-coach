@@ -61,7 +61,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .explainStyle:
             "Press and hold any card to see what the style means."
         case .selectObject:
-            "Tap the thing you want to photograph. The coach will follow it and give advice about it."
+            "Double-tap the thing you want to photograph. The coach will follow it and give advice about it. A single tap sets focus and brightness, like the Camera app."
         case .alignSubject:
             "The dot is where your phone points, and the circle is where it should point. Move the phone until the dot is inside the circle."
         case .advice:
@@ -104,7 +104,7 @@ extension PhotoControl {
         case .timer: "gives you a few seconds before the photo is taken"
         case .exposure: "makes the photo brighter or darker"
         case .styles: "changes the look and colour of the photo"
-        case .depth: "blurs the background behind your subject"
+        case .depth: "blurs the background behind your subject when you take the photo"
         case .nightMode: "brightens shots in low light"
         case .centerStage: "keeps you in frame on the front camera"
         case .format: "switches the file format the photo is saved in"

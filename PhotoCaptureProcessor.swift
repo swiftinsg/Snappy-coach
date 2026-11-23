@@ -3,8 +3,8 @@
 //  Grp 6pm Photo App
 //
 //  Handles one photo capture from start to finish: collects the image (plus RAW and
-//  Live Photo movie when enabled), crops to the chosen aspect ratio, applies the style,
-//  and saves to Photos.
+//  Live Photo movie when enabled), blurs the background for Portrait, crops to the chosen
+//  aspect ratio, applies the style, and saves to Photos.
 //
 
 import UIKit
@@ -25,6 +25,8 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
     private let aspectRatio: AspectRatio
     private let style: PhotoStyle
     private let encodeAsJPEG: Bool
+    /// Blur the background from the photo's depth, like the Camera app's Portrait mode.
+    private let portrait: Bool
     private let willCapture: @Sendable () -> Void
     private let completion: @Sendable (Result<String?, Error>) -> Void
 
@@ -38,11 +40,13 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
     init(aspectRatio: AspectRatio,
          style: PhotoStyle,
          encodeAsJPEG: Bool,
+         portrait: Bool,
          willCapture: @escaping @Sendable () -> Void,
          completion: @escaping @Sendable (Result<String?, Error>) -> Void) {
         self.aspectRatio = aspectRatio
         self.style = style
         self.encodeAsJPEG = encodeAsJPEG
+        self.portrait = portrait
         self.willCapture = willCapture
         self.completion = completion
     }
@@ -52,11 +56,8 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        if let error {
+        if error != nil {
             // The capture then finishes without photo data and reports that as a failure.
-            #if DEBUG
-            print("Photo processing failed: \(error)")
-            #endif
             return
         }
         // RAW captures deliver the DNG and the processed image as separate photos.
@@ -88,21 +89,21 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
             return
         }
 
-        // The sensor shoots 4:3, so other ratios are a centre crop; styles are a colour grade.
-        // Both edit the processed image only; RAW files are left untouched.
-        let needsEdit = (aspectRatio != .fourByThree || style != .standard) && photoData != nil
+        // The sensor shoots 4:3, so other ratios are a centre crop; styles are a colour grade;
+        // Portrait blurs the background. All edit the processed image only; RAW files are left untouched.
+        let needsEdit = Self.needsEdit(ratio: aspectRatio, style: style, portrait: portrait) && photoData != nil
         // Only keep the DNG alongside a processed image; a RAW-only capture is already mainData.
         let alternateRAW = photoData != nil ? rawData : nil
         let originalMovieURL = livePhotoMovieURL
         let completion = completion
-        let ratio = aspectRatio, style = style, asJPEG = encodeAsJPEG
+        let ratio = aspectRatio, style = style, asJPEG = encodeAsJPEG, portrait = portrait
 
         // Editing a full-size photo takes a moment, so it happens here rather than in this
         // callback, which would hold up the camera's next capture.
         Task {
             var mainData = capturedData
             var movieURL = originalMovieURL
-            if needsEdit, let edited = Self.edit(mainData, ratio: ratio, style: style, asJPEG: asJPEG) {
+            if needsEdit, let edited = Self.edit(mainData, ratio: ratio, style: style, portrait: portrait, asJPEG: asJPEG) {
                 mainData = edited
                 // A re-encoded still no longer pairs with its Live Photo movie, so save it as a still.
                 movieURL = nil
@@ -141,11 +142,19 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         return createdIdentifier.value
     }
 
-    /// Centre-crops the image to `ratio`, applies the style, keeps it upright, and re-encodes it.
-    private static func edit(_ data: Data, ratio: AspectRatio, style: PhotoStyle, asJPEG: Bool) -> Data? {
+    /// Whether the processed photo has to be edited before saving.
+    static func needsEdit(ratio: AspectRatio, style: PhotoStyle, portrait: Bool) -> Bool {
+        ratio != .fourByThree || style != .standard || portrait
+    }
+
+    /// Blurs the background for Portrait, centre-crops the image to `ratio`, applies the style,
+    /// keeps it upright, and re-encodes it.
+    private static func edit(_ data: Data, ratio: AspectRatio, style: PhotoStyle, portrait: Bool, asJPEG: Bool) -> Data? {
         guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]),
               let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        let cropped = crop(image, to: ratio)
+        // Without depth in the file (a far-away scene, say) the photo is kept sharp rather than lost.
+        let base = portrait ? (portraitBlur(data) ?? image) : image
+        let cropped = crop(base, to: ratio)
         // Filters drop the photo's metadata, so put it back: date, place, camera and lens.
         let styled = apply(style, to: cropped).settingProperties(metadata(from: image.properties))
 
@@ -174,6 +183,27 @@ nonisolated final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDe
         }
         return metadata
     }
+
+    /// The photo with its background blurred from the depth saved in it, like the Camera app's
+    /// Portrait mode, turned upright. Nil when the photo has no depth to work from.
+    private static func portraitBlur(_ data: Data) -> CIImage? {
+        guard let image = CIImage(data: data),
+              let disparity = CIImage(data: data, options: [.auxiliaryDisparity: true]) else { return nil }
+        // The person matte sharpens hair and edges when there's someone in the shot.
+        let matte = CIImage(data: data, options: [.auxiliaryPortraitEffectsMatte: true])
+        let orientation = (image.properties[kCGImagePropertyOrientation as String] as? UInt32)
+            .flatMap(CGImagePropertyOrientation.init(rawValue:)) ?? .up
+        guard let filter = context.depthBlurEffectFilter(
+            for: image, disparityImage: disparity, portraitEffectsMatte: matte, orientation: orientation, options: nil
+        ) else { return nil }
+        // Like the Camera app's default f/2.8: a soft background that still shows where it is.
+        filter.setValue(portraitAperture, forKey: "inputAperture")
+        // The filter works on the sensor's own orientation, so turn the result upright like the rest.
+        return filter.outputImage?.cropped(to: image.extent).oriented(orientation)
+    }
+
+    /// How strong the Portrait blur is, as an f-number: lower is blurrier.
+    private static let portraitAperture: Float = 2.8
 
     /// Approximates the iPhone's Photographic Styles with a simple colour grade.
     private static func apply(_ style: PhotoStyle, to image: CIImage) -> CIImage {

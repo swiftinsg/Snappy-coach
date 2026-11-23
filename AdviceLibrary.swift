@@ -665,14 +665,20 @@ nonisolated enum CoachRules {
         case .available:
             return nil
         case .unavailable(.appleIntelligenceNotEnabled):
-            return "Apple Intelligence is off, so tips use camera measurements only. Turn it on in Settings for smarter tips."
+            return "Apple Intelligence is off. \(stillWorks) Turn it on in Settings for the full coach."
         case .unavailable(.deviceNotEligible):
-            return "This iPhone can't run Apple Intelligence, so tips use camera measurements only."
+            return "This iPhone doesn't support Apple Intelligence. \(stillWorks)"
         case .unavailable(.modelNotReady):
-            return "Apple Intelligence is still getting ready. Tips use camera measurements for now."
+            // The model downloads in the background; the coach switches over once it's ready.
+            return "Apple Intelligence is still downloading to this iPhone. Until it's ready, you'll get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines."
         case .unavailable:
-            return "Apple Intelligence isn't available, so tips use camera measurements only."
+            return "Apple Intelligence isn't available right now. \(stillWorks)"
         }
+    }
+
+    /// What the coach can and can't do without Apple Intelligence, so the notice sets expectations.
+    private static var stillWorks: String {
+        "You'll still get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines."
     }
 
     /// Composition shows one tip, because its tips can come from the rules or the model and two

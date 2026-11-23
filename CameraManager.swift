@@ -20,6 +20,8 @@ class CameraManager {
 
     private(set) var flash: FlashSetting = .auto
     private(set) var isLivePhotoOn = false
+    /// The person has turned Live on or off themselves, so it's no longer switched on for them.
+    private var hasChosenLivePhoto = false
     private(set) var aspectRatio: AspectRatio = .fourByThree
     private(set) var timer: TimerSetting = .off
     private(set) var style: PhotoStyle = .standard
@@ -89,6 +91,10 @@ class CameraManager {
 
     private(set) var device: AVCaptureDevice?
     private(set) var isUsingFrontCamera = false
+    /// True while switching between the front and back cameras, so the viewfinder can blur.
+    private(set) var isSwitchingCamera = false
+    /// A tap has set where the camera focuses and meters. Cleared when the scene changes a lot.
+    private(set) var isFocusPointSet = false
     /// Zoom buttons to show, e.g. [0.5, 1, 2, 5], depending on the phone's lenses.
     private(set) var zoomStops: [CGFloat] = [1, 2]
     /// Current zoom relative to the main 1× lens.
@@ -123,6 +129,74 @@ class CameraManager {
             return false
         }
         return camera.formats.contains { $0.minLensAperture < $0.maxLensAperture }
+    }
+
+    /// Controls no camera on this iPhone can use, so they're never offered: Aperture before
+    /// iPhone 18 Pro, Center Stage without a Center Stage camera, and so on. Like
+    /// `supportsVariableAperture`, it asks the hardware rather than checking model names.
+    static var unsupportedControls: Set<PhotoControl> {
+        let cameras = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTelephotoCamera, .builtInTrueDepthCamera],
+            mediaType: .video,
+            position: .unspecified
+        ).devices
+        var unsupported: Set<PhotoControl> = []
+        if !supportsVariableAperture {
+            unsupported.insert(.lensAperture)
+        }
+        // Depth needs two back lenses or the front TrueDepth camera.
+        let hasDepthCamera = backCamera(.builtInDualWideCamera) != nil || backCamera(.builtInDualCamera) != nil
+            || backCamera(.builtInTripleCamera) != nil
+            || AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) != nil
+        if !hasDepthCamera {
+            unsupported.insert(.depth)
+        }
+        if !cameras.contains(where: { $0.formats.contains(where: \.isCenterStageSupported) }) {
+            unsupported.insert(.centerStage)
+        }
+        if !cameras.contains(where: \.isLockingFocusWithCustomLensPositionSupported) {
+            unsupported.insert(.focus)
+        }
+        return unsupported
+    }
+
+    /// Whether a control works with the camera in use right now. On an iPhone 18 Pro, say, only
+    /// the main back lens has an adjustable aperture, so Aperture is hidden on the others.
+    func isAvailableOnCurrentCamera(_ control: PhotoControl) -> Bool {
+        guard let device else { return true }
+        switch control {
+        case .lensAperture:
+            return manualLens?.formats.contains { $0.minLensAperture < $0.maxLensAperture } ?? false
+        case .focus:
+            return manualLens?.isLockingFocusWithCustomLensPositionSupported ?? false
+        case .centerStage:
+            return device.activeFormat.isCenterStageSupported
+        case .depth:
+            // On the back, `setDepth` switches to a two-lens camera when the current one can't measure depth.
+            let canSwitchToDepth = !isUsingFrontCamera
+                && (Self.backCamera(.builtInDualWideCamera) ?? Self.backCamera(.builtInDualCamera)) != nil
+            return isDepthOn || photoOutput.isDepthDataDeliverySupported || canSwitchToDepth
+        case .flash:
+            return photoOutput.supportedFlashModes.contains(.on)
+        default:
+            return true
+        }
+    }
+
+    /// The lens manual controls act on. The combined back camera can't take them, so
+    /// `usePhysicalLensForManualControl` hands over to the lens for the current zoom, chosen as in `setZoom`.
+    private var manualLens: AVCaptureDevice? {
+        guard let device, device.isVirtualDevice, device.position == .back, !isDepthOn,
+              let wide = Self.backCamera(.builtInWideAngleCamera) else { return device }
+        if zoomLevel < 1, let ultraWide = Self.backCamera(.builtInUltraWideCamera) {
+            return ultraWide
+        }
+        if let telephoto = Self.backCamera(.builtInTelephotoCamera),
+           let teleZoom = Self.magnification(of: telephoto, relativeTo: wide),
+           teleZoom > 2, zoomLevel >= teleZoom.rounded() {
+            return telephoto
+        }
+        return wide
     }
 
     init() {
@@ -239,11 +313,33 @@ class CameraManager {
     private func runSession() {
         // startRunning() blocks, so keep it off the main thread.
         let session = session
-        sessionQueue.async {
+        sessionQueue.async { [weak self] in
             if !session.isRunning {
                 session.startRunning()
             }
+            // The photo output finishes setting up once the session runs, and only then
+            // reports Live Photos as supported, so check again now.
+            Task { @MainActor in self?.turnOnLivePhotosIfNowSupported() }
         }
+    }
+
+    /// Turns Live Photos on in the pipeline once the camera says it can, since that can only be
+    /// known after the session starts. Live is on by default, like the Camera app, until the
+    /// person turns it off themselves.
+    private func turnOnLivePhotosIfNowSupported() {
+        guard enableLivePhotoPipeline(), !hasChosenLivePhoto else { return }
+        isLivePhotoOn = true
+    }
+
+    /// Enables Live Photo capture if it's off but now supported. Returns whether it's enabled.
+    @discardableResult
+    private func enableLivePhotoPipeline() -> Bool {
+        if photoOutput.isLivePhotoCaptureEnabled { return true }
+        guard format != .proRAW, photoOutput.isLivePhotoCaptureSupported else { return false }
+        session.beginConfiguration()
+        configurePhotoPipeline()
+        session.commitConfiguration()
+        return photoOutput.isLivePhotoCaptureEnabled
     }
 
     /// Follows interruptions (calls, Siri, other apps) and camera errors,
@@ -268,26 +364,39 @@ class CameraManager {
                     self?.runSession()
                 }
             },
+            Task { [weak self] in
+                // The camera has been pointed somewhere new, so a tapped focus spot no longer fits.
+                for await _ in center.notifications(named: AVCaptureDevice.subjectAreaDidChangeNotification) {
+                    self?.resetFocusPoint()
+                }
+            },
         ]
     }
 
     // MARK: - Switching cameras and lenses
 
     /// Swaps between the back and front cameras. Returns a message if it couldn't switch.
-    func switchCamera() -> String? {
+    /// Starting the other camera takes a moment, so it happens on the session queue while the
+    /// viewfinder blurs (`isSwitchingCamera`), instead of freezing the screen.
+    func switchCamera() async -> String? {
         guard videoInput != nil else { return "The camera isn't available" }
+        guard !isSwitchingCamera else { return nil }
         let newPosition: AVCaptureDevice.Position = isUsingFrontCamera ? .back : .front
         let smooth = newPosition == .back ? Self.smoothBackCamera() : nil
         guard let newDevice = smooth ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition) else {
             return "That camera isn't available"
         }
-        guard use(newDevice) else { return "Couldn't switch cameras" }
+        isSwitchingCamera = true
+        defer { isSwitchingCamera = false }
+        guard await useInBackground(newDevice) else { return "Couldn't switch cameras" }
         isUsingFrontCamera = newPosition == .front
         zoomLevel = 1
         refreshZoomStops()
         if newDevice.isVirtualDevice {
             applyZoomOnCurrentDevice(1, smoothly: false)
         }
+        // The new camera's first frames settle exposure and focus; keep them behind the blur.
+        try? await Task.sleep(for: .milliseconds(150))
         return nil
     }
 
@@ -435,30 +544,79 @@ class CameraManager {
     /// belonged to the old one. Returns false if the session can't use it.
     private func use(_ newDevice: AVCaptureDevice) -> Bool {
         guard let currentInput = videoInput,
-              let newInput = try? AVCaptureDeviceInput(device: newDevice) else { return false }
+              let swapped = Self.swapInput(
+                  in: session, from: currentInput, to: newDevice, photoOutput: photoOutput,
+                  wantsProRAW: format == .proRAW, wantsDepth: isDepthOn
+              ) else { return false }
+        finishUsing(newDevice, swapped)
+        return true
+    }
 
+    /// Same as `use`, but the slow session work runs on the session queue so the screen stays smooth.
+    private func useInBackground(_ newDevice: AVCaptureDevice) async -> Bool {
+        guard let currentInput = videoInput else { return false }
+        let session = session
+        let photoOutput = photoOutput
+        let wantsProRAW = format == .proRAW
+        let wantsDepth = isDepthOn
+        let swapped = await withCheckedContinuation { continuation in
+            sessionQueue.async {
+                continuation.resume(returning: Self.swapInput(
+                    in: session, from: currentInput, to: newDevice, photoOutput: photoOutput,
+                    wantsProRAW: wantsProRAW, wantsDepth: wantsDepth
+                ))
+            }
+        }
+        guard let swapped else { return false }
+        finishUsing(newDevice, swapped)
+        return true
+    }
+
+    /// What a swap kept: the new input, and whether RAW and depth still work on the new camera.
+    private struct SwappedInput {
+        let input: AVCaptureDeviceInput
+        let keepsProRAW: Bool
+        let keepsDepth: Bool
+    }
+
+    /// The part of a camera swap that talks to the session. Touches no state of its own, so it
+    /// can run on the session queue. Returns nil, with the old camera kept, if it can't swap.
+    private nonisolated static func swapInput(
+        in session: AVCaptureSession,
+        from currentInput: AVCaptureDeviceInput,
+        to newDevice: AVCaptureDevice,
+        photoOutput: AVCapturePhotoOutput,
+        wantsProRAW: Bool,
+        wantsDepth: Bool
+    ) -> SwappedInput? {
+        guard let newInput = try? AVCaptureDeviceInput(device: newDevice) else { return nil }
         session.beginConfiguration()
+        defer { session.commitConfiguration() }
         session.removeInput(currentInput)
         guard session.canAddInput(newInput) else {
             session.addInput(currentInput)
-            session.commitConfiguration()
-            return false
+            return nil
         }
         session.addInput(newInput)
-        videoInput = newInput
-        device = newDevice
-
         // Photo features depend on the camera, so re-check what this one supports.
-        if format == .proRAW && !photoOutput.isAppleProRAWSupported {
+        let keepsProRAW = wantsProRAW && photoOutput.isAppleProRAWSupported
+        configurePhotoPipeline(photoOutput, proRAW: keepsProRAW)
+        let keepsDepth = wantsDepth && photoOutput.isDepthDataDeliverySupported
+        photoOutput.isDepthDataDeliveryEnabled = keepsDepth
+        photoOutput.isPortraitEffectsMatteDeliveryEnabled = keepsDepth && photoOutput.isPortraitEffectsMatteDeliverySupported
+        return SwappedInput(input: newInput, keepsProRAW: keepsProRAW, keepsDepth: keepsDepth)
+    }
+
+    /// Updates the camera's state once the session has the new input.
+    private func finishUsing(_ newDevice: AVCaptureDevice, _ swapped: SwappedInput) {
+        videoInput = swapped.input
+        device = newDevice
+        // A tapped focus spot belonged to the old lens; the new one starts on auto.
+        isFocusPointSet = false
+        if format == .proRAW && !swapped.keepsProRAW {
             format = .heif
         }
-        configurePhotoPipeline()
-        let keepDepth = isDepthOn && photoOutput.isDepthDataDeliverySupported
-        photoOutput.isDepthDataDeliveryEnabled = keepDepth
-        photoOutput.isPortraitEffectsMatteDeliveryEnabled = keepDepth && photoOutput.isPortraitEffectsMatteDeliverySupported
-        session.commitConfiguration()
-
-        isDepthOn = keepDepth
+        isDepthOn = swapped.keepsDepth
         isCenterStageOn = newDevice.activeFormat.isCenterStageSupported && AVCaptureDevice.isCenterStageEnabled
         // Manual values belonged to the old lens, so hand them back to auto.
         exposureBias = 0
@@ -469,20 +627,24 @@ class CameraManager {
         syncExposureControl()
         _ = setNightMode(isNightModeOn)
         trackRotation(of: newDevice)
-        return true
     }
 
     /// Turns on the photo output features for the current format. iOS can't shoot Apple
     /// ProRAW and Live Photos together, so ProRAW is only enabled while RAW is chosen.
     /// Call inside begin/commitConfiguration.
     private func configurePhotoPipeline() {
-        photoOutput.isAppleProRAWEnabled = format == .proRAW && photoOutput.isAppleProRAWSupported
+        Self.configurePhotoPipeline(photoOutput, proRAW: format == .proRAW)
+    }
+
+    private nonisolated static func configurePhotoPipeline(_ photoOutput: AVCapturePhotoOutput, proRAW: Bool) {
+        photoOutput.isAppleProRAWEnabled = proRAW && photoOutput.isAppleProRAWSupported
         photoOutput.isLivePhotoCaptureEnabled = !photoOutput.isAppleProRAWEnabled && photoOutput.isLivePhotoCaptureSupported
     }
 
     /// Live Photos are recorded only when the person wants them and the pipeline allows it.
+    /// Portrait photos are re-made with the blur, which can't keep the movie, so Live is off then.
     var isLivePhotoActive: Bool {
-        isLivePhotoOn && photoOutput.isLivePhotoCaptureEnabled
+        isLivePhotoOn && photoOutput.isLivePhotoCaptureEnabled && !isDepthOn
     }
 
     // MARK: - Tap controls
@@ -491,11 +653,15 @@ class CameraManager {
     func activate(_ control: PhotoControl) -> String {
         switch control {
         case .flash:
+            // The button is hidden on such cameras; this covers a tap as the lens changes.
+            guard photoOutput.supportedFlashModes.contains(.on) else { return "Flash isn't available on this camera" }
             flash = flash.next
             return "Flash \(flash.title)"
         case .live:
             if format == .proRAW { return "Live Photos are off while shooting RAW" }
-            guard photoOutput.isLivePhotoCaptureEnabled else { return "Live Photos aren't available on this camera" }
+            if isDepthOn { return "Live Photos are off while Portrait is on" }
+            guard enableLivePhotoPipeline() else { return "Live Photos aren't available on this camera" }
+            hasChosenLivePhoto = true
             isLivePhotoOn.toggle()
             return isLivePhotoOn ? "Live On" : "Live Off"
         case .aspect:
@@ -542,7 +708,7 @@ class CameraManager {
             // A single lens can't measure depth, so switch to the two-lens back camera.
             guard let depthCamera = Self.backCamera(.builtInDualWideCamera) ?? Self.backCamera(.builtInDualCamera),
                   use(depthCamera) else {
-                return "Depth isn't available on this camera"
+                return "Portrait isn't available on this camera"
             }
             zoomLevel = 1
             refreshZoomStops()
@@ -555,15 +721,15 @@ class CameraManager {
                 if smooth.isVirtualDevice { applyZoomOnCurrentDevice(1, smoothly: false) }
             }
             isDepthOn = false
-            return "Depth Off"
+            return "Portrait Off"
         }
-        guard photoOutput.isDepthDataDeliverySupported else { return "Depth isn't available on this camera" }
+        guard photoOutput.isDepthDataDeliverySupported else { return "Portrait isn't available on this camera" }
         session.beginConfiguration()
         photoOutput.isDepthDataDeliveryEnabled = on
         photoOutput.isPortraitEffectsMatteDeliveryEnabled = on && photoOutput.isPortraitEffectsMatteDeliverySupported
         session.commitConfiguration()
         isDepthOn = on
-        return on ? "Depth On" : "Depth Off"
+        return on ? "Portrait On: the background blurs when you take the photo" : "Portrait Off"
     }
 
     /// Night mode lets auto-exposure use much longer shutter times (brighter in the dark,
@@ -623,7 +789,8 @@ class CameraManager {
         case .whiteBalance:
             return 2500...8000
         case .lensAperture:
-            if let format = device?.activeFormat, format.minLensAperture < format.maxLensAperture {
+            // The lens the aperture will be set on, which may not be switched to until the slider moves.
+            if let format = manualLens?.activeFormat, format.minLensAperture < format.maxLensAperture {
                 return format.minLensAperture...format.maxLensAperture
             }
             return 1.4...8
@@ -651,7 +818,7 @@ class CameraManager {
                 value = 5500
             }
         case .lensAperture:
-            value = aperture ?? device?.lensAperture ?? sliderRange(for: control).lowerBound
+            value = aperture ?? manualLens?.lensAperture ?? sliderRange(for: control).lowerBound
         default:
             value = 0
         }
@@ -786,6 +953,49 @@ class CameraManager {
         returnToSmoothCameraIfAuto()
     }
 
+    // MARK: - Tap to focus
+
+    /// Focuses and sets the brightness on one spot, like a tap in the Camera app. `point` is in the
+    /// sensor's coordinates (see `FrameMapping.sensorPoint`). Manual focus or shutter settings win,
+    /// so a tap never undoes them. Both return to automatic once the scene changes a lot.
+    func focusAndExpose(at point: CGPoint) {
+        let keepsManualFocus = focusPosition != nil
+        let keepsManualExposure = shutterSeconds != nil || aperture != nil
+        configureDevice { device in
+            if !keepsManualFocus, device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
+                device.focusPointOfInterest = point
+                // Focus once on the spot and hold it there.
+                device.focusMode = .autoFocus
+            }
+            if !keepsManualExposure, device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.autoExpose) {
+                device.exposurePointOfInterest = point
+                device.exposureMode = .autoExpose
+            }
+            device.isSubjectAreaChangeMonitoringEnabled = true
+        }
+        isFocusPointSet = true
+    }
+
+    /// Back to focusing and metering the whole frame, after the scene changed or the lens switched.
+    private func resetFocusPoint() {
+        guard isFocusPointSet else { return }
+        isFocusPointSet = false
+        let keepsManualFocus = focusPosition != nil
+        let keepsManualExposure = shutterSeconds != nil || aperture != nil
+        configureDevice { device in
+            let centre = CGPoint(x: 0.5, y: 0.5)
+            if !keepsManualFocus, device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusPointOfInterest = centre
+                device.focusMode = .continuousAutoFocus
+            }
+            if !keepsManualExposure, device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposurePointOfInterest = centre
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.isSubjectAreaChangeMonitoringEnabled = false
+        }
+    }
+
     // MARK: - Capture
 
     /// Builds photo settings from the current controls, ready for the shutter button.
@@ -815,6 +1025,12 @@ class CameraManager {
         }
         settings.isDepthDataDeliveryEnabled = isDepthOn && photoOutput.isDepthDataDeliveryEnabled
         settings.isPortraitEffectsMatteDeliveryEnabled = isDepthOn && photoOutput.isPortraitEffectsMatteDeliveryEnabled
+        // Portrait blurs the background from the depth (and the person matte) kept in the file.
+        if settings.isDepthDataDeliveryEnabled {
+            settings.isDepthDataFiltered = true
+            settings.embedsDepthDataInPhoto = true
+            settings.embedsPortraitEffectsMatteInPhoto = settings.isPortraitEffectsMatteDeliveryEnabled
+        }
         // Manual shutter/aperture are only honoured at .speed; night mode wants maximum fusion.
         if shutterSeconds != nil || aperture != nil {
             settings.photoQualityPrioritization = .speed
@@ -904,6 +1120,7 @@ class CameraManager {
                 aspectRatio: aspectRatio,
                 style: style,
                 encodeAsJPEG: format == .jpeg,
+                portrait: isDepthOn,
                 willCapture: { Task { @MainActor in onWillCapture() } },
                 completion: { result in Task { @MainActor in onFinish(result) } }
             )
@@ -998,9 +1215,7 @@ class CameraManager {
             change(device)
             device.unlockForConfiguration()
         } catch {
-            #if DEBUG
-            print("Couldn't configure the camera: \(error)")
-            #endif
+            // The device stays as it was; the control just doesn't change.
         }
     }
 }

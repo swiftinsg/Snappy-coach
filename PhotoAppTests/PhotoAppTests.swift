@@ -144,7 +144,8 @@ struct CoachRulesTests {
     }
 
     @Test func noTipAsksForATapOnTheViewfinder() {
-        // The viewfinder has no tap-to-focus, so tips can only name controls that exist.
+        // A tap on the viewfinder focuses and a double tap picks the subject, so tips never ask for
+        // a tap there: it would be unclear which one they mean.
         for issue in CoachIssue.allCases {
             for topic in AdviceTopic.allCases {
                 for advice in [issue.advice(for: topic), issue.alternativeAdvice(for: topic)].compactMap(\.self) {
@@ -479,8 +480,52 @@ struct CoachRulesTests {
     @Test func coachSaysWhyAppleIntelligenceIsMissing() {
         #expect(CoachRules.modelNotice(for: .available) == nil)
         #expect(CoachRules.modelNotice(for: .unavailable(.appleIntelligenceNotEnabled))?.contains("Turn it on in Settings") == true)
-        #expect(CoachRules.modelNotice(for: .unavailable(.deviceNotEligible))?.contains("can't run") == true)
-        #expect(CoachRules.modelNotice(for: .unavailable(.modelNotReady))?.contains("getting ready") == true)
+        #expect(CoachRules.modelNotice(for: .unavailable(.deviceNotEligible))?.contains("doesn't support") == true)
+        #expect(CoachRules.modelNotice(for: .unavailable(.modelNotReady))?.contains("downloading") == true)
+        // Every case says what still works and what's missing, so the simpler tips aren't a surprise.
+        for reason: SystemLanguageModel.Availability.UnavailableReason in [.appleIntelligenceNotEnabled, .deviceNotEligible, .modelNotReady] {
+            let notice = CoachRules.modelNotice(for: .unavailable(reason)) ?? ""
+            #expect(notice.contains("framing, light and angle tips"))
+            #expect(notice.contains("can't judge backgrounds"))
+        }
+    }
+
+    @Test func stylesThatNeedAppleIntelligenceAreMarked() {
+        #expect(CompositionGuide.leadingLines.needsAppleIntelligence)
+        #expect(CompositionGuide.symmetry.needsAppleIntelligence)
+        #expect(!CompositionGuide.ruleOfThirdsOne.needsAppleIntelligence)
+        #expect(!CompositionGuide.centre.needsAppleIntelligence)
+    }
+
+    @Test func tapToFocusFindsTheSpotOnTheSensor() {
+        // Held upright, the back sensor's frames are turned right: the top of the view is the sensor's left side.
+        let topLeft = FrameMapping.sensorPoint(forUpright: CGPoint(x: 0.25, y: 0.1), orientation: .right)
+        #expect(abs(topLeft.x - 0.1) < 0.001 && abs(topLeft.y - 0.75) < 0.001)
+        // Held sideways the frame is already upright.
+        #expect(FrameMapping.sensorPoint(forUpright: CGPoint(x: 0.3, y: 0.6), orientation: .up) == CGPoint(x: 0.3, y: 0.6))
+        // The middle is the middle, whichever way the phone or camera faces.
+        for orientation: CGImagePropertyOrientation in [.up, .down, .left, .right, .upMirrored, .downMirrored, .leftMirrored, .rightMirrored] {
+            #expect(FrameMapping.sensorPoint(forUpright: CGPoint(x: 0.5, y: 0.5), orientation: orientation) == CGPoint(x: 0.5, y: 0.5))
+        }
+    }
+
+    @Test func portraitBlursTheSavedPhoto() {
+        #expect(PhotoControl.depth.title == "Portrait")
+        // Portrait alone is enough to edit the photo; a plain 4:3 standard shot is saved as taken.
+        #expect(PhotoCaptureProcessor.needsEdit(ratio: .fourByThree, style: .standard, portrait: true))
+        #expect(!PhotoCaptureProcessor.needsEdit(ratio: .fourByThree, style: .standard, portrait: false))
+    }
+
+    @Test func unsupportedCameraControlsAreHidden() {
+        let model = PhotoControlsModel(topic: .composition, unsupported: [.lensAperture, .depth, .centerStage])
+        #expect(!model.availableControls.contains(.lensAperture))
+        #expect(!model.availableControls.contains(.depth))
+        #expect(!model.availableControls.contains(.centerStage))
+        #expect(model.availableControls.contains(.timer))
+        // A topic's default that the phone can't offer is replaced, never shown.
+        for topic in AdviceTopic.allCases {
+            #expect(model.defaults(for: topic).allSatisfy(model.availableControls.contains))
+        }
     }
 
     @Test func editedPhotosKeepTheirMetadata() {
@@ -811,58 +856,6 @@ struct CoachRulesTests {
     }
 }
 
-/// The finger-on-lens check, on made-up grids so each test states only what matters.
-struct LensBlockTests {
-    /// A detailed, neutral scene.
-    private let scene = LensBlockFinder.Cell(sharpness: 300, red: 0.45, green: 0.45, blue: 0.45)
-    /// What a finger right on the glass looks like: smooth and skin-toned.
-    private let finger = LensBlockFinder.Cell(sharpness: 2, red: 0.55, green: 0.32, blue: 0.22)
-
-    /// The scene, with `cell` in the top left `size`×`size` corner.
-    private func grid(corner cell: LensBlockFinder.Cell, size: Int = 3, rest: LensBlockFinder.Cell? = nil) -> [[LensBlockFinder.Cell]] {
-        (0..<LensBlockFinder.rows).map { row in
-            (0..<LensBlockFinder.columns).map { column in
-                row < size && column < size ? cell : (rest ?? scene)
-            }
-        }
-    }
-
-    @Test func findsAFingerInTheCorner() throws {
-        let box = try #require(LensBlockFinder.find(cells: grid(corner: finger)))
-        #expect(box.minX == 0 && box.minY == 0)
-        #expect(abs(box.width - 3.0 / 8) < 0.001)
-        #expect(LensBlockFinder.placeName(of: box) == "the top left corner")
-    }
-
-    @Test func aFingerInFocusIsInTheShotOnPurpose() {
-        var sharpFinger = finger
-        sharpFinger.sharpness = 200
-        #expect(LensBlockFinder.find(cells: grid(corner: sharpFinger)) == nil)
-    }
-
-    @Test func theTappedSubjectIsNotAFinger() {
-        let tapped = CGRect(x: 0, y: 0, width: 0.4, height: 0.4)
-        #expect(LensBlockFinder.find(cells: grid(corner: finger), exempt: [tapped]) == nil)
-    }
-
-    @Test func plainSkyAndWallsAreNotFingers() {
-        let sky = LensBlockFinder.Cell(sharpness: 1, red: 0.5, green: 0.7, blue: 0.95)
-        let wall = LensBlockFinder.Cell(sharpness: 1, red: 0.8, green: 0.8, blue: 0.78)
-        #expect(LensBlockFinder.find(cells: grid(corner: sky, size: 4)) == nil)
-        #expect(LensBlockFinder.find(cells: grid(corner: wall, size: 4)) == nil)
-    }
-
-    @Test func aSoftSceneIsNotMistakenForAFinger() {
-        let soft = LensBlockFinder.Cell(sharpness: 20, red: 0.45, green: 0.45, blue: 0.45)
-        #expect(LensBlockFinder.find(cells: grid(corner: finger, rest: soft)) == nil)
-    }
-
-    @Test func tooSmallOrTooBigIsNotAFinger() {
-        #expect(LensBlockFinder.find(cells: grid(corner: finger, size: 1)) == nil)
-        #expect(LensBlockFinder.find(cells: grid(corner: finger, size: 7)) == nil)
-    }
-}
-
 /// Each photo's story, and grouping the gallery by the mode it was taken in.
 struct GalleryStoryTests {
     private let record = ShotRecord(
@@ -913,36 +906,6 @@ extension GalleryStoryTests {
         let lightOnly = GallerySection.grouped(photos, topicOf: { topics[$0] }, filter: .light)
         #expect(lightOnly.count == 1)
         #expect(lightOnly.first?.items == ["l1"])
-    }
-}
-
-extension LensBlockTests {
-    /// A white ceiling under warm lamps: everything looks warm, and the ceiling is smooth and bright.
-    @Test func aCeilingInWarmLightIsNotAFinger() {
-        let room = LensBlockFinder.Cell(sharpness: 300, red: 0.55, green: 0.45, blue: 0.32)
-        let ceiling = LensBlockFinder.Cell(sharpness: 1, red: 0.85, green: 0.72, blue: 0.52)
-        // Across the top of the frame.
-        let band = (0..<LensBlockFinder.rows).map { row in
-            (0..<LensBlockFinder.columns).map { _ in row < 2 ? ceiling : room }
-        }
-        #expect(LensBlockFinder.find(cells: band) == nil)
-        // Even just in the corner, it's as warm as the rest of the room and brighter, so it's not a finger.
-        #expect(LensBlockFinder.find(cells: grid(corner: ceiling, rest: room)) == nil)
-    }
-
-    @Test func aDarkSmoothFingerInWarmLightIsStillFound() {
-        let room = LensBlockFinder.Cell(sharpness: 300, red: 0.55, green: 0.45, blue: 0.32)
-        // Darker than the room and redder than its warm cast.
-        let finger = LensBlockFinder.Cell(sharpness: 2, red: 0.38, green: 0.22, blue: 0.14)
-        #expect(LensBlockFinder.find(cells: grid(corner: finger, rest: room)) != nil)
-    }
-
-    @Test func somethingRunningEdgeToEdgeIsTheScene() {
-        let table = LensBlockFinder.Cell(sharpness: 2, red: 0.5, green: 0.28, blue: 0.18)
-        let band = (0..<LensBlockFinder.rows).map { row in
-            (0..<LensBlockFinder.columns).map { _ in row >= 6 ? table : scene }
-        }
-        #expect(LensBlockFinder.find(cells: band) == nil)
     }
 }
 

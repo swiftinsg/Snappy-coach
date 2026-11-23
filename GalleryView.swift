@@ -12,6 +12,7 @@ import Photos
 struct GalleryView: View {
     let gallery: PhotoGallery
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     @State private var isSelecting = false
     /// Identifiers of the ticked photos.
@@ -32,17 +33,30 @@ struct GalleryView: View {
         NavigationStack(path: $path) {
             Group {
                 if !gallery.hasAccess {
-                    ContentUnavailableView(
-                        "No Access to Photos",
-                        systemImage: "lock",
-                        description: Text("Allow Photos access in Settings to see the photos you've taken.")
-                    )
+                    ContentUnavailableView {
+                        Label("No Access to Photos", systemImage: "lock")
+                    } description: {
+                        Text("Allow Photos access in Settings to see the photos you've taken.")
+                    } actions: {
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                openURL(url)
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                 } else if gallery.assets.isEmpty {
-                    ContentUnavailableView(
-                        "No Photos Yet",
-                        systemImage: "photo.on.rectangle",
-                        description: Text("Photos you take in this app will appear here.")
-                    )
+                    // Prompts the first photo: back to the camera, where the coach helps take it.
+                    ContentUnavailableView {
+                        Label("No Photos Yet", systemImage: "photo.on.rectangle")
+                    } description: {
+                        Text("Photos you take in this app will appear here, along with what the coach told you.")
+                    } actions: {
+                        Button("Take a Photo", systemImage: "camera") {
+                            dismiss()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                 } else {
                     ScrollView {
                         // Headers stay pinned while scrolling everything, so it's clear which mode you're in.
@@ -497,10 +511,14 @@ private struct PhotoStory: View {
             }
 
             if record.wasReady {
-                Label("Coach said this shot was ready", systemImage: "checkmark.circle.fill")
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .green)
-                    .font(.subheadline.weight(.semibold))
+                Label {
+                    Text("Coach said this shot was ready")
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .green)
+                }
+                .font(.subheadline.weight(.semibold))
             } else if let suggestion = record.suggestion {
                 Label {
                     Text("Coach was still suggesting: \(suggestion)")

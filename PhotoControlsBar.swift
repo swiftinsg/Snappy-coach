@@ -22,11 +22,21 @@ struct PhotoControlsBar: View {
             controls
                 .onboardingAnchor(.photoControls, .editControls)
         }
+        // A slider whose button just hid (Aperture after switching to the front camera, say) closes too.
+        .onChange(of: isActiveAdjustmentAvailable) { _, isAvailable in
+            if !isAvailable { activeAdjustment = nil }
+        }
+    }
+
+    private var isActiveAdjustmentAvailable: Bool {
+        activeAdjustment.map(camera.isAvailableOnCurrentCamera) ?? true
     }
 
     private var controls: some View {
         HStack(spacing: 12) {
-            ForEach(model.visibleControls) { control in
+            // Controls the camera in use can't do (Aperture on the front camera, say) are hidden
+            // until a camera that can is chosen; editing still shows every pinned control.
+            ForEach(model.visibleControls.filter { model.isEditing || camera.isAvailableOnCurrentCamera($0) }) { control in
                 if model.isEditing {
                     editableIcon(for: control)
                 } else {

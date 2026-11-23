@@ -196,6 +196,14 @@ nonisolated final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 
     /// Width divided by height of the newest frame once turned upright.
+    /// Where a point in the upright frame is on the sensor, for tap to focus.
+    func sensorPoint(forUpright point: CGPoint) -> CGPoint {
+        lock.lock()
+        let orientation = frameOrientation
+        lock.unlock()
+        return FrameMapping.sensorPoint(forUpright: point, orientation: orientation)
+    }
+
     func uprightAspect() -> CGFloat? {
         lock.lock()
         let buffer = latest
@@ -556,22 +564,12 @@ final class PhotoCoach {
     private(set) var sectionProgress: Double = 0
     /// A message for when the coach can't run at all.
     private(set) var notice: String?
-    /// Raw measurements and model output, for the hidden debug overlay.
-    private(set) var debugText = ""
     /// What has been done so far, kept across topics and photos.
     private(set) var memory = CoachMemory()
     /// Issues fixed since the last photo, for that photo's story in the gallery.
     private(set) var fixedSinceShot: [CoachIssue] = []
     /// What kind of photo the camera is looking at, smoothed over the last few checks.
     private(set) var scene: SceneType?
-    /// Where a finger seems to be over the lens, outlined on the viewfinder. While it's set, the
-    /// card asks to move it instead of giving advice about a frame that's partly blocked.
-    private(set) var lensBlock: CGRect?
-
-    /// What the card says while a finger is over the lens.
-    var lensBlockMessage: String? {
-        lensBlock.map { "A finger might be over the lens at \(LensBlockFinder.placeName(of: $0)). Move it off the camera." }
-    }
 
     var isReady: Bool { feedback?.isGoodEnough ?? false }
 
@@ -636,23 +634,8 @@ final class PhotoCoach {
     private var reframeStart: (layout: [Double], zoom: CGFloat)?
     /// Checks in a row the view has been clearly different, so one jumpy frame doesn't count.
     private var reframePasses = 0
-    /// How much the view has changed since the tip appeared, for the debug overlay.
-    private var reframeAmount = 0.0
     /// Model-only tips done during this topic, so the model can't ask for them again.
     private var reframedDone: Set<CoachIssue> = []
-    // A finger over the lens must be seen in the same spot three times in a row before it's
-    // mentioned, and the lens clear twice in a row before the warning goes, so one odd frame does neither.
-    private var lensBlockPasses = 0
-    private var lensClearPasses = 0
-    /// Where the possible finger was last check, to see that it stays put.
-    private var lensBlockCandidate: CGRect?
-    /// When the current warning appeared.
-    private var lensBlockShownAt: ContinuousClock.Instant?
-    /// The finger stayed put long after being asked to move it, so it's there on purpose.
-    /// Not mentioned again until the lens has been clear for a moment.
-    private var isLensBlockIgnored = false
-    /// How long a finger can stay after the warning before it's taken as deliberate.
-    private static let lensBlockPatience: Duration = .seconds(12)
 
     /// Moves done during this topic. Once someone has stepped closer, no tip asks again.
     private var movesDone: Set<DistanceMove> = []
@@ -669,11 +652,6 @@ final class PhotoCoach {
         reframedDone = []
         sectionProgress = 0
         sectionRecommendation = nil
-        lensBlock = nil
-        lensBlockPasses = 0
-        lensClearPasses = 0
-        lensBlockShownAt = nil
-        lensBlockCandidate = nil
         // A new topic is a new section; the memory sentence carries what was done before.
         endSection()
         memory.notePractising(topic, styles: styles)
@@ -681,16 +659,16 @@ final class PhotoCoach {
         attitude.start()
         defer { attitude.stop() }
 
-        let usesModel = CoachRules.usesModel(topic) && SystemLanguageModel.default.isAvailable
+        var usesModel = CoachRules.usesModel(topic) && SystemLanguageModel.default.isAvailable
         if usesModel {
             session = makeSession(for: topic, styles: styles)
             session?.prewarm()
         }
-        // Say once why the tips are simpler when Apple Intelligence can't help.
+        // Say once why the tips are simpler when Apple Intelligence can't help, and what's missing.
         if CoachRules.usesModel(topic), !Self.hasExplainedModel,
            let text = CoachRules.modelNotice(for: SystemLanguageModel.default.availability) {
             Self.hasExplainedModel = true
-            showNotice(text, for: .seconds(4))
+            showNotice(text, for: .seconds(8))
         }
 
         var isFirstPass = true
@@ -703,6 +681,15 @@ final class PhotoCoach {
             }
             isFirstPass = false
             guard !Task.isCancelled else { continue }
+
+            // Apple Intelligence can finish downloading, or be turned on or off, while the camera is
+            // open: follow it, so the full coach starts as soon as it's ready.
+            let modelReady = CoachRules.usesModel(topic) && SystemLanguageModel.default.isAvailable
+            if modelReady != usesModel {
+                usesModel = modelReady
+                session = modelReady ? makeSession(for: topic, styles: styles) : nil
+                session?.prewarm()
+            }
 
             // A call or another app: say so, and don't spend effort on a frozen frame.
             if let pause = camera.pauseNotice {
@@ -746,13 +733,6 @@ final class PhotoCoach {
             let steadyBackdrop = backdropCounts.first { $0.value * 2 > recentBackdrops.count }?.key
             analysis.backdrop = analysis.scene == .people ? steadyBackdrop : nil
 
-            // Part of the frame is a finger, so advice about it would be wrong: ask to move it first.
-            updateLensBlock(analysis.lensBlock)
-            if lensBlock != nil {
-                debugText = analysis.debugDescription
-                continue
-            }
-
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
             // The model's suggestion: the best style for this scene that still fits what's picked.
@@ -776,7 +756,7 @@ final class PhotoCoach {
                 let zoom = camera.zoomLevel
                 if let start = reframeStart {
                     let zoomChange = max(zoom, start.zoom) / max(min(zoom, start.zoom), 0.1)
-                    reframeAmount = SceneAnalysis.reframeAmount(from: start.layout, to: analysis.layout)
+                    let reframeAmount = SceneAnalysis.reframeAmount(from: start.layout, to: analysis.layout)
                     let reframed = reframeAmount >= CoachRules.reframeThreshold || zoomChange >= 1.3
                     reframePasses = reframed ? reframePasses + 1 : 0
                     if reframePasses >= 2 { reframedDone.insert(shownIssue) }
@@ -805,7 +785,6 @@ final class PhotoCoach {
             // The model is only asked when nothing it can't see past was measured, which saves
             // battery and keeps it to what it's good at: judging the look of the scene.
             var details: [CoachIssue: IssueDetail] = [:]
-            var modelNote = "model: not asked"
             // Once the subject is in place, the guide's job is done, and the model must keep it there.
             let keepsPlacement = usesBox && guide.target?.isAligned == true
             // The rules and the model are one coach: the model hears what the rules are already
@@ -820,8 +799,6 @@ final class PhotoCoach {
                    selectedName: picked?.name, handled: handled
                ) {
                 guard !Task.isCancelled else { break }
-                modelNote = "model: \(judgement.issue.rawValue) @ \(judgement.region.rawValue) \"\(judgement.thing)\" / \(judgement.strength)"
-                if let handled { modelNote += "\nsent: \(handled)" }
                 var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
                 detail.subjectBox = analysis.subject
                 detail.isMirrored = camera.isUsingFrontCamera
@@ -852,7 +829,6 @@ final class PhotoCoach {
                                 let labels = await Self.labels(of: found.box, in: frame)
                                 guard !Task.isCancelled else { break }
                                 if !detail.matches(labels: labels) {
-                                    modelNote += "\nname dropped: Vision sees \(labels.prefix(3).map(\.label).joined(separator: ", "))"
                                     detail.thing = nil
                                     detail.box = nil
                                 }
@@ -869,9 +845,6 @@ final class PhotoCoach {
             }
             issues = memory.reordered(issues, keeping: shownIssue)
 
-            debugText = analysis.debugDescription + "\n" + modelNote
-                + String(format: "\nreframe %.2f (needs %.2f)", reframeAmount, CoachRules.reframeThreshold)
-                + "\ndone: " + memory.sentence
             publish(
                 top: issues.first,
                 next: issues.dropFirst().first,
@@ -883,41 +856,6 @@ final class PhotoCoach {
                 analysis: analysis,
                 keepsPlacement: keepsPlacement
             )
-        }
-    }
-
-    /// Shows or clears the finger warning, once what's been seen has held for a couple of checks.
-    private func updateLensBlock(_ found: CGRect?) {
-        guard let found else {
-            lensBlockPasses = 0
-            lensBlockCandidate = nil
-            lensClearPasses += 1
-            if lensClearPasses >= 2 {
-                lensBlock = nil
-                lensBlockShownAt = nil
-                isLensBlockIgnored = false
-            }
-            return
-        }
-        lensClearPasses = 0
-        // A finger stays in the same spot while the scene moves past it; a patch that jumps about
-        // between checks is the scene, so the count starts again.
-        let isSameSpot = lensBlockCandidate.map { LensBlockFinder.overlap($0, found) >= 0.5 } ?? true
-        lensBlockPasses = isSameSpot ? lensBlockPasses + 1 : 1
-        lensBlockCandidate = found
-        guard !isLensBlockIgnored else { return }
-        if let shownAt = lensBlockShownAt {
-            if ContinuousClock.now - shownAt > Self.lensBlockPatience {
-                // Still there after all this time: it's in the shot on purpose.
-                isLensBlockIgnored = true
-                lensBlock = nil
-                lensBlockShownAt = nil
-            } else {
-                lensBlock = found
-            }
-        } else if lensBlockPasses >= 3 {
-            lensBlock = found
-            lensBlockShownAt = .now
         }
     }
 
@@ -969,7 +907,6 @@ final class PhotoCoach {
         moveStartSize = nil
         reframeStart = nil
         reframePasses = 0
-        reframeAmount = 0
         movePasses = 0
     }
 
@@ -1275,11 +1212,6 @@ final class PhotoCoach {
                 }.content
             }
         } catch {
-            #if DEBUG
-            if !Task.isCancelled {
-                print("Coach error: \(error)")
-            }
-            #endif
             return nil
         }
     }
@@ -1310,28 +1242,9 @@ final class PhotoCoach {
         )
     }
 
-    /// The newest live camera frame, cropped to the viewfinder. The Simulator has no camera,
-    /// so it uses the test photo instead.
+    /// The newest live camera frame, cropped to the viewfinder.
     private func currentFrame(from camera: CameraManager) -> CGImage? {
-        if let live = camera.frameGrabber.latestImage(portraitAspect: camera.aspectRatio.portraitAspect) {
-            return live
-        }
-        #if targetEnvironment(simulator)
-        return Self.testPhoto()
-        #else
-        return nil
-        #endif
-    }
-
-    static func testPhoto() -> CGImage? {
-        guard let photo = UIImage(named: "test photo") else { return nil }
-        let scale = min(1, 1024 / max(photo.size.width, photo.size.height))
-        let size = CGSize(width: photo.size.width * scale, height: photo.size.height * scale)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            photo.draw(in: CGRect(origin: .zero, size: size))
-        }.cgImage
+        camera.frameGrabber.latestImage(portraitAspect: camera.aspectRatio.portraitAspect)
     }
 }
 

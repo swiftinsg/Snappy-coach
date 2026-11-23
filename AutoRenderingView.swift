@@ -6,6 +6,7 @@
 //
 
 import AVKit
+import FoundationModels
 import SwiftUI
 
 struct AutoRenderingView: View {
@@ -35,8 +36,6 @@ struct AutoRenderingView: View {
     @State private var compositionExplanation: CompositionGuide?
     /// Briefly blacks out the screen when a photo is taken, like the Camera app.
     @State private var isShutterBlinking = false
-    /// Shows the coach's raw measurements over the card, for tuning the advice.
-    @State private var isCoachDebugOn = false
     /// The advice card is pushed down out of the way, leaving a small pill to pull it back up. Remembered between launches.
     @AppStorage("isAdviceCollapsed") private var isAdviceCollapsed = false
     /// The advice card also shows the idea behind the advice. Tapping the card toggles through prompt, explanation, then back to the pill.
@@ -208,7 +207,7 @@ struct AutoRenderingView: View {
 
     /// The third lines the advice on screen names, lit up on the grid while the advice is showing.
     private var highlightedThirdsLines: Set<ThirdsLine> {
-        guard !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, coach.lensBlock == nil else { return [] }
+        guard !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil else { return [] }
         return coach.feedback?.thirdsLines ?? []
     }
 
@@ -222,7 +221,7 @@ struct AutoRenderingView: View {
         adviceTopic == .composition ? CompositionGuide.guidePlacement(for: compositionGuides) : nil
     }
 
-    /// Topics whose advice is about one subject, so they wait for the person to tap it.
+    /// Topics whose advice is about one subject, so they wait for the person to double-tap it.
     private var needsObject: Bool {
         [.composition, .focus].contains(adviceTopic)
     }
@@ -238,7 +237,7 @@ struct AutoRenderingView: View {
     /// The coach's advice, which can be pushed down into a small pill and pulled back up.
     @ViewBuilder
     private var adviceArea: some View {
-        if coach.notice != nil || coach.lensBlock != nil || coach.feedback != nil || isWaitingForObject {
+        if coach.notice != nil || coach.feedback != nil || isWaitingForObject {
             if isAdviceCollapsed {
                 collapsedAdvicePill
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -274,7 +273,7 @@ struct AutoRenderingView: View {
 
     /// Whether the current advice has an explanation to reveal.
     private var hasAdviceExplanation: Bool {
-        guard coach.notice == nil, coach.lensBlock == nil, !isWaitingForObject, let feedback = coach.feedback else { return false }
+        guard coach.notice == nil, !isWaitingForObject, let feedback = coach.feedback else { return false }
         return !feedback.isGoodEnough && feedback.why != nil
     }
 
@@ -339,20 +338,8 @@ struct AutoRenderingView: View {
                 .fill(.white.opacity(0.5))
                 .frame(width: 36, height: 5)
                 .accessibilityHidden(true)
-            // Hidden debug view: press and hold the card to see what the coach measured.
-            if isCoachDebugOn, !coach.debugText.isEmpty {
-                Text(coach.debugText)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(.black.opacity(0.6), in: .rect(cornerRadius: 12))
-            }
             if let notice = coach.notice {
                 CoachTipView(text: notice)
-            } else if let lensBlock = coach.lensBlockMessage {
-                // Comes before everything else: advice about a partly blocked frame would be wrong.
-                CoachTipView(text: lensBlock)
             } else if isWaitingForObject {
                 // Advice about the subject needs the person to pick it first.
                 CoachTipView(text: selectObjectPrompt)
@@ -361,7 +348,7 @@ struct AutoRenderingView: View {
                     selectedObjectHeader(object)
                 } else {
                     // Optional for this topic, but it still tailors the advice.
-                    Label("Tip: tap an object for advice about it.", systemImage: "hand.tap")
+                    Label("Tip: double-tap an object for advice about it.", systemImage: "hand.tap")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.85))
                         .shadow(color: .black.opacity(0.5), radius: 2)
@@ -372,13 +359,6 @@ struct AutoRenderingView: View {
                 CoachTipView(text: "Looking at your shot…")
             }
         }
-        // The coach's raw numbers, for tuning. Only in development builds, so a long press in the
-        // released app never shows them.
-        #if DEBUG
-        .onLongPressGesture {
-            isCoachDebugOn.toggle()
-        }
-        #endif
     }
 
     /// Room at each end of the advice card when the phone is held sideways. The card runs along
@@ -453,12 +433,12 @@ struct AutoRenderingView: View {
 
     private var selectObjectPrompt: String {
         if objectSelection.isFinding {
-            return "Finding what you tapped…"
+            return "Finding what you double-tapped…"
         }
         if objectSelection.isLost {
-            return "Lost sight of it. Tap the object again to keep getting advice about it."
+            return "Lost sight of it. Double-tap the object again to keep getting advice about it."
         }
-        return "Select an object: tap what you want to photograph to get advice about it."
+        return "Select an object: double-tap what you want to photograph to get advice about it."
     }
 
     /// Says what the advice is about, with a button to choose something else.
@@ -488,7 +468,17 @@ struct AutoRenderingView: View {
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
     }
 
-    /// Picks the object under a tap on the viewfinder. `location` and `size` are in the upright view.
+    /// Focuses and meters where a single tap landed. `location` and `size` are in the upright view.
+    /// Returns false when the tap missed the frame, so no focus square is shown.
+    private func focus(at location: CGPoint, in size: CGSize) -> Bool {
+        guard let aspect = camera.frameGrabber.uprightAspect() else { return false }
+        let point = FrameMapping.framePoint(for: location, frameAspect: aspect, in: size)
+        guard (0...1).contains(point.x), (0...1).contains(point.y) else { return false }
+        camera.focusAndExpose(at: camera.frameGrabber.sensorPoint(forUpright: point))
+        return true
+    }
+
+    /// Picks the object under a double tap on the viewfinder. `location` and `size` are in the upright view.
     private func selectObject(at location: CGPoint, in size: CGSize) {
         guard let aspect = camera.frameGrabber.uprightAspect() else { return }
         let point = FrameMapping.framePoint(for: location, frameAspect: aspect, in: size)
@@ -510,6 +500,11 @@ struct AutoRenderingView: View {
             // around it, so what you see matches the photo that's saved.
             CameraPreview(session: camera.session)
                 .aspectRatio(camera.aspectRatio.portraitAspect, contentMode: .fit)
+                // Blurs over the swap between front and back, like the Camera app, so the
+                // last frame of one camera doesn't jump straight to the other.
+                .overlay {
+                    CameraSwitchBlur(isSwitching: camera.isSwitchingCamera)
+                }
                 // The tour spotlights the whole viewfinder, so the tap reaches the object.
                 .onboardingAnchor(.selectObject)
                 // Grids help line the scene up while composing.
@@ -542,17 +537,11 @@ struct AutoRenderingView: View {
                             .onboardingAnchor(.alignSubject)
                     }
                 }
-                // Tap anything in the viewfinder to get advice about it, and see it outlined while it's followed.
+                // Tap to focus and set the brightness, like the Camera app. Double-tap anything to
+                // get advice about it, and see it outlined while it's followed.
                 .overlay {
                     UprightOverlay(orientation: camera.holdOrientation) {
-                        GeometryReader { proxy in
-                            Color.clear
-                                .contentShape(.rect)
-                                .onTapGesture { location in
-                                    selectObject(at: location, in: proxy.size)
-                                }
-                                .accessibilityHidden(true)
-                        }
+                        ViewfinderTapLayer(camera: camera, onFocus: focus, onSelect: selectObject)
                     }
                 }
                 .overlay {
@@ -564,7 +553,7 @@ struct AutoRenderingView: View {
                 }
                 // Outlines what the advice names, like "the lamp post", so it's clear what it means.
                 .overlay {
-                    if !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, coach.lensBlock == nil, let highlight = coach.feedback?.highlight {
+                    if !isWaitingForObject, !isAdviceCollapsed, coach.notice == nil, let highlight = coach.feedback?.highlight {
                         UprightOverlay(orientation: camera.holdOrientation) {
                             CoachHighlightOverlay(highlight: highlight)
                         }
@@ -572,19 +561,9 @@ struct AutoRenderingView: View {
                     }
                 }
                 .animation(.easeInOut, value: coach.feedback?.highlight)
-                // Shades where a finger seems to be over the lens, so it's clear which corner to clear.
-                .overlay {
-                    if coach.notice == nil, let block = coach.lensBlock {
-                        UprightOverlay(orientation: camera.holdOrientation) {
-                            CoachHighlightOverlay(highlight: CoachHighlight(box: block, label: "finger", isArea: true))
-                        }
-                        .transition(.opacity)
-                    }
-                }
-                .animation(.easeInOut, value: coach.lensBlock)
                 // A big arrow for the camera move the advice asks for, once the advice is about a chosen object.
                 .overlay {
-                    if !isWaitingForObject, coach.notice == nil, coach.lensBlock == nil, let move = coach.feedback?.move {
+                    if !isWaitingForObject, coach.notice == nil, let move = coach.feedback?.move {
                         UprightOverlay(orientation: camera.holdOrientation) {
                             CameraMoveArrow(move: move)
                         }
@@ -692,6 +671,11 @@ struct AutoRenderingView: View {
                             .font(.subheadline.bold())
                         Text(compositionExplanation.explanation)
                             .font(.subheadline)
+                        if compositionExplanation.needsAppleIntelligence, !SystemLanguageModel.default.isAvailable {
+                            Text(CompositionGuide.withoutAppleIntelligenceNote)
+                                .font(.footnote)
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
                     }
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.white)
@@ -928,8 +912,7 @@ struct AutoRenderingView: View {
             if let activeAdjustment, !controls.pinned.contains(activeAdjustment) {
                 self.activeAdjustment = nil
             }
-        }
-        .onChange(of: camera.shutterCount) {
+        }        .onChange(of: camera.shutterCount) {
             // Keep what the coach knew for the photo's story, before the section it describes ends.
             pendingShots.append(coach.shotRecord(topic: adviceTopic, styles: compositionGuides))
             // Taking the photo finishes the coach's current section.

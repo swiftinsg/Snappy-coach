@@ -3,6 +3,7 @@
 //  Grp 6pm Photo App
 //
 
+import FoundationModels
 import SwiftUI
 
 /// Composition techniques the person can pick while the advice topic is Composition.
@@ -72,6 +73,18 @@ enum CompositionGuide: String, CaseIterable, Identifiable {
         case .negativeSpace: "Keep your subject small, with lots of empty space around it, so it stands out."
         }
     }
+
+    /// True when part of this style's feedback comes from Apple Intelligence: a model issue
+    /// belongs to it and the coach would use it. Without the model, the style only gets the
+    /// placement guide, so people are told before they rely on it.
+    var needsAppleIntelligence: Bool {
+        VisualIssue.allCases.contains { issue in
+            issue.styles?.contains(self) == true && CoachRules.allows(issue, for: .composition, styles: [self])
+        }
+    }
+
+    /// Added to the explanation of styles that need Apple Intelligence, when it isn't available.
+    static let withoutAppleIntelligenceNote = "Without Apple Intelligence, you'll only get help with placement for this style."
 }
 
 // MARK: - Scene suitability
@@ -449,6 +462,9 @@ struct CompositionPicker: View {
         if !conflicts.isEmpty {
             let names = CompositionGuide.allCases.filter(conflicts.contains).map(\.title)
             parts.append("Replaces \(names.formatted(.list(type: .and)))")
+        }
+        if guide.needsAppleIntelligence, !SystemLanguageModel.default.isAvailable {
+            parts.append(CompositionGuide.withoutAppleIntelligenceNote)
         }
         return parts.joined(separator: ". ")
     }

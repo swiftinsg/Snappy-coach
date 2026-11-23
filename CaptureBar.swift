@@ -43,8 +43,10 @@ struct CaptureBar: View {
     /// Flips between the back and front cameras. Same size as the gallery button so the shutter stays centred.
     private var switchCameraButton: some View {
         Button {
-            if let message = camera.switchCamera() {
-                onStatus(message)
+            Task {
+                if let message = await camera.switchCamera() {
+                    onStatus(message)
+                }
             }
         } label: {
             Image(systemName: "arrow.triangle.2.circlepath")
@@ -57,7 +59,7 @@ struct CaptureBar: View {
                 .glassEffect(.regular.tint(.black.opacity(0.35)).interactive(), in: .circle)
         }
         .buttonStyle(.plain)
-        .disabled(camera.isCapturing || camera.countdown != nil)
+        .disabled(camera.isCapturing || camera.countdown != nil || camera.isSwitchingCamera)
         .animation(.snappy, value: camera.isUsingFrontCamera)
         .sensoryFeedback(.selection, trigger: camera.isUsingFrontCamera)
         .accessibilityLabel("Switch camera")

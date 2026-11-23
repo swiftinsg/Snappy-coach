@@ -23,7 +23,7 @@ enum PhotoControl: String, CaseIterable, Identifiable {
         case .timer: "Timer"
         case .exposure: "Exposure"
         case .styles: "Styles"
-        case .depth: "Depth"
+        case .depth: "Portrait"
         case .nightMode: "Night Mode"
         case .centerStage: "Center Stage"
         case .format: "Format"
@@ -84,14 +84,13 @@ final class PhotoControlsModel {
     private(set) var draft: [PhotoControl] = []
     private(set) var isEditing = false
 
-    /// Controls this device can offer. Aperture is hidden unless the camera has a variable aperture.
+    /// Controls this device can offer. Ones no camera on the phone supports, like Aperture
+    /// before iPhone 18 Pro, are left out everywhere.
     let availableControls: [PhotoControl]
 
-    init(topic: AdviceTopic = .composition, supportsVariableAperture: Bool = CameraManager.supportsVariableAperture) {
+    init(topic: AdviceTopic = .composition, unsupported: Set<PhotoControl> = CameraManager.unsupportedControls) {
         self.topic = topic
-        availableControls = PhotoControl.allCases.filter {
-            $0 != .lensAperture || supportsVariableAperture
-        }
+        availableControls = PhotoControl.allCases.filter { !unsupported.contains($0) }
     }
 
     /// The controls pinned to the top bar for the current topic.
