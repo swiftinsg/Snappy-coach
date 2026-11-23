@@ -26,6 +26,10 @@ nonisolated struct CameraReadings: Sendable, Equatable {
     var exposureBias: Double = 0
     var isNightModeOn = false
     var isFlashOn = false
+    /// The front camera is a mirror: "your left" is the left of the screen, as it is from behind.
+    var isFrontCamera = false
+    /// White Balance has been set by hand, so a colour cast is the person's choice.
+    var isWhiteBalanceSet = false
     // So the advice can say how much to move: "Zoom to 2×", "Turn about 10° left".
     /// The zoom, like the zoom buttons: 1 is the main lens.
     var zoom: Double = 1
@@ -44,6 +48,8 @@ nonisolated struct CameraReadings: Sendable, Equatable {
             exposureBias: Double(camera.exposureBias),
             isNightModeOn: camera.isNightModeOn,
             isFlashOn: camera.flash == .on,
+            isFrontCamera: camera.isUsingFrontCamera,
+            isWhiteBalanceSet: camera.whiteBalanceKelvin != nil,
             zoom: Double(camera.zoomLevel),
             zoomStops: camera.zoomStops.map(Double.init),
             fieldOfView: Self.fieldOfView(of: device)
@@ -309,6 +315,18 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var backgroundBusyness: Double? = nil
     /// How much the brightness varies inside the subject, 0...0.5. Low for plain, smooth things.
     var subjectContrast: Double? = nil
+    /// For the biggest face: its darker side's brightness over its brighter side's, 0...1.
+    /// Near 1 is evenly lit; low means one half of the face is lost in shadow. Nil without a face.
+    var faceShadowRatio: Double? = nil
+    /// The side of the biggest face that's clearly brighter, as seen on screen. Nil when it's even.
+    var faceLitSide: LightSide? = nil
+    /// A small, blown-out light source in the frame, like the sun, a lamp or a window, from the
+    /// top left. Nil when there's none, or when the whole sky is bright rather than one spot.
+    var lightSpot: CGRect? = nil
+    /// Vision sees an outdoor scene, so a bright spot can be the sun.
+    var isOutdoors = false
+    /// Red over blue across the frame. Around 1 is neutral; well above is orange (lamps), well below is blue (shade).
+    var colourWarmth: Double? = nil
 
     /// How many people are in the frame, whether their faces or only their bodies show.
     var personCount: Int {
@@ -406,6 +424,22 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         if subjectTouchesEdge { facts.append("the subject runs off the edge of the frame") }
         if let tilt, abs(tilt) >= CoachRules.tiltThreshold { facts.append("the phone is tilted \(Int(abs(tilt).rounded()))°") }
         if let shake, shake >= CoachRules.shakeThreshold { facts.append("the phone is moving") }
+        // Where the light is, so the model's light tips agree with what's measured.
+        if let lightSpot {
+            let place = LightSide.of(lightSpot)
+            let what = sunSpot != nil ? "likely the sun" : "likely a lamp or window"
+            facts.append("a small, very bright light source (\(what)) at the \(place.rawValue) of the frame")
+        }
+        if let side = lightSide?.sideWord { facts.append("the light comes from the \(side) of the frame") }
+        // What's already on, so it isn't suggested again.
+        var settings: [String] = []
+        if readings.isNightModeOn { settings.append("Night Mode") }
+        if readings.isFlashOn { settings.append("Flash") }
+        if readings.isWhiteBalanceSet { settings.append("a hand-set White Balance") }
+        if abs(readings.exposureBias) >= 0.3 {
+            settings.append(String(format: "brightness adjusted by %+.1f stops", readings.exposureBias))
+        }
+        if !settings.isEmpty { facts.append("already on: " + settings.joined(separator: ", ")) }
         return facts.joined(separator: "; ")
     }
 
@@ -437,6 +471,9 @@ extension SceneAnalysis {
         // What the labels alone say, so a person in front of a landscape keeps the landscape too.
         let behind = SceneType.classify(labels: labels, faces: [])
         let backdrop = scene == .people && behind != .object && behind != .people ? behind : nil
+        let outdoors = [scene, behind].contains { [.landscape, .city, .nature].contains($0) }
+            || labels.contains { ["sky", "outdoor", "sun", "sunset", "sunrise", "cloud"].contains($0.identifier.lowercased()) }
+        let faceLight = faceLighting(of: faces, in: gray)
 
         // Without a subject, judge sharpness and brightness in the middle of the frame.
         let region = subject ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
@@ -463,7 +500,12 @@ extension SceneAnalysis {
             },
             backdrop: backdrop,
             backgroundBusyness: subject.map { gray.edgeShare(in: $0.insetBy(dx: -0.15, dy: -0.15), excluding: $0) },
-            subjectContrast: gray.contrast(in: region)
+            subjectContrast: gray.contrast(in: region),
+            faceShadowRatio: faceLight?.ratio,
+            faceLitSide: faceLight.flatMap { $0.ratio < Self.faceEvenRatio ? $0.litSide : nil },
+            lightSpot: LightSpotFinder.find(in: gray),
+            isOutdoors: outdoors,
+            colourWarmth: Self.warmth(of: image)
         )
     }
 
@@ -475,6 +517,44 @@ extension SceneAnalysis {
         return (request.results ?? [])
             .filter { $0.confidence >= 0.3 }
             .map { ($0.identifier, $0.confidence) }
+    }
+
+    /// How evenly the biggest face is lit across, comparing its left and right halves. Only the
+    /// middle of the face is measured, so hair and background at the edges of the box don't count.
+    nonisolated static func faceShadowRatio(of faces: [CGRect], in gray: GrayImage) -> Double? {
+        faceLighting(of: faces, in: gray)?.ratio
+    }
+
+    /// Above this, a face looks evenly lit, so no side counts as the lit one.
+    nonisolated static let faceEvenRatio = 0.8
+
+    /// The biggest face's darker-over-brighter ratio, and which half is the brighter one.
+    nonisolated static func faceLighting(of faces: [CGRect], in gray: GrayImage) -> (ratio: Double, litSide: LightSide)? {
+        guard let face = faces.max(by: { $0.width * $0.height < $1.width * $1.height }),
+              face.width >= 0.05 else { return nil }
+        let inner = face.insetBy(dx: face.width * 0.12, dy: face.height * 0.15)
+        let half = inner.width / 2
+        let left = gray.mean(in: CGRect(x: inner.minX, y: inner.minY, width: half, height: inner.height))
+        let right = gray.mean(in: CGRect(x: inner.midX, y: inner.minY, width: half, height: inner.height))
+        let brighter = max(left, right)
+        guard brighter > 0.08 else { return nil }
+        return (min(left, right) / brighter, left >= right ? .left : .right)
+    }
+
+    /// Red over blue for the whole frame, from a tiny copy of it.
+    nonisolated static func warmth(of image: CGImage) -> Double? {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let drawn = pixel.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return true
+        }
+        guard drawn, pixel[2] > 8 else { return nil }
+        return Double(pixel[0]) / Double(pixel[2])
     }
 
     private nonisolated static func detectFaces(in image: CGImage) -> [CGRect] {
@@ -545,6 +625,14 @@ nonisolated struct GrayImage {
         Double(pixels.lazy.filter(isIncluded).count) / Double(pixels.count)
     }
 
+    /// The share of pixels inside `rect` that pass `isIncluded`.
+    func share(in rect: CGRect, where isIncluded: (UInt8) -> Bool) -> Double {
+        let (xs, ys) = bounds(of: rect)
+        var count = 0
+        for y in ys { for x in xs where isIncluded(pixels[y * width + x]) { count += 1 } }
+        return Double(count) / Double(xs.count * ys.count)
+    }
+
     /// Variance of the Laplacian, a standard sharpness measure, inside `rect`.
     func sharpness(in rect: CGRect) -> Double {
         let (xs, ys) = bounds(of: rect)
@@ -601,5 +689,146 @@ nonisolated struct GrayImage {
             }
         }
         return count == 0 ? 0 : Double(edges) / Double(count)
+    }
+}
+
+
+// MARK: - Where the light comes from
+
+/// A side of the frame, as seen on screen.
+nonisolated enum LightSide: String, Sendable, Equatable {
+    case left, right, top, centre
+
+    /// "left", "right": for "the light on your left". Nil for top and centre, which have no side to walk to.
+    var sideWord: String? {
+        switch self {
+        case .left: "left"
+        case .right: "right"
+        default: nil
+        }
+    }
+
+    var opposite: LightSide {
+        switch self {
+        case .left: .right
+        case .right: .left
+        default: self
+        }
+    }
+
+    /// The side a spot is on, from its position in the frame.
+    static func of(_ box: CGRect) -> LightSide {
+        if box.midX < 0.4 { return .left }
+        if box.midX > 0.6 { return .right }
+        return box.midY < 0.35 ? .top : .centre
+    }
+}
+
+extension SceneAnalysis {
+    /// The sun, when the bright spot is outdoors. Indoors the same spot is a lamp or a window.
+    nonisolated var sunSpot: CGRect? { isOutdoors ? lightSpot : nil }
+
+    /// Which side the light comes from, only when the measurements are sure. A bright spot and
+    /// the lit side of a face have to agree; on its own, only a clear sun or a face lost in deep
+    /// shadow on one side is enough. Otherwise nil, and the advice doesn't name a side.
+    nonisolated var lightSide: LightSide? {
+        let fromSpot = lightSpot.map(LightSide.of)
+        switch (fromSpot, faceLitSide) {
+        case let (spot?, face?):
+            return spot == face ? spot : nil
+        case let (spot?, nil):
+            return sunSpot != nil ? spot : nil
+        case let (nil, face?):
+            return (faceShadowRatio ?? 1) < CoachRules.faceShadowLimit ? face : nil
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    /// Someone is in the shot with scenery behind them that matters, so the camera shouldn't move.
+    nonisolated var hasImportantBackdrop: Bool {
+        personCount > 0 && backdrop != nil
+    }
+
+    /// A scene that can't be moved or turned: a building or a view, with nobody in it.
+    nonisolated var isFixedScene: Bool {
+        personCount == 0 && (isWideScene || scene == .city || scene == .landscape)
+    }
+}
+
+/// Finds a small, blown-out light source: the sun, a bare bulb, a bright window. A whole bright
+/// sky or a white wall isn't one: the spot must be compact, and clearly brighter than around it.
+nonisolated enum LightSpotFinder {
+    static let columns = 16
+    static let rows = 16
+    /// A cell counts as blown out when this share of its pixels is near white.
+    static let hotShare = 0.5
+    /// At most this many cells (about 6% of the frame): bigger is the sky or a wall, not a source.
+    static let maxCells = 15
+    /// At most this wide or tall, as a share of the frame.
+    static let maxSpan = 0.3
+    /// Around the spot must be darker than this, or the bright area is just the scene.
+    static let darkerAround = 0.85
+
+    static func find(in gray: GrayImage) -> CGRect? {
+        let hot = (0..<rows).map { row in
+            (0..<columns).map { column in gray.share(in: cell(row: row, column: column)) { $0 >= 250 } }
+        }
+        let brightness = (0..<rows).map { row in
+            (0..<columns).map { column in gray.mean(in: cell(row: row, column: column)) }
+        }
+        return find(hot: hot, brightness: brightness)
+    }
+
+    static func cell(row: Int, column: Int) -> CGRect {
+        CGRect(x: Double(column) / Double(columns), y: Double(row) / Double(rows),
+               width: 1 / Double(columns), height: 1 / Double(rows))
+    }
+
+    /// The spot from each cell's share of blown-out pixels and its brightness, rows from the top.
+    static func find(hot: [[Double]], brightness: [[Double]]) -> CGRect? {
+        guard hot.count == rows, hot.allSatisfy({ $0.count == columns }),
+              brightness.count == rows, brightness.allSatisfy({ $0.count == columns }) else { return nil }
+        let hotCells = (0..<rows).flatMap { r in (0..<columns).filter { hot[r][$0] >= hotShare }.map { (r, $0) } }
+        // Lots of blown-out cells is a bright sky or a white wall, not one light source.
+        guard !hotCells.isEmpty, hotCells.count <= maxCells * 2 else { return nil }
+
+        // The biggest group of blown-out cells touching side by side.
+        var remaining = Set(hotCells.map { $0.0 * columns + $0.1 })
+        var best: [Int] = []
+        while let start = remaining.first {
+            remaining.remove(start)
+            var group = [start], index = 0
+            while index < group.count {
+                let r = group[index] / columns, c = group[index] % columns
+                index += 1
+                for (dr, dc) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let nr = r + dr, nc = c + dc
+                    guard (0..<rows).contains(nr), (0..<columns).contains(nc) else { continue }
+                    if remaining.remove(nr * columns + nc) != nil { group.append(nr * columns + nc) }
+                }
+            }
+            if group.count > best.count { best = group }
+        }
+        guard (1...maxCells).contains(best.count) else { return nil }
+
+        let groupRows = best.map { $0 / columns }, groupColumns = best.map { $0 % columns }
+        let minRow = groupRows.min()!, maxRow = groupRows.max()!
+        let minColumn = groupColumns.min()!, maxColumn = groupColumns.max()!
+        let width = Double(maxColumn - minColumn + 1) / Double(columns)
+        let height = Double(maxRow - minRow + 1) / Double(rows)
+        guard width <= maxSpan, height <= maxSpan else { return nil }
+
+        // The ring of cells around the spot has to be clearly darker than it.
+        let members = Set(best)
+        var ring: [Double] = []
+        for r in max(minRow - 1, 0)...min(maxRow + 1, rows - 1) {
+            for c in max(minColumn - 1, 0)...min(maxColumn + 1, columns - 1) where !members.contains(r * columns + c) {
+                ring.append(brightness[r][c])
+            }
+        }
+        guard !ring.isEmpty, ring.reduce(0, +) / Double(ring.count) < darkerAround else { return nil }
+
+        return CGRect(x: Double(minColumn) / Double(columns), y: Double(minRow) / Double(rows), width: width, height: height)
     }
 }

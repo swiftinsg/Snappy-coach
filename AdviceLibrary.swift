@@ -14,7 +14,7 @@ import FoundationModels
 nonisolated enum CoachIssue: String, CaseIterable, Sendable {
     // Found by measuring the frame.
     case underexposed, overexposed, highlightsClipped, backlitSubject
-    case tooDark, harshContrast, highISO
+    case tooDark, harshContrast, highISO, faceHalfInShadow, sunInFrame, colourCast
     case cameraShaking, subjectSoft, slowShutter
     case phoneTilted, shootingDown, pointingUp
     case headCutOff, tooMuchHeadroom, subjectTooSmall
@@ -24,6 +24,8 @@ nonisolated enum CoachIssue: String, CaseIterable, Sendable {
     // Judged by the model against a chosen composition style.
     case linesDontLead, notSymmetric, vanishingPointOffCentre, linesNotStraight
     case noTriangle, noClearVertex, notOverhead, layersNotStacked, subjectTooBig, jointsCropped
+    // Judged by the model in Light: the quality of the light, which brightness can't show.
+    case hardShadowsOnSubject, flatLight, mixedColourLight, patchyLight, sunGlare
 }
 
 /// What to do now, and the photography idea behind it.
@@ -35,6 +37,13 @@ nonisolated struct Advice: Equatable, Sendable {
     /// The third lines the advice names, like the bottom one for "put the horizon on the bottom
     /// third", so the viewfinder grid can light them up.
     var thirdsLines: Set<ThirdsLine> = []
+    /// Who has to act for a light tip: the photographer, the subject, or a setting. Shown on the
+    /// card and the viewfinder, so it's never unclear who should move.
+    var mover: Mover? = nil
+    /// Where the light comes from, as measured, for the light marker on the viewfinder.
+    var lightSide: LightSide? = nil
+    /// A setting that follows the tip in one tap.
+    var quickFix: QuickFix? = nil
 
     /// True when following both would undo each other, like moving left then right,
     /// so the coach never shows them together.
@@ -54,6 +63,58 @@ nonisolated struct Advice: Equatable, Sendable {
     private static func directions(of symbol: String?) -> Set<String> {
         guard let symbol, symbol.hasPrefix("arrow."), !symbol.contains(".and.") else { return [] }
         return Set(symbol.split(separator: ".").dropFirst().map(String.init))
+    }
+}
+
+/// Who a light tip asks to act.
+nonisolated enum Mover: String, Sendable, Equatable {
+    case photographer, subject, settings
+
+    var label: String {
+        switch self {
+        case .photographer: "You move"
+        case .subject: "Subject moves"
+        case .settings: "Settings"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .photographer: "figure.walk"
+        case .subject: "person.fill"
+        case .settings: "slider.horizontal.3"
+        }
+    }
+}
+
+/// A setting a tip can change in one tap.
+nonisolated enum QuickFix: Equatable, Sendable {
+    case nightMode, flash, meterOnSubject, brighten, darken, raw
+    /// White Balance for light of this colour temperature, in kelvin.
+    case whiteBalance(Float)
+
+    var title: String {
+        switch self {
+        case .nightMode: "Turn on Night Mode"
+        case .flash: "Turn on Flash"
+        case .meterOnSubject: "Set brightness for the subject"
+        case .brighten: "Brighten"
+        case .darken: "Darken"
+        case .raw: "Shoot RAW"
+        case .whiteBalance: "Fix the colours"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .nightMode: "moon.fill"
+        case .flash: "bolt.fill"
+        case .meterOnSubject: "viewfinder"
+        case .brighten: "sun.max.fill"
+        case .darken: "sun.min.fill"
+        case .raw: "r.square"
+        case .whiteBalance: "thermometer.sun"
+        }
     }
 }
 
@@ -216,6 +277,13 @@ extension CoachIssue {
         detail: IssueDetail? = nil,
         keepsPlacement: Bool = false
     ) -> Advice {
+        if topic == .light, let analysis {
+            // Light tips that move someone say who, and keep the subject and scenery in the shot.
+            var light = lightAdvice(analysis, keepsFraming: keepsPlacement) ?? lightGeneral(for: analysis, detail: detail)
+            light.quickFix = light.quickFix ?? quickFix(for: analysis)
+            light.mover = light.mover ?? lightMover(for: analysis)
+            return light
+        }
         // The main scene's wording first, then the backdrop's, e.g. a person in a landscape.
         let sceneWording = analysis?.scenes.lazy.compactMap { sceneAdvice(for: $0) }.first
         let general = sceneWording ?? generalAdvice(for: topic, analysis: analysis)
@@ -292,24 +360,132 @@ extension CoachIssue {
         }
     }
 
+    /// The light tip without a "who moves" rule: the scene's wording, or else the general one.
+    private func lightGeneral(for analysis: SceneAnalysis, detail: IssueDetail?) -> Advice {
+        let scene = analysis.scenes.lazy.compactMap { sceneAdvice(for: $0) }.first
+        return scene ?? generalAdvice(for: .light, analysis: analysis)
+    }
+
+    /// Light tips that need someone to move, worked out so what's being photographed stays in the
+    /// shot: the person moves when the scenery behind them matters, the photographer walks around
+    /// a subject with nothing important behind it, and a building or view gets a setting instead,
+    /// since neither it nor the sun can move. A side is only named when the measurements agree on it.
+    /// With `keepsFraming`, the framing is already lined up, so the camera never moves.
+    func lightAdvice(_ a: SceneAnalysis, keepsFraming: Bool) -> Advice? {
+        let general = generalAdvice(for: .light, analysis: a)
+        let side = a.lightSide?.sideWord
+        let person = a.personCount > 0
+        // Flash only reaches a few metres: a face this big in the frame is close enough.
+        let faceIsClose = (a.faces.map(\.height).max() ?? 0) >= 0.2
+        func tip(_ mover: Mover, _ action: String, fix: QuickFix? = nil) -> Advice {
+            let why = keepsFraming && mover != .photographer ? "This keeps your framing. \(general.why)" : general.why
+            return Advice(action: action, why: why, mover: mover, lightSide: a.lightSide, quickFix: fix)
+        }
+
+        switch self {
+        case .faceHalfInShadow:
+            // On the front camera the subject is the person holding the phone.
+            if a.readings.isFrontCamera {
+                return tip(.subject, side.map { "Turn your face toward the light on your \($0)" } ?? "Turn your face toward the light")
+            }
+            return tip(.subject, side.map { "Ask them to turn toward the light on your \($0)" } ?? "Ask them to turn their face toward the light")
+
+        case .backlitSubject, .sunInFrame:
+            if a.readings.isFrontCamera {
+                return tip(.subject, "Turn around so the light falls on your face")
+            }
+            if a.isFixedScene {
+                // Neither a building nor the sun can move. A sun right at the edge can be dropped
+                // with a small turn; otherwise something nearby can hide it, or a setting saves the sky.
+                guard self == .sunInFrame, let spot = a.sunSpot else {
+                    return tip(.settings, "Tap the building so the camera brightens it", fix: .meterOnSubject)
+                }
+                if keepsFraming {
+                    return tip(.settings, "Darken the photo a little to keep the sky", fix: .darken)
+                }
+                let atSide = spot.minX < 0.15 || spot.maxX > 0.85
+                if atSide, let away = LightSide.of(spot).opposite.sideWord {
+                    return tip(.photographer, "Turn slightly \(away) so the sun just leaves the frame")
+                }
+                return tip(.photographer, "Stand so a tree or roof hides the sun", fix: .darken)
+            }
+            if person, a.hasImportantBackdrop || keepsFraming {
+                // The scenery behind them matters, so the camera stays and the light is added or balanced.
+                return faceIsClose
+                    ? tip(.settings, "Turn on Flash to light their face", fix: .flash)
+                    : tip(.settings, "Tap their face so the camera brightens them", fix: .meterOnSubject)
+            }
+            if keepsFraming {
+                return tip(.settings, "Tap the subject so the camera brightens it", fix: .meterOnSubject)
+            }
+            // The light is in front of the camera. Walking around the subject toward its side
+            // turns light from behind into light from the side, then the front.
+            let them = person ? "them" : "the subject"
+            // While walking, the subject must stay in the shot: if it's slipping off an edge, say so first.
+            if a.subjectTouchesEdge {
+                return tip(.photographer, "Keep \(them) in frame: turn back toward \(person ? "them" : "it")")
+            }
+            if let side {
+                return tip(.photographer, "Walk around \(them) to your \(side), keeping \(person ? "them" : "it") centred")
+            }
+            return tip(.photographer, "Walk around \(them) until the light is beside you")
+
+        default:
+            return nil
+        }
+    }
+
+    /// Who acts on the other light tips.
+    private func lightMover(for a: SceneAnalysis) -> Mover? {
+        switch self {
+        case .tooDark, .highISO, .underexposed, .overexposed, .highlightsClipped, .colourCast: .settings
+        case .harshContrast, .hardShadowsOnSubject, .patchyLight, .faceHalfInShadow: .subject
+        case .flatLight, .backlitSubject, .sunInFrame, .sunGlare: .photographer
+        default: nil
+        }
+    }
+
+    /// The setting that follows a light tip in one tap, when there is one and it isn't on already.
+    private func quickFix(for a: SceneAnalysis) -> QuickFix? {
+        switch self {
+        case .tooDark, .highISO:
+            return a.readings.isNightModeOn ? nil : .nightMode
+        case .underexposed:
+            return .brighten
+        case .overexposed, .highlightsClipped:
+            return .darken
+        case .colourCast:
+            // White Balance set for the light's colour cancels it: lamps are warm, shade is cool.
+            return .whiteBalance((a.colourWarmth ?? 1) > 1 ? 3200 : 7000)
+        default:
+            return nil
+        }
+    }
+
     private func generalAdvice(for topic: AdviceTopic, analysis: SceneAnalysis?) -> Advice {
         switch self {
         case .underexposed:
-            Advice(action: "Drag the Exposure slider right", why: "A dark photo hides detail and looks muddy.")
+            Advice(action: "Tap the subject, then drag up to brighten", why: "A dark photo hides detail and looks muddy.", symbol: "arrow.up")
         case .overexposed:
-            Advice(action: "Drag the Exposure slider left", why: "Slightly dark beats too bright: lost highlights can't come back.")
+            Advice(action: "Tap the subject, then drag down to darken", why: "Slightly dark beats too bright: lost highlights can't come back.", symbol: "arrow.down")
         case .highlightsClipped:
-            Advice(action: "Drag Exposure left until bright areas show detail", why: "Pure white areas have no detail left, even in editing.")
+            Advice(action: "Tap the bright area to keep its detail", why: "Pure white areas have no detail left, even in editing.")
         case .backlitSubject:
-            topic == .exposure
-                ? Advice(action: "Drag the Exposure slider right for the subject", why: "Bright light behind the subject makes the camera darken it.")
-                : Advice(action: "Turn so the light falls on the subject's front", why: "Light from behind leaves the subject in shadow.")
+            Advice(action: "Tap the subject so the camera brightens it", why: "Bright light behind the subject makes the camera darken it.")
         case .tooDark:
             Advice(action: "Tap Night Mode, or move nearer a light", why: "In dim light the camera adds grain and blur.")
         case .harshContrast:
             Advice(action: "Move into open shade or softer light", why: "Harsh light makes deep shadows and hot spots.")
         case .highISO:
             Advice(action: "Move toward a window or brighter light", why: "Low light forces high ISO, which adds grainy noise.")
+        case .faceHalfInShadow:
+            Advice(action: "Turn the face toward the light to fill the shadow", why: "Half a face in deep shadow hides an eye and looks gloomy.")
+        case .sunInFrame:
+            Advice(action: "Stand so a tree or roof hides the sun", why: "Shooting into the sun blows out the sky and darkens the subject.")
+        case .colourCast:
+            (analysis?.colourWarmth ?? 1) > 1
+                ? Advice(action: "Fix the orange colour with White Balance", why: "Lamps light everything orange, so skin and white things look wrong.")
+                : Advice(action: "Fix the blue colour with White Balance", why: "Shade and screens turn everything blue and cold.")
         case .cameraShaking:
             Advice(action: "Hold still with both hands, elbows tucked in", why: "Movement while the shutter is open blurs the whole photo.")
         case .subjectSoft:
@@ -360,6 +536,16 @@ extension CoachIssue {
             Advice(action: "Step back so the subject is small", why: "Negative space works when empty space outweighs the subject.")
         case .jointsCropped:
             Advice(action: "Frame at the waist, not at elbows or knees", why: "Cropping at a joint makes a body look cut off.")
+        case .hardShadowsOnSubject:
+            Advice(action: "Move into open shade or next to a window", why: "Direct sun or a bare bulb casts hard, dark shadows on the subject.")
+        case .flatLight:
+            Advice(action: "Turn so the light comes from the side", why: "Side light shows shape and texture; light from straight ahead looks flat.")
+        case .mixedColourLight:
+            Advice(action: "Use only the window, or only the lamps", why: "Warm bulbs mixed with daylight give odd colours on skin and food.")
+        case .patchyLight:
+            Advice(action: "Move so the subject is fully in light or shade", why: "Spots of sun and shadow across the subject look messy.")
+        case .sunGlare:
+            Advice(action: "Shade the lens with your hand, or turn slightly away", why: "Sun just outside the frame washes the photo out with haze and flare.")
         }
     }
 
@@ -386,6 +572,12 @@ extension CoachIssue {
             Advice(action: "Step closer to drop cars and signs at the edges", why: "Busy streets crowd the edges and pull the eye out.")
         case (.linesDontLead, .city):
             Advice(action: "Stand so the street runs toward the subject", why: "Streets and kerbs are lines that lead the eye.")
+        case (.hardShadowsOnSubject, .people):
+            Advice(action: "Move them into shade, or face them toward a window", why: "Soft light stops squinting and dark shadows under the eyes.")
+        case (.hardShadowsOnSubject, .food):
+            Advice(action: "Move the food out of direct light, beside a window", why: "Soft window light shows texture without harsh shadows.")
+        case (.flatLight, .food):
+            Advice(action: "Put the window to the side of the plate", why: "Side light makes food look fresh, with shape and texture.")
         case (.clutteredBackground, .nature):
             Advice(action: "Change your angle so a plain area is behind it", why: "A plain background makes a flower or animal stand out.")
         default:
@@ -430,15 +622,12 @@ extension CoachIssue {
     /// A different way to fix the same problem, shown once the usual tip has been ignored a few times.
     func alternativeAdvice(for topic: AdviceTopic) -> Advice? {
         switch self {
-        // The Shutter slider is only in the Exposure topic's bar. Slower speeds are to the right.
-        case .underexposed, .backlitSubject:
-            topic == .exposure
-                ? Advice(action: "Drag the Shutter slider right for more light", why: "A slower shutter lets in more light, so the subject gets brighter.", symbol: "arrow.right")
-                : nil
+        case .underexposed:
+            Advice(action: "Move toward a window or brighter light", why: "More light on the subject beats brightening a dark photo.")
+        case .backlitSubject:
+            Advice(action: "Turn so the light falls on the subject's front", why: "Light from behind leaves the subject in shadow.")
         case .overexposed, .highlightsClipped:
-            topic == .exposure
-                ? Advice(action: "Drag the Shutter slider left for less light", why: "A faster shutter lets in less light, keeping bright detail.", symbol: "arrow.left")
-                : nil
+            Advice(action: "Move into shade, or wait for softer light", why: "Softer light keeps bright areas from turning pure white.")
         case .tooDark, .highISO:
             Advice(action: "Turn on Flash for a close subject", why: "Flash adds light where there isn't enough, keeping the photo clean.")
         case .cameraShaking, .slowShutter:
@@ -457,8 +646,25 @@ extension CoachIssue {
             Advice(action: "Get close to one thing so it fills the middle", why: "Choosing one thing tells the viewer where to look.")
         case .shootingDown:
             Advice(action: "Hold the phone at chest height, level", why: "A lower camera treats the subject as an equal.")
+        case .hardShadowsOnSubject, .patchyLight:
+            Advice(action: "Wait for a cloud, or hold up a white sheet to soften the light", why: "Anything that spreads the light out softens the shadows it makes.")
+        case .faceHalfInShadow:
+            Advice(action: "Hold something white on the dark side to bounce light", why: "A white surface reflects light back into the shadow and softens it.")
+        case .sunInFrame:
+            Advice(action: "Zoom in a little so the sun leaves the edge", why: "Cropping the sun out keeps the sky from blowing out.")
         default:
             nil
+        }
+    }
+
+    /// "Light first" while framing, for the big light problems that need someone to move.
+    var lightNudge: String? {
+        switch self {
+        case .sunInFrame: "Light first: the sun is in the shot. Fix where you stand, then frame."
+        case .backlitSubject: "Light first: the light is behind the subject. Fix where you stand, then frame."
+        case .faceHalfInShadow: "Light first: half the face is in shadow. Fix the light, then frame."
+        case .tooDark: "Light first: it's too dark here. Fix the light, then frame."
+        default: nil
         }
     }
 
@@ -470,6 +676,9 @@ extension CoachIssue {
         case .backlitSubject: "lit the subject from the front"
         case .tooDark, .highISO: "found better light"
         case .harshContrast: "softened the light"
+        case .faceHalfInShadow: "lit both sides of the face"
+        case .sunInFrame: "kept the sun out of the shot"
+        case .colourCast: "fixed the colours"
         case .cameraShaking, .slowShutter: "held the camera steady"
         case .subjectSoft: "got the subject sharp"
         case .phoneTilted: "levelled the phone"
@@ -492,6 +701,11 @@ extension CoachIssue {
         case .layersNotStacked: "stacked the layers"
         case .subjectTooBig: "left space around the subject"
         case .jointsCropped: "cropped the portrait cleanly"
+        case .hardShadowsOnSubject: "softened the shadows"
+        case .flatLight: "found side light"
+        case .mixedColourLight: "kept to one colour of light"
+        case .patchyLight: "evened out the light"
+        case .sunGlare: "blocked the glare"
         }
     }
 
@@ -511,7 +725,8 @@ extension CoachIssue {
         switch self {
         case .clutteredBackground, .distractingEdges, .subjectCutOff, .horizonThroughMiddle,
              .linesDontLead, .notSymmetric, .vanishingPointOffCentre, .noTriangle, .noClearVertex,
-             .layersNotStacked, .jointsCropped:
+             .layersNotStacked, .jointsCropped,
+             .hardShadowsOnSubject, .flatLight, .mixedColourLight, .patchyLight, .sunGlare:
             true
         default:
             false
@@ -571,6 +786,14 @@ enum VisualIssue: String, CaseIterable {
     case layersNotStacked
     case subjectTooBig
     case jointsCropped
+    case hardShadowsOnSubject
+    case flatLight
+    case mixedColourLight
+    case patchyLight
+    case sunGlare
+
+    /// Light quality, which only Light judges.
+    static let lightIssues: Set<VisualIssue> = [.hardShadowsOnSubject, .flatLight, .mixedColourLight, .patchyLight, .sunGlare]
 
     nonisolated var coachIssue: CoachIssue? {
         self == .none ? nil : CoachIssue(rawValue: rawValue)
@@ -633,6 +856,12 @@ nonisolated enum CoachRules {
     /// Faces smaller than this share of the frame's height are a full-body or distant shot, where
     /// the space above the head is part of the scene, not "too much headroom".
     static let portraitFaceHeight = 0.06
+    /// Below this, a face's darker half is in deep shadow next to its lit half (see
+    /// `SceneAnalysis.faceShadowRatio`). Soft side light stays well above it.
+    static let faceShadowLimit = 0.45
+    /// Red over blue above this indoors is an orange cast, below `coolCastLimit` a blue one.
+    static let warmCastLimit = 1.6
+    static let coolCastLimit = 0.7
 
     /// Below this share of edges (see `SceneAnalysis.backgroundBusyness`) the background is
     /// measurably plain, so the model's "cluttered background" isn't believed.
@@ -670,7 +899,7 @@ nonisolated enum CoachRules {
             return "This iPhone doesn't support Apple Intelligence. \(stillWorks)"
         case .unavailable(.modelNotReady):
             // The model downloads in the background; the coach switches over once it's ready.
-            return "Apple Intelligence is still downloading to this iPhone. Until it's ready, you'll get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines."
+            return "Apple Intelligence is still downloading to this iPhone. Until it's ready, you'll get framing, brightness and angle tips, but the coach can't judge backgrounds, edges, lines or how soft the light is."
         case .unavailable:
             return "Apple Intelligence isn't available right now. \(stillWorks)"
         }
@@ -680,8 +909,8 @@ nonisolated enum CoachRules {
     /// advice may not be as good. `key` names the reason, so a new reason (it's switched off after
     /// downloading, say) alerts again. Nil when it's available.
     static func modelAlert(for availability: SystemLanguageModel.Availability) -> (key: String, title: String, message: String)? {
-        let effect = "Composition advice may not be as good"
-        let detail = "You'll still get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines. All other modes work as usual."
+        let effect = "Composition and Light & Exposure advice may not be as good"
+        let detail = "You'll still get framing, brightness and angle tips, but the coach can't judge backgrounds, edges, lines or how soft the light is. All other modes work as usual."
         switch availability {
         case .available:
             return nil
@@ -702,13 +931,13 @@ nonisolated enum CoachRules {
 
     /// What the coach can and can't do without Apple Intelligence, so the notice sets expectations.
     private static var stillWorks: String {
-        "You'll still get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines."
+        "You'll still get framing, brightness and angle tips, but the coach can't judge backgrounds, edges, lines or how soft the light is."
     }
 
-    /// Composition shows one tip, because its tips can come from the rules or the model and two
-    /// from different sources can pull opposite ways. Other topics' tips all come from the rules.
+    /// Composition and Light show one tip, because their tips can come from the rules or the model
+    /// and two from different sources can pull opposite ways. Other topics' tips all come from the rules.
     static func showsSecondTip(for topic: AdviceTopic) -> Bool {
-        topic != .composition
+        !usesModel(topic)
     }
 
     /// Told to the model wherever it judges a photo, so the live coach and the photo review agree.
@@ -722,7 +951,7 @@ nonisolated enum CoachRules {
     static func contradicts(strength: String, analysis a: SceneAnalysis) -> Bool {
         let words = Set(strength.lowercased().split { !$0.isLetter }.map(String.init))
         func mentions(_ keys: Set<String>) -> Bool { !words.isDisjoint(with: keys) }
-        let lightIssues = issues(for: .exposure, in: a) + issues(for: .light, in: a)
+        let lightIssues = issues(for: .light, in: a)
         if mentions(["light", "lighting", "lit", "bright", "brightness", "exposure", "exposed"]), !lightIssues.isEmpty {
             return true
         }
@@ -776,6 +1005,18 @@ nonisolated enum CoachRules {
         if issue == .jointsCropped {
             return analysis.personCount > 0
         }
+        // Glare from the sun needs the sun, so only outdoors.
+        if issue == .sunGlare {
+            return analysis.isOutdoors
+        }
+        // Light on the subject needs a subject to fall on.
+        if [.hardShadowsOnSubject, .flatLight, .patchyLight].contains(issue), analysis.subject == nil, analysis.faces.isEmpty {
+            return false
+        }
+        // A subject with almost no light and dark in it can't have hard shadows or patches on it.
+        if issue == .hardShadowsOnSubject || issue == .patchyLight, let contrast = analysis.subjectContrast, contrast < flatContrast {
+            return false
+        }
         guard issue == .clutteredBackground || issue == .distractingEdges else { return true }
         let busyness = analysis.backgroundBusyness
         let namesPlainSurface = detail?.thing.map { name in
@@ -791,11 +1032,33 @@ nonisolated enum CoachRules {
         return true
     }
 
-    /// Topics where the model adds judgement the measurements can't give. Only Composition looks
-    /// beyond the subject, at the background and other objects; every other topic is about the
-    /// subject and the camera alone, so it is measured only.
+    /// Light problems big enough that fixing them means moving, which would undo framing done first.
+    static let bigLightIssues: [CoachIssue] = [.sunInFrame, .backlitSubject, .faceHalfInShadow, .tooDark]
+
+    /// Told to the model in Light & Exposure, so its tips never lose what's being photographed.
+    static func lightKeepNote(keepsFraming: Bool) -> String {
+        keepsFraming
+            ? "The framing is already lined up and must not change: only suggest asking the person to turn or step, or a camera setting."
+            : "Keep the subject and what's behind it in the shot: suggest walking around the subject, asking the person to turn or step, a small step, or a setting. Never suggest pointing the camera somewhere else."
+    }
+
+    /// A hint about the light at this time of day, for the model when outdoors. Nil at times
+    /// when the light could be anything. Uses only the clock, so no location is needed.
+    static func timeOfDayHint(hour: Int, outdoors: Bool) -> String? {
+        guard outdoors else { return nil }
+        switch hour {
+        case 6..<9, 17..<20: return "It is early morning or evening, when sunlight is soft, warm and low."
+        case 11..<15: return "It is around midday, when the sun is high and harsh; open shade gives softer light."
+        default: return nil
+        }
+    }
+
+    /// Topics where the model adds judgement the measurements can't give. Composition looks beyond
+    /// the subject, at the background and other objects. Light adds the quality of the light, like
+    /// hard shadows or mixed colours, which brightness can't show. Exposure, Focus and Angle &
+    /// Perspective are exact measurements, so they stay measured only.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
-        topic == .composition
+        topic == .composition || topic == .light
     }
 
     /// Visual issues that make sense to report for a topic and the chosen composition styles.
@@ -804,13 +1067,16 @@ nonisolated enum CoachRules {
         guard !unusedModelIssues.contains(issue) else { return false }
         switch topic {
         case .composition:
-            // Composition is about framing; rotating or angling the phone belongs to Angle & Perspective.
-            guard ![.linesNotStraight, .notOverhead].contains(issue) else { return false }
+            // Composition is about framing; rotating or angling the phone belongs to Angle & Perspective,
+            // and the quality of the light to Light.
+            guard ![.linesNotStraight, .notOverhead].contains(issue), !VisualIssue.lightIssues.contains(issue) else { return false }
             // Style issues only count when one of their styles is being practised.
             guard let owners = issue.styles else { return true }
             return !owners.isDisjoint(with: styles)
+        case .light:
+            // Light judges only the light; brightness itself is measured.
+            return VisualIssue.lightIssues.contains(issue)
         default:
-            // Only Composition judges the background and other objects.
             return false
         }
     }
@@ -833,27 +1099,39 @@ nonisolated enum CoachRules {
         let offset = a.readings.exposureOffset ?? 0
         let iso = a.readings.iso ?? 0
         switch topic {
-        case .exposure:
-            if offset < -0.7 || a.brightness < 0.22 {
+        case .light:
+            // Light and exposure together, biggest first: where the light is, then how bright
+            // the photo is, then the quality of the light, then noise.
+            // Night Mode and Flash mostly change the saved photo, not the preview, so turning
+            // them on counts as following the tip.
+            let addsLight = a.readings.isNightModeOn || a.readings.isFlashOn
+            // The sun in the shot comes first: it blows out the sky and darkens everything else.
+            if a.sunSpot != nil { found.append(.sunInFrame) }
+            // Brightening lifts the background too, so the gap never closes. The fix is done
+            // once the subject itself is bright enough.
+            if a.isBacklit, (a.subjectBrightness ?? 0) < 0.4 { found.append(.backlitSubject) }
+            // Too dark to shoot well says more than "underexposed", so it takes its place.
+            if a.brightness < 0.2 || iso > 1600, !addsLight {
+                found.append(.tooDark)
+            } else if offset < -0.7 || a.brightness < 0.22, !addsLight {
                 found.append(.underexposed)
             } else if offset > 0.7 || a.brightness > 0.8 {
                 found.append(.overexposed)
             }
             // Once Exposure has been pulled down a full stop, what's still white is a lamp or the
             // sun, which no setting can fix, so the tip counts as done.
-            if a.highlightClip > 0.04, !found.contains(.overexposed), a.readings.exposureBias > -1 {
+            if a.highlightClip > 0.04, !found.contains(.overexposed), !found.contains(.sunInFrame), a.readings.exposureBias > -1 {
                 found.append(.highlightsClipped)
             }
-            // Brightening lifts the background too, so the gap never closes. The fix is done
-            // once the subject itself is bright enough.
-            if a.isBacklit, (a.subjectBrightness ?? 0) < 0.4 { found.append(.backlitSubject) }
-        case .light:
-            // Night Mode and Flash mostly change the saved photo, not the preview, so turning
-            // them on counts as following the tip.
-            let addsLight = a.readings.isNightModeOn || a.readings.isFlashOn
-            if a.brightness < 0.2 || iso > 1600, !addsLight { found.append(.tooDark) }
-            if a.isBacklit { found.append(.backlitSubject) }
-            if a.highlightClip > 0.04, a.shadowClip > 0.1 { found.append(.harshContrast) }
+            if a.highlightClip > 0.04, a.shadowClip > 0.1, !found.contains(.highlightsClipped) { found.append(.harshContrast) }
+            // Side light gives a face shape, but one half lost in deep shadow hides an eye.
+            if let ratio = a.faceShadowRatio, ratio < faceShadowLimit, !a.isBacklit { found.append(.faceHalfInShadow) }
+            // A strong colour cast indoors, from lamps or screens. Outdoors warm light is usually the
+            // point (sunsets), so it's left alone, as is a White Balance set by hand.
+            if !a.isOutdoors, !a.readings.isWhiteBalanceSet, let warmth = a.colourWarmth,
+               warmth > warmCastLimit || warmth < coolCastLimit {
+                found.append(.colourCast)
+            }
             if iso > 800, !found.contains(.tooDark), !addsLight { found.append(.highISO) }
         case .focus:
             // Shake blurs everything, so fix it before blaming the focus.
@@ -905,12 +1183,16 @@ nonisolated enum CoachRules {
         let problems = issues(for: topic, in: a, tiltShown: tiltShown)
         var good: [String] = []
         switch topic {
-        case .exposure:
-            if !problems.contains(.underexposed), !problems.contains(.overexposed) { good.append("Balanced brightness") }
-            if a.highlightClip < 0.01 { good.append("Highlights have detail") }
         case .light:
-            if !a.isBacklit, a.brightness >= 0.2 { good.append("Light reaches the subject") }
-            if a.highlightClip < 0.02, a.shadowClip < 0.05 { good.append("Soft, even light") }
+            if !problems.contains(.underexposed), !problems.contains(.overexposed), !problems.contains(.tooDark) {
+                good.append("Balanced brightness")
+            }
+            if a.highlightClip < 0.01 { good.append("Highlights have detail") }
+            let halfInShadow = problems.contains(.faceHalfInShadow)
+            // Side light that still shows both halves of the face: the look to learn.
+            if a.faceLitSide != nil, !halfInShadow, !a.isBacklit { good.append("Soft side light") }
+            if !a.isBacklit, a.brightness >= 0.2, !halfInShadow { good.append("Light reaches the subject") }
+            if a.highlightClip < 0.02, a.shadowClip < 0.05, !halfInShadow { good.append("Soft, even light") }
         case .focus:
             if a.subjectSharpness >= softThreshold { good.append("Subject is sharp") }
             if let shake = a.shake, shake < shakeThreshold / 2 { good.append("Steady hands") }

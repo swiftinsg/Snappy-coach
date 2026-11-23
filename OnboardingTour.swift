@@ -51,7 +51,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     var instruction: String {
         switch self {
         case .topicMenu:
-            "This menu sets what the coach teaches you. Tap it to see the modes, and try each one in turn."
+            "This menu sets what the coach teaches you. Tap it to see the modes, and try each one in turn. They're numbered in shooting order: start with the light, then frame the shot."
         case .photoControls:
             "These are quick camera settings. Press and hold them to choose which ones show."
         case .editControls:
@@ -88,8 +88,7 @@ extension AdviceTopic {
         case .composition: "Pick a style, then move the phone until the dot is in the circle."
         case .anglePerspective: "A level helps you hold the camera straight and find better angles."
         case .focus: "The coach helps keep your subject sharp."
-        case .light: "The coach helps you find and use good light."
-        case .exposure: "The coach helps you get the brightness right."
+        case .light: "The coach helps you find good light and get the brightness right. Amber arrows show who moves: you, around the subject, or the subject, toward the light."
         }
     }
 }

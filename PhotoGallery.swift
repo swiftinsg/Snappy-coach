@@ -63,7 +63,7 @@ nonisolated struct ShotRecord: Codable, Equatable, Sendable {
 }
 
 extension ShotRecord {
-    var topic: AdviceTopic? { AdviceTopic(rawValue: topicID) }
+    var topic: AdviceTopic? { AdviceTopic.stored(topicID) }
 }
 
 /// One run of photos in the gallery grid: a mode, or nil for photos taken before stories were saved.

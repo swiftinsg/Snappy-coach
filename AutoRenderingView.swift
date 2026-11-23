@@ -338,6 +338,9 @@ struct AutoRenderingView: View {
                 .fill(.white.opacity(0.5))
                 .frame(width: 36, height: 5)
                 .accessibilityHidden(true)
+            if adviceTopic == .composition, let nudge = coach.lightNudge {
+                lightNudgeBanner(nudge)
+            }
             if let notice = coach.notice {
                 CoachTipView(text: notice)
             } else if isWaitingForObject {
@@ -353,7 +356,13 @@ struct AutoRenderingView: View {
                         .foregroundStyle(.white.opacity(0.85))
                         .shadow(color: .black.opacity(0.5), radius: 2)
                 }
-                CoachFeedbackView(feedback: feedback, showsExplanation: isAdviceExplained)
+                CoachFeedbackView(
+                    feedback: feedback,
+                    showsExplanation: isAdviceExplained,
+                    canApply: camera.canApply,
+                    onQuickFix: applyQuickFix,
+                    onNextMode: { adviceTopic = $0 }
+                )
             } else {
                 // The first look takes a moment; say so rather than showing an empty space.
                 CoachTipView(text: "Looking at your shot…")
@@ -468,6 +477,60 @@ struct AutoRenderingView: View {
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
     }
 
+    /// Composition's camera-move arrow, or Light & Exposure's amber guide: who moves, which way,
+    /// and where the light is.
+    @ViewBuilder
+    private var guidanceOverlays: some View {
+        if !isWaitingForObject, coach.notice == nil {
+            if let move = coach.feedback?.move {
+                UprightOverlay(orientation: camera.holdOrientation) {
+                    CameraMoveArrow(move: move)
+                }
+            } else if adviceTopic == .light, !isAdviceCollapsed, let feedback = coach.feedback, !feedback.isGoodEnough {
+                UprightOverlay(orientation: camera.holdOrientation) {
+                    LightGuideOverlay(feedback: feedback)
+                }
+                .transition(.opacity)
+            }
+        }
+    }
+
+    /// "Light first", with a way to go and fix it, shown once when framing a shot with bad light.
+    private func lightNudgeBanner(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(text, systemImage: "sun.max.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+            HStack {
+                Button("Fix the light first", systemImage: AdviceTopic.light.systemImage) {
+                    coach.dismissLightNudge()
+                    adviceTopic = .light
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.lightGuide)
+                .foregroundStyle(.black)
+                Button("Not now") {
+                    coach.dismissLightNudge()
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.lightGuide.opacity(0.18), in: .rect(cornerRadius: 16))
+    }
+
+    /// Follows a tip's fix in one tap. Setting brightness for the subject meters on where it is.
+    private func applyQuickFix(_ fix: QuickFix) {
+        var point: CGPoint?
+        if fix == .meterOnSubject, let box = coach.feedback?.subjectBox {
+            point = camera.frameGrabber.sensorPoint(forUpright: CGPoint(x: box.midX, y: box.midY))
+        }
+        statusMessage = camera.apply(fix, subjectPoint: point)
+    }
+
     /// Focuses and meters where a single tap landed. `location` and `size` are in the upright view.
     /// Returns false when the tap missed the frame, so no focus square is shown.
     private func focus(at location: CGPoint, in size: CGSize) -> Bool {
@@ -561,14 +624,8 @@ struct AutoRenderingView: View {
                     }
                 }
                 .animation(.easeInOut, value: coach.feedback?.highlight)
-                // A big arrow for the camera move the advice asks for, once the advice is about a chosen object.
-                .overlay {
-                    if !isWaitingForObject, coach.notice == nil, let move = coach.feedback?.move {
-                        UprightOverlay(orientation: camera.holdOrientation) {
-                            CameraMoveArrow(move: move)
-                        }
-                    }
-                }
+                // Arrows for what the advice asks: Composition's white camera move, Light's amber who-moves guide.
+                .overlay { guidanceOverlays }
                 .animation(.snappy, value: coach.feedback?.move)
                 // Without camera access the viewfinder is black, so explain why and how to fix it.
                 .overlay {

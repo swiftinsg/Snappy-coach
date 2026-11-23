@@ -471,6 +471,20 @@ struct PhotoFeedback: Equatable {
     var isGoodEnough: Bool
     /// What to practise next, shown once the current section is complete.
     var nextSection: String? = nil
+    /// Who the first improvement asks to act, for the light tips.
+    var mover: Mover? = nil
+    /// Where the light comes from, as measured, for the light marker on the viewfinder.
+    var lightSide: LightSide? = nil
+    /// A bright light source in the frame, from the top left of the viewfinder.
+    var lightSpot: CGRect? = nil
+    /// Outdoors, so the light is the sun rather than a lamp or window.
+    var isOutdoorLight = false
+    /// The subject, from the top left of the viewfinder, so a move arrow can go around it.
+    var subjectBox: CGRect? = nil
+    /// A setting that follows the first improvement in one tap.
+    var quickFix: QuickFix? = nil
+    /// The mode to go on to once this one is done, like framing once the light is good.
+    var nextMode: AdviceTopic? = nil
 }
 
 /// What the coach remembers between sections. Every model session starts empty, so this is
@@ -488,6 +502,13 @@ struct CoachMemory: Equatable {
     private static let length = 4
     /// Once an issue has been shown in this many sections without being fixed, the coach tries another way.
     static let repeatLimit = 2
+
+    /// Composition got the subject lined up, so light tips mustn't move the camera until the
+    /// photo is taken.
+    private(set) var isFramingLinedUp = false
+
+    mutating func noteFramingLinedUp() { isFramingLinedUp = true }
+    mutating func clearFraming() { isFramingLinedUp = false }
 
     mutating func noteFixed(_ issue: CoachIssue) {
         fixed.removeAll { $0 == issue }
@@ -564,6 +585,13 @@ final class PhotoCoach {
     private(set) var sectionProgress: Double = 0
     /// A message for when the coach can't run at all.
     private(set) var notice: String?
+    /// "Light first": a big light problem was seen while framing, so the light should be fixed
+    /// before the framing, which moving for the light would undo.
+    private(set) var lightNudge: String?
+    /// The nudge shows once each time a mode is started.
+    private var hasNudgedLight = false
+
+    func dismissLightNudge() { lightNudge = nil }
     /// What has been done so far, kept across topics and photos.
     private(set) var memory = CoachMemory()
     /// Issues fixed since the last photo, for that photo's story in the gallery.
@@ -646,6 +674,8 @@ final class PhotoCoach {
     func run(camera: CameraManager, topic: AdviceTopic, styles: Set<CompositionGuide>, guide: SubjectGuide) async {
         feedback = nil
         notice = nil
+        lightNudge = nil
+        hasNudgedLight = false
         candidate = nil
         candidateCount = 0
         movesDone = []
@@ -745,6 +775,16 @@ final class PhotoCoach {
             // Where the subject sits is geometry, so the green box decides while it's off target.
             // Composition always has the guide: the style's spot, or the nearest thirds crossing.
             let usesBox = topic == .composition
+            // Light first: framing a shot whose light needs fixing gets undone by the fix.
+            if usesBox, !hasNudgedLight, guide.target?.isAligned != true,
+               let big = CoachRules.issues(for: .light, in: analysis).first(where: CoachRules.bigLightIssues.contains) {
+                lightNudge = big.lightNudge
+                hasNudgedLight = true
+            }
+            if usesBox, guide.target?.isAligned == true {
+                memory.noteFramingLinedUp()
+                lightNudge = nil
+            }
             if usesBox, let target = guide.target, !target.isAligned {
                 // The model's praise stays on the card, so the guide and the model read as one coach.
                 feedback = Self.positionFeedback(for: target, praise: sectionStrength ?? memory.recentStrengths.last)
@@ -786,17 +826,21 @@ final class PhotoCoach {
             // battery and keeps it to what it's good at: judging the look of the scene.
             var details: [CoachIssue: IssueDetail] = [:]
             // Once the subject is in place, the guide's job is done, and the model must keep it there.
-            let keepsPlacement = usesBox && guide.target?.isAligned == true
+            // In Light & Exposure, a frame lined up in Composition is kept: no tip moves the camera.
+            let keepsPlacement = usesBox ? guide.target?.isAligned == true : (topic == .light && memory.isFramingLinedUp)
             // The rules and the model are one coach: the model hears what the rules are already
             // dealing with, so it neither repeats nor contradicts them.
-            let handled = CoachRules.handledNote(
-                issues: issues, keepsPlacement: keepsPlacement,
-                placement: CompositionGuide.guidePlacement(for: styles)
-            )
+            let handled = [
+                CoachRules.handledNote(
+                    issues: issues, keepsPlacement: usesBox && keepsPlacement,
+                    placement: CompositionGuide.guidePlacement(for: styles)
+                ),
+                topic == .light ? CoachRules.lightKeepNote(keepsFraming: keepsPlacement) : nil,
+            ].compactMap(\.self).joined(separator: " ")
             if usesModel, !issues.contains(where: \.blocksModel),
                let judgement = await judge(
                    frame, topic: topic, styles: styles, analysis: analysis,
-                   selectedName: picked?.name, handled: handled
+                   selectedName: picked?.name, handled: handled.isEmpty ? nil : handled
                ) {
                 guard !Task.isCancelled else { break }
                 var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
@@ -863,6 +907,8 @@ final class PhotoCoach {
     func noteShutter() {
         endSection()
         fixedSinceShot = []
+        // A new photo starts a new framing.
+        memory.clearFraming()
     }
 
     /// What the coach knew when the shutter fired, kept with the photo for its story in the gallery.
@@ -948,7 +994,9 @@ final class PhotoCoach {
                 improve: [],
                 why: nil,
                 isGoodEnough: true,
-                nextSection: sectionRecommendation
+                nextSection: sectionRecommendation,
+                // Light first, then framing: once the light is good, it's time to frame the shot.
+                nextMode: topic == .light ? .composition : nil
             )
             return
         }
@@ -1007,7 +1055,13 @@ final class PhotoCoach {
             move: top.asksToMove.map { $0 == .closer ? .closer : .back },
             highlight: highlight,
             thirdsLines: advice.thirdsLines,
-            isGoodEnough: false
+            isGoodEnough: false,
+            mover: advice.mover,
+            lightSide: advice.lightSide,
+            lightSpot: topic == .light ? analysis.lightSpot : nil,
+            isOutdoorLight: analysis.isOutdoors,
+            subjectBox: analysis.subject ?? analysis.faces.max { $0.width * $0.height < $1.width * $1.height },
+            quickFix: advice.quickFix
         )
     }
 
@@ -1115,7 +1169,18 @@ final class PhotoCoach {
         (.clutteredBackground, #"A person with a lamp post right behind their head: issue clutteredBackground, region background, thing "the lamp post", strength "Soft, even light"."#),
         (.distractingEdges, #"A bright sign at the right edge: issue distractingEdges, region right, thing "the sign", strength "Clear subject"."#),
         (.subjectCutOff, #"A tree cut off at the top: issue subjectCutOff, region top, thing "the tree", strength "Rich colours"."#),
+        (.hardShadowsOnSubject, #"A face lit hard from one side, with the other half lost in deep shadow: issue hardShadowsOnSubject, region left, thing "the subject", strength "Clear subject"."#),
+        (.hardShadowsOnSubject, #"A face in midday sun with dark shadows under the eyes and nose: issue hardShadowsOnSubject, region centre, thing "the subject", strength "Bright colours"."#),
+        (.flatLight, #"A plate lit straight from the front, looking flat with no shadows to show its shape: issue flatLight, region whole, thing "the plate", strength "Neat setup"."#),
+        (.mixedColourLight, #"A face lit orange by a lamp on one side and blue by a window on the other: issue mixedColourLight, region whole, thing "the lamp", strength "Clear subject"."#),
+        (.patchyLight, #"A person under a tree with spots of sun across the face: issue patchyLight, region centre, thing "the subject", strength "Nice setting"."#),
+        (.sunGlare, #"A street scene washed out with haze and a flare streak from the sun just above the frame: issue sunGlare, region top, thing "the sun", strength "Clear subject"."#),
     ]
+    /// Light's answers when the light is already good, so soft, even light isn't marked down.
+    private static let lightNoneExample = """
+        A face lit softly by a window to one side, with the far side a little darker but still clearly visible: issue none, region whole, thing "", strength "Soft side light".
+        A person in open shade on a bright day: issue none, region whole, thing "", strength "Even, soft light".
+        """
     private static let noneExample = """
         A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background".
         A person in front of glass doors: issue none, region whole, thing "", strength "Clean background".
@@ -1124,7 +1189,8 @@ final class PhotoCoach {
 
     private func makeSession(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> LanguageModelSession {
         let allowed = VisualIssue.allCases.filter { $0 != .none && CoachRules.allows($0, for: topic, styles: styles) }
-        let examples = Self.examples.filter { allowed.contains($0.issue) }.prefix(4).map(\.text) + [Self.noneExample]
+        let none = topic == .light ? Self.lightNoneExample : Self.noneExample
+        let examples = Self.examples.filter { allowed.contains($0.issue) }.prefix(4).map(\.text) + [none]
         let praised = memory.recentStrengths.isEmpty
             ? ""
             : " Already praised: \(memory.recentStrengths.joined(separator: ", ")); praise something else if you can."
@@ -1165,6 +1231,15 @@ final class PhotoCoach {
                 judge the biggest problem that applies to any of them:
                 \(criteria)
                 """
+        case .light:
+            return """
+                the quality of the light on the subject, not how bright it is: whether its shadows are \
+                hard or soft, whether the light comes from the side or flat from straight ahead, whether \
+                lights of different colours mix on it, whether patches of sun and shade fall across it, and \
+                whether the sun just outside the frame washes it out with haze or flare. \
+                Side light is only good when it is soft and the shadow side still shows detail: if half of \
+                the subject or a face is lost in deep, dark shadow, that is hardShadowsOnSubject, not a strength
+                """
         default:
             return "the framing: the background, the edges, whether the subject is cut off, and empty space"
         }
@@ -1198,6 +1273,9 @@ final class PhotoCoach {
                     options: GenerationOptions(samplingMode: .greedy)
                 ) {
                     "Topic: \(topic.title). Measured by the camera: \(analysis.summary)."
+                    if topic == .light, let hint = CoachRules.timeOfDayHint(hour: Calendar.current.component(.hour, from: .now), outdoors: analysis.isOutdoors) {
+                        hint
+                    }
                     if let chosen {
                         chosen
                     }
@@ -1299,6 +1377,11 @@ struct CoachFeedbackView: View {
     let feedback: PhotoFeedback
     /// Whether the photography idea behind the advice is shown under it.
     var showsExplanation = true
+    /// Whether a tip's one-tap fix can be applied on this camera right now.
+    var canApply: (QuickFix) -> Bool = { _ in false }
+    var onQuickFix: (QuickFix) -> Void = { _ in }
+    /// Goes on to the next mode, like Composition once the light is good.
+    var onNextMode: (AdviceTopic) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1315,10 +1398,21 @@ struct CoachFeedbackView: View {
             // One thing to do at a time, so a beginner isn't juggling instructions.
             if !feedback.isGoodEnough, let action = feedback.improve.first {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Do this now")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.yellow)
-                        .textCase(.uppercase)
+                    HStack(spacing: 8) {
+                        Text("Do this now")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.yellow)
+                            .textCase(.uppercase)
+                        // Who acts, so it's never unclear whether you or the subject should move.
+                        if let mover = feedback.mover {
+                            Label(mover.label, systemImage: mover.systemImage)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.lightGuide, in: .capsule)
+                        }
+                    }
 
                     Label {
                         Text(actionText(action))
@@ -1333,6 +1427,18 @@ struct CoachFeedbackView: View {
                         Text("Then: \(feedback.improve[1])")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.7))
+                    }
+
+                    // Follow the tip in one tap, or do it yourself.
+                    if let fix = feedback.quickFix, canApply(fix) {
+                        Button(fix.title, systemImage: fix.systemImage) {
+                            onQuickFix(fix)
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.lightGuide)
+                        .foregroundStyle(.black)
+                        .padding(.top, 4)
                     }
                 }
             }
@@ -1351,13 +1457,25 @@ struct CoachFeedbackView: View {
                     .foregroundStyle(.white)
                     .padding(.top, 2)
             }
+
+            // Light first, then framing: once the light is good, go on to frame the shot.
+            if feedback.isGoodEnough, let next = feedback.nextMode {
+                Button("Light looks good. Now frame it", systemImage: next.systemImage) {
+                    onNextMode(next)
+                }
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .foregroundStyle(.black)
+            }
         }
         // Long advice wraps onto more lines at full size, and the card grows, instead of ending in "…".
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .glassEffect(.regular.tint(.black.opacity(0.35)), in: .rect(cornerRadius: 22))
-        .accessibilityElement(children: .combine)
+        // Contain rather than combine, so the fix and next-mode buttons stay usable with VoiceOver.
+        .accessibilityElement(children: .contain)
     }
 
     /// The advice in white, with the outlined thing's name in the outline's orange so the two are linked.

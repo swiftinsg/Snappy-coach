@@ -39,21 +39,26 @@ private func scene(
 @MainActor
 struct CoachRulesTests {
     @Test func wellExposedFrameHasNoExposureIssues() {
-        #expect(CoachRules.issues(for: .exposure, in: scene()).isEmpty)
-        #expect(CoachRules.strengths(for: .exposure, in: scene()).contains("Balanced brightness"))
+        #expect(CoachRules.issues(for: .light, in: scene()).isEmpty)
+        #expect(CoachRules.strengths(for: .light, in: scene()).contains("Balanced brightness"))
     }
 
     @Test func darkFrameIsUnderexposed() {
-        #expect(CoachRules.issues(for: .exposure, in: scene(brightness: 0.1)).first == .underexposed)
+        // Dark enough to shoot badly is "too dark", which takes the place of "underexposed".
+        #expect(CoachRules.issues(for: .light, in: scene(brightness: 0.1)).first == .tooDark)
+        #expect(!CoachRules.issues(for: .light, in: scene(brightness: 0.1)).contains(.underexposed))
+        // A little dark, with enough light around, is just underexposed.
+        let dimmed = CameraReadings(exposureOffset: -1, exposureSeconds: 1.0 / 120, iso: 100)
+        #expect(CoachRules.issues(for: .light, in: scene(brightness: 0.3, readings: dimmed)).contains(.underexposed))
     }
 
     @Test func cameraMeterOverridesAverageBrightness() {
         let readings = CameraReadings(exposureOffset: 1.2, exposureSeconds: 1.0 / 120, iso: 100)
-        #expect(CoachRules.issues(for: .exposure, in: scene(readings: readings)).first == .overexposed)
+        #expect(CoachRules.issues(for: .light, in: scene(readings: readings)).first == .overexposed)
     }
 
     @Test func blownSkyAsksToProtectHighlights() {
-        #expect(CoachRules.issues(for: .exposure, in: scene(highlightClip: 0.1)).contains(.highlightsClipped))
+        #expect(CoachRules.issues(for: .light, in: scene(highlightClip: 0.1)).contains(.highlightsClipped))
     }
 
     @Test func darkSubjectOnBrightBackgroundIsBacklit() {
@@ -61,7 +66,7 @@ struct CoachRulesTests {
         #expect(backlit.isBacklit)
         #expect(CoachRules.issues(for: .light, in: backlit).contains(.backlitSubject))
         // The same problem gets topic-specific advice.
-        #expect(CoachIssue.backlitSubject.advice(for: .exposure).action.contains("Exposure"))
+        #expect(CoachIssue.backlitSubject.advice(for: .light).action.contains("Tap the subject"))
         #expect(!CoachIssue.backlitSubject.advice(for: .light).action.contains("Exposure"))
     }
 
@@ -96,15 +101,15 @@ struct CoachRulesTests {
     }
 
     @Test func brighteningABacklitSubjectClearsTheExposureTip() {
-        #expect(CoachRules.issues(for: .exposure, in: scene(highlightClip: 0.05, subjectBrightness: 0.2, backgroundBrightness: 0.8)).contains(.backlitSubject))
+        #expect(CoachRules.issues(for: .light, in: scene(highlightClip: 0.05, subjectBrightness: 0.2, backgroundBrightness: 0.8)).contains(.backlitSubject))
         // After dragging Exposure right the background is still brighter, but the subject is fine.
-        #expect(!CoachRules.issues(for: .exposure, in: scene(subjectBrightness: 0.5, backgroundBrightness: 0.95)).contains(.backlitSubject))
+        #expect(!CoachRules.issues(for: .light, in: scene(subjectBrightness: 0.5, backgroundBrightness: 0.95)).contains(.backlitSubject))
     }
 
     @Test func lowerExposureClearsTheHighlightsTipEvenWithALampInFrame() {
         var readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 120, iso: 100)
         readings.exposureBias = -1
-        #expect(!CoachRules.issues(for: .exposure, in: scene(highlightClip: 0.1, readings: readings)).contains(.highlightsClipped))
+        #expect(!CoachRules.issues(for: .light, in: scene(highlightClip: 0.1, readings: readings)).contains(.highlightsClipped))
     }
 
     @Test func steppingCloserOrBackIsMeasuredBySubjectSize() {
@@ -143,14 +148,18 @@ struct CoachRulesTests {
         #expect(CoachRules.issues(for: .composition, in: scene(subject: tiny)).contains(.subjectTooSmall))
     }
 
-    @Test func noTipAsksForATapOnTheViewfinder() {
-        // A tap on the viewfinder focuses and a double tap picks the subject, so tips never ask for
-        // a tap there: it would be unclear which one they mean.
+    @Test func onlyBrightnessTipsAskForATapOnTheViewfinder() {
+        // A single tap on the viewfinder sets focus and brightness there, so only brightness tips
+        // ask for one. Picking the subject is a double tap, which tips never ask for.
+        let brightness: Set<CoachIssue> = [.underexposed, .overexposed, .highlightsClipped, .backlitSubject]
         for issue in CoachIssue.allCases {
             for topic in AdviceTopic.allCases {
                 for advice in [issue.advice(for: topic), issue.alternativeAdvice(for: topic)].compactMap(\.self) {
-                    #expect(!advice.action.contains("Tap the subject"), "\(issue) asks for a tap")
-                    #expect(!advice.action.contains("sun"), "\(issue) mentions a sun handle")
+                    if advice.action.hasPrefix("Tap the") {
+                        #expect(brightness.contains(issue), "\(issue) asks for a tap but isn't about brightness")
+                    }
+                    #expect(!advice.action.lowercased().contains("double-tap"), "\(issue) asks for a double tap")
+                    #expect(!advice.action.contains("drag the sun"), "\(issue) mentions the sun handle")
                     #expect(!advice.action.contains("Depth"), "\(issue) relies on Depth, which the preview doesn't show")
                 }
             }
@@ -471,10 +480,67 @@ struct CoachRulesTests {
         #expect(CoachRules.handledNote(issues: [], keepsPlacement: false, placement: .centre) == nil)
     }
 
+    /// A face-sized patch, with its left and right halves at the given brightness (0...1).
+    private func faceImage(left: Double, right: Double) -> GrayImage? {
+        let size = 64
+        guard let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        context.setFillColor(gray: left, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: size / 2, height: size))
+        context.setFillColor(gray: right, alpha: 1)
+        context.fill(CGRect(x: size / 2, y: 0, width: size / 2, height: size))
+        return context.makeImage().flatMap { GrayImage($0, width: size) }
+    }
+
+    @Test func halfAFaceInDeepShadowIsCalledOut() throws {
+        let face = [CGRect(x: 0, y: 0, width: 1, height: 1)]
+        // Lit hard from one side, the far half nearly black: a problem, and no "even light" praise.
+        let splitImage = try #require(faceImage(left: 0.8, right: 0.15))
+        let split = try #require(SceneAnalysis.faceShadowRatio(of: face, in: splitImage))
+        #expect(split < CoachRules.faceShadowLimit)
+        var analysis = scene(faces: face)
+        analysis.faceShadowRatio = split
+        #expect(CoachRules.issues(for: .light, in: analysis).contains(.faceHalfInShadow))
+        #expect(!CoachRules.strengths(for: .light, in: analysis).contains("Soft, even light"))
+        // The model's "partial lighting is good" is thrown out while the shadow is measured.
+        #expect(CoachRules.contradicts(strength: "Partial lighting", analysis: analysis))
+        // Soft side light, with the far side only a little darker, is fine.
+        let softImage = try #require(faceImage(left: 0.8, right: 0.55))
+        let soft = try #require(SceneAnalysis.faceShadowRatio(of: face, in: softImage))
+        analysis.faceShadowRatio = soft
+        #expect(!CoachRules.issues(for: .light, in: analysis).contains(.faceHalfInShadow))
+    }
+
+    @Test func lightJudgesTheQualityOfLight() {
+        // Light asks the model about the light itself, and only about that.
+        #expect(CoachRules.usesModel(.light))
+        #expect(CoachRules.allows(.hardShadowsOnSubject, for: .light))
+        #expect(CoachRules.allows(.mixedColourLight, for: .light))
+        #expect(!CoachRules.allows(.clutteredBackground, for: .light))
+        // Composition doesn't judge the light, even with every style picked.
+        #expect(!CoachRules.allows(.flatLight, for: .composition, styles: Set(CompositionGuide.allCases)))
+        // Exposure, Focus and Angle & Perspective stay measured only.
+        #expect(!CoachRules.usesModel(.focus) && !CoachRules.usesModel(.anglePerspective))
+        // Light tips clear once the person reframes, like other model tips.
+        #expect(CoachIssue.patchyLight.isModelOnly)
+        #expect(!CoachRules.showsSecondTip(for: .light))
+        // Shadows need a subject to fall on.
+        var empty = SceneAnalysis(brightness: 0.5, highlightClip: 0, shadowClip: 0, subject: nil, subjectBrightness: nil,
+                                  backgroundBrightness: nil, subjectSharpness: 100, faces: [], readings: CameraReadings(),
+                                  pitch: nil, tilt: nil, shake: nil, scene: .object, people: [], layout: [])
+        #expect(!CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: empty))
+        empty.subject = CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
+        empty.subjectContrast = 0.2
+        #expect(CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: empty))
+        // A subject with no light and dark in it can't be patchy.
+        empty.subjectContrast = 0.01
+        #expect(!CoachRules.believes(.patchyLight, detail: nil, analysis: empty))
+    }
+
     @Test func compositionShowsOneTip() {
         // Composition mixes rule and model tips, so it shows one; other topics' tips are all rules.
         #expect(!CoachRules.showsSecondTip(for: .composition))
-        #expect(CoachRules.showsSecondTip(for: .exposure))
+        #expect(CoachRules.showsSecondTip(for: .focus))
     }
 
     @Test func coachSaysWhyAppleIntelligenceIsMissing() {
@@ -485,7 +551,7 @@ struct CoachRulesTests {
         // Every case says what still works and what's missing, so the simpler tips aren't a surprise.
         for reason: SystemLanguageModel.Availability.UnavailableReason in [.appleIntelligenceNotEnabled, .deviceNotEligible, .modelNotReady] {
             let notice = CoachRules.modelNotice(for: .unavailable(reason)) ?? ""
-            #expect(notice.contains("framing, light and angle tips"))
+            #expect(notice.contains("framing, brightness and angle tips"))
             #expect(notice.contains("can't judge backgrounds"))
         }
     }
@@ -499,7 +565,7 @@ struct CoachRulesTests {
         #expect(Set(alerts.map(\.key)).count == 3)
         for alert in alerts {
             #expect(alert.message.localizedCaseInsensitiveContains("advice may not be as good"))
-            #expect(alert.message.contains("framing, light and angle tips"))
+            #expect(alert.message.contains("framing, brightness and angle tips"))
         }
         #expect(CoachRules.modelAlert(for: .unavailable(.appleIntelligenceNotEnabled))?.message.contains("Settings") == true)
     }
@@ -629,7 +695,7 @@ struct CoachRulesTests {
         #expect(!CoachRules.allows(.clutteredBackground, for: .anglePerspective))
         #expect(!CoachRules.usesModel(.anglePerspective))
         #expect(CoachRules.usesModel(.composition))
-        #expect(!CoachRules.allows(.subjectCutOff, for: .exposure))
+        #expect(!CoachRules.allows(.subjectCutOff, for: .focus))
     }
 
     @Test func everyIssueHasShortAdviceAndAReason() {
@@ -892,6 +958,14 @@ struct GalleryStoryTests {
         #expect(loaded["photo"]?.topic == .light)
     }
 
+    @Test func oldExposurePhotosJoinLightAndExposure() {
+        var old = record
+        old.topicID = "exposure"
+        #expect(old.topic == .light)
+        #expect(AdviceTopic.stored("exposure") == .light)
+        #expect(AdviceTopic.allCases.map(\.title) == ["Light & Exposure", "Composition", "Angle & Perspective", "Focus"])
+    }
+
     @Test func anUnknownModeIsTreatedAsAnEarlierPhoto() {
         var renamed = record
         renamed.topicID = "somethingRemoved"
@@ -915,8 +989,9 @@ extension GalleryStoryTests {
         let photos = ["c2", "l1", "old", "c1"]
         let topics: [String: AdviceTopic] = ["c2": .composition, "c1": .composition, "l1": .light]
         let sections = GallerySection.grouped(photos, topicOf: { topics[$0] })
-        #expect(sections.map(\.topic) == [.composition, .light, nil])
-        #expect(sections.first?.items == ["c2", "c1"])
+        // Sections follow the shooting order: Light & Exposure, then Composition.
+        #expect(sections.map(\.topic) == [.light, .composition, nil])
+        #expect(sections[1].items == ["c2", "c1"])
         #expect(sections.last?.items == ["old"])
 
         let lightOnly = GallerySection.grouped(photos, topicOf: { topics[$0] }, filter: .light)
@@ -938,5 +1013,178 @@ struct TextWrappingTests {
         let shown = "One Point Perspective".unhyphenated
         #expect(shown.components(separatedBy: " ").count == 3)
         #expect(shown.contains("P\u{2060}e"))
+    }
+}
+
+/// Light & Exposure: finding the light, who moves, and keeping what's being photographed in the shot.
+@MainActor
+struct LightCoachTests {
+    /// A 16×16 grid with blown-out cells where `isHot` says, `around` brightness elsewhere.
+    private func grids(around: Double = 0.4, isHot: (Int, Int) -> Bool) -> (hot: [[Double]], brightness: [[Double]]) {
+        let hot = (0..<16).map { r in (0..<16).map { c in isHot(r, c) ? 1.0 : 0 } }
+        let brightness = (0..<16).map { r in (0..<16).map { c in isHot(r, c) ? 1.0 : around } }
+        return (hot, brightness)
+    }
+
+    @Test func findsASmallLightSourceButNotABrightSky() throws {
+        // The sun: a 2×2 blown-out spot in the top left, darker around it.
+        let sun = grids { r, c in r < 2 && c < 2 }
+        let spot = try #require(LightSpotFinder.find(hot: sun.hot, brightness: sun.brightness))
+        #expect(spot.minX == 0 && spot.minY == 0)
+        #expect(LightSide.of(spot) == .left)
+        // A whole bright sky across the top isn't one light source.
+        let sky = grids { r, _ in r < 4 }
+        #expect(LightSpotFinder.find(hot: sky.hot, brightness: sky.brightness) == nil)
+        // A bright patch with bright surroundings is the scene, not a source.
+        let glare = grids(around: 0.92) { r, c in r < 2 && c < 2 }
+        #expect(LightSpotFinder.find(hot: glare.hot, brightness: glare.brightness) == nil)
+    }
+
+    /// A frame for the light rules: a subject in the middle, nothing else.
+    private func light(
+        scene sceneType: SceneType = .object,
+        backdrop: SceneType? = nil,
+        faces: [CGRect] = [],
+        outdoors: Bool = false,
+        spot: CGRect? = nil,
+        litSide: LightSide? = nil,
+        shadowRatio: Double? = nil,
+        backlit: Bool = false,
+        subject: CGRect? = CGRect(x: 0.35, y: 0.35, width: 0.3, height: 0.3),
+        frontCamera: Bool = false
+    ) -> SceneAnalysis {
+        var a = scene(subject: subject, subjectBrightness: backlit ? 0.2 : 0.5, backgroundBrightness: backlit ? 0.9 : 0.5, faces: faces)
+        a.scene = sceneType
+        a.backdrop = backdrop
+        a.isOutdoors = outdoors
+        a.lightSpot = spot
+        a.faceLitSide = litSide
+        a.faceShadowRatio = shadowRatio
+        a.readings.isFrontCamera = frontCamera
+        return a
+    }
+
+    private let sunTopLeft = CGRect(x: 0.05, y: 0.05, width: 0.1, height: 0.1)
+    private let sunTopMiddle = CGRect(x: 0.45, y: 0.05, width: 0.1, height: 0.1)
+    private let smallFace = [CGRect(x: 0.45, y: 0.3, width: 0.08, height: 0.1)]
+    private let bigFace = [CGRect(x: 0.35, y: 0.2, width: 0.25, height: 0.3)]
+
+    @Test func lightSideNeedsTheMeasurementsToAgree() {
+        #expect(light(outdoors: true, spot: sunTopLeft).lightSide == .left)
+        // A lamp alone indoors isn't enough to name a side.
+        #expect(light(spot: sunTopLeft).lightSide == nil)
+        // A lamp and a face lit on the same side agree.
+        #expect(light(faces: smallFace, spot: sunTopLeft, litSide: .left, shadowRatio: 0.6).lightSide == .left)
+        // They disagree, so no side is named.
+        #expect(light(faces: smallFace, spot: sunTopLeft, litSide: .right, shadowRatio: 0.6).lightSide == nil)
+        // A face in deep shadow on one side is enough by itself.
+        #expect(light(faces: smallFace, litSide: .right, shadowRatio: 0.3).lightSide == .right)
+    }
+
+    /// The tip for a scene, checked against the rules every light tip follows.
+    private func tip(_ issue: CoachIssue, _ a: SceneAnalysis, keepsFraming: Bool = false) -> Advice {
+        let advice = issue.advice(for: .light, analysis: a, keepsPlacement: keepsFraming)
+        let words = advice.action.split(separator: " ").count
+        #expect(words <= 10, "\(advice.action) is too long")
+        for banned in ["point the camera", "turn away", "Turn away"] {
+            #expect(!advice.action.contains(banned), "\(advice.action) loses the subject")
+        }
+        return advice
+    }
+
+    @Test func personWithSceneryBehindStaysAndTheLightIsBalanced() {
+        // Sun behind a person with a landscape behind them: the camera stays, the face is brightened.
+        let far = tip(.sunInFrame, light(scene: .people, backdrop: .landscape, faces: smallFace, outdoors: true, spot: sunTopLeft, backlit: true))
+        #expect(far.mover == .settings)
+        #expect(far.action == "Tap their face so the camera brightens them")
+        #expect(far.quickFix == .meterOnSubject)
+        // Close enough for flash to reach.
+        let close = tip(.backlitSubject, light(scene: .people, backdrop: .city, faces: bigFace, outdoors: true, backlit: true))
+        #expect(close.action == "Turn on Flash to light their face")
+        #expect(close.quickFix == .flash)
+    }
+
+    @Test func aSubjectWithNothingBehindItGetsWalkedAround() {
+        // The sun at the top left, in front of the camera: walk round to the left to put it beside you.
+        let walk = tip(.sunInFrame, light(outdoors: true, spot: sunTopLeft, backlit: true))
+        #expect(walk.mover == .photographer)
+        #expect(walk.action == "Walk around the subject to your left, keeping it centred")
+        #expect(walk.lightSide == .left)
+        // No sure side: the general way, which is never wrong.
+        let unsure = tip(.backlitSubject, light(spot: sunTopLeft, backlit: true))
+        #expect(unsure.action == "Walk around the subject until the light is beside you")
+        // Slipping off the edge while walking: keep it in the shot first.
+        let slipping = tip(.backlitSubject, light(backlit: true, subject: CGRect(x: 0, y: 0.3, width: 0.3, height: 0.3)))
+        #expect(slipping.action == "Keep the subject in frame: turn back toward it")
+    }
+
+    @Test func aBuildingStaysAndOnlyTheSunIsDealtWith() {
+        // The sun at the left edge of a city view: a small turn right drops it out of the frame.
+        let edge = tip(.sunInFrame, light(scene: .city, outdoors: true, spot: sunTopLeft))
+        #expect(edge.mover == .photographer)
+        #expect(edge.action == "Turn slightly right so the sun just leaves the frame")
+        // The sun in the middle: something nearby hides it, the building stays.
+        let middle = tip(.sunInFrame, light(scene: .city, outdoors: true, spot: sunTopMiddle))
+        #expect(middle.action == "Stand so a tree or roof hides the sun")
+        // A lined-up frame never moves: a setting keeps the sky instead.
+        let framed = tip(.sunInFrame, light(scene: .city, outdoors: true, spot: sunTopLeft), keepsFraming: true)
+        #expect(framed.mover == .settings)
+        #expect(framed.quickFix == .darken)
+    }
+
+    @Test func aLinedUpFrameIsNeverMoved() {
+        let kept = tip(.backlitSubject, light(backlit: true), keepsFraming: true)
+        #expect(kept.mover == .settings)
+        #expect(kept.why.hasPrefix("This keeps your framing."))
+    }
+
+    @Test func halfAFaceInShadowAsksTheSubjectToTurn() {
+        let back = tip(.faceHalfInShadow, light(scene: .people, faces: smallFace, litSide: .left, shadowRatio: 0.3))
+        #expect(back.mover == .subject)
+        #expect(back.action == "Ask them to turn toward the light on your left")
+        // On the front camera the subject is the person holding the phone.
+        let selfie = tip(.faceHalfInShadow, light(scene: .people, faces: smallFace, litSide: .left, shadowRatio: 0.3, frontCamera: true))
+        #expect(selfie.action == "Turn your face toward the light on your left")
+    }
+
+    @Test func settingsTipsComeWithAOneTapFix() {
+        var dim = light()
+        dim.brightness = 0.1
+        let dark = tip(.tooDark, dim)
+        #expect(dark.mover == .settings)
+        #expect(dark.quickFix == .nightMode)
+        dim.readings.isNightModeOn = true
+        #expect(tip(.tooDark, dim).quickFix == nil)
+        // A strong orange cast indoors gets White Balance for lamplight; outdoors it's left alone.
+        var lamp = light()
+        lamp.colourWarmth = 2
+        #expect(CoachRules.issues(for: .light, in: lamp).contains(.colourCast))
+        #expect(tip(.colourCast, lamp).quickFix == .whiteBalance(3200))
+        lamp.isOutdoors = true
+        #expect(!CoachRules.issues(for: .light, in: lamp).contains(.colourCast))
+    }
+
+    @Test func theSunComesFirstAndReplacesHighlights() {
+        var a = light(outdoors: true, spot: sunTopLeft)
+        a.highlightClip = 0.08
+        let issues = CoachRules.issues(for: .light, in: a)
+        #expect(issues.first == .sunInFrame)
+        #expect(!issues.contains(.highlightsClipped))
+    }
+
+    @Test func lightFirstThenFraming() {
+        for issue in CoachRules.bigLightIssues {
+            #expect(issue.lightNudge?.hasPrefix("Light first") == true)
+        }
+        #expect(CoachRules.lightKeepNote(keepsFraming: false).contains("Never suggest pointing the camera"))
+        #expect(CoachRules.lightKeepNote(keepsFraming: true).contains("must not change"))
+        #expect(AdviceTopic.allCases.first == .light)
+    }
+
+    @Test func timeOfDayOnlyOutdoors() {
+        #expect(CoachRules.timeOfDayHint(hour: 7, outdoors: true)?.contains("soft") == true)
+        #expect(CoachRules.timeOfDayHint(hour: 12, outdoors: true)?.contains("harsh") == true)
+        #expect(CoachRules.timeOfDayHint(hour: 12, outdoors: false) == nil)
+        #expect(CoachRules.timeOfDayHint(hour: 22, outdoors: true) == nil)
     }
 }

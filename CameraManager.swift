@@ -1328,3 +1328,50 @@ struct CameraProblem: Equatable {
     /// True when the fix is in Settings, so the message offers a button to go there.
     let opensSettings: Bool
 }
+
+// MARK: - One-tap fixes from the coach
+
+extension CameraManager {
+    /// Whether a tip's one-tap fix can be applied: the control exists here and isn't set already.
+    func canApply(_ fix: QuickFix) -> Bool {
+        guard device != nil else { return false }
+        switch fix {
+        case .nightMode: return !isNightModeOn
+        case .flash: return flash != .on && photoOutput.supportedFlashModes.contains(.on)
+        case .meterOnSubject: return true
+        case .brighten: return exposureBias < 2
+        case .darken: return exposureBias > -2
+        case .raw: return format != .proRAW && photoOutput.isAppleProRAWSupported
+        case .whiteBalance: return whiteBalanceKelvin == nil && isAvailableOnCurrentCamera(.whiteBalance)
+        }
+    }
+
+    /// Applies a tip's fix and returns the status message to show. `subjectPoint` is where the
+    /// subject is on the sensor (see `FrameMapping.sensorPoint`), for setting brightness there.
+    func apply(_ fix: QuickFix, subjectPoint: CGPoint?) -> String {
+        switch fix {
+        case .nightMode:
+            return setNightMode(true)
+        case .flash:
+            flash = .on
+            return "Flash On"
+        case .meterOnSubject:
+            guard let subjectPoint else { return "Tap the subject to set its brightness" }
+            focusAndExpose(at: subjectPoint)
+            return "Brightness set for the subject"
+        case .brighten, .darken:
+            let step: Float = fix == .brighten ? 0.7 : -0.7
+            setAdjustment(min(max(exposureBias + step, -2), 2), for: .exposure)
+            return fix == .brighten ? "Brighter" : "Darker"
+        case .raw:
+            // Format cycles HEIF, JPEG, RAW; at most two taps reach RAW.
+            for _ in 0..<2 where format != .proRAW {
+                _ = activate(.format)
+            }
+            return format == .proRAW ? "Format: RAW (Live off)" : "RAW isn't available on this camera"
+        case .whiteBalance(let kelvin):
+            setAdjustment(kelvin, for: .whiteBalance)
+            return "White Balance set for \(Int(kelvin))K light"
+        }
+    }
+}

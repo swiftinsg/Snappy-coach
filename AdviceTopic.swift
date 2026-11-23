@@ -7,17 +7,26 @@ import SwiftUI
 
 /// What the live advice focuses on. Chosen from the dropdown in the top bar.
 enum AdviceTopic: String, CaseIterable, Identifiable {
-    case composition, anglePerspective, focus, light, exposure
+    /// In the order to work in: where to stand for the light, then the framing, then the details.
+    case light, composition, anglePerspective, focus
 
     var id: String { rawValue }
+
+    /// A topic saved by an earlier version. Light and Exposure became one mode, so old
+    /// Exposure photos and settings carry over to it.
+    static func stored(_ rawValue: String) -> AdviceTopic? {
+        rawValue == "exposure" ? .light : AdviceTopic(rawValue: rawValue)
+    }
+
+    /// Where it comes in the shooting order, shown beside it in the menu.
+    var step: Int { (Self.allCases.firstIndex(of: self) ?? 0) + 1 }
 
     var title: String {
         switch self {
         case .composition: "Composition"
         case .anglePerspective: "Angle & Perspective"
         case .focus: "Focus"
-        case .light: "Light"
-        case .exposure: "Exposure"
+        case .light: "Light & Exposure"
         }
     }
 
@@ -29,6 +38,7 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     var shortTitle: String {
         switch self {
         case .anglePerspective: "Angle"
+        case .light: "Light"
         default: title
         }
     }
@@ -39,7 +49,6 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
         case .anglePerspective: "angle"
         case .focus: "dot.viewfinder"
         case .light: "sun.max"
-        case .exposure: "plusminus.circle"
         }
     }
 
@@ -50,8 +59,7 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
         case .composition: [.aspect, .timer, .live]
         case .anglePerspective: [.aspect, .timer, .live]
         case .focus: [.focus, .depth, .lensAperture]
-        case .light: [.flash, .nightMode, .whiteBalance]
-        case .exposure: [.exposure, .shutterSpeed, .histogram]
+        case .light: [.exposure, .flash, .nightMode]
         }
     }
 }
@@ -77,7 +85,7 @@ struct AdviceTopicMenu: View {
                             selection = topic
                             onSelect(topic)
                         })) {
-                            Label(topic.displayTitle, systemImage: topic.systemImage)
+                            Label("\(topic.step). \(topic.displayTitle)", systemImage: topic.systemImage)
                             Text(topic.tourDescription)
                         }
                     }
@@ -112,7 +120,7 @@ struct AdviceTopicMenu: View {
             onSelect(topic)
         })) {
             ForEach(AdviceTopic.allCases) { topic in
-                Label(topic.displayTitle, systemImage: topic.systemImage)
+                Label("\(topic.step). \(topic.displayTitle)", systemImage: topic.systemImage)
                     .tag(topic)
             }
         }

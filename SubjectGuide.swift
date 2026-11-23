@@ -832,3 +832,141 @@ struct SubjectTargetOverlay: View {
         FrameMapping.viewRect(for: box, frameAspect: frameAspect, in: size)
     }
 }
+
+// MARK: - Light guide
+
+/// The amber colour of Light & Exposure's guides, so they never look like Composition's white
+/// "point the camera" arrow.
+extension Color {
+    static let lightGuide = Color(red: 1, green: 0.72, blue: 0.22)
+}
+
+/// Light & Exposure's signals on the viewfinder, sized like the preview:
+/// - where the light comes from: a sun or lamp at that edge, or on the bright spot itself
+/// - "you move": a curved arrow around the subject, the way to walk
+/// - "subject moves": a short arrow from the subject toward the light, with a person badge
+/// Settings tips show no arrow; their fix is a button on the card.
+struct LightGuideOverlay: View {
+    let feedback: PhotoFeedback
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
+                if let point = markerPoint(in: size) {
+                    lightMarker
+                        .position(point)
+                }
+                if let box = feedback.subjectBox.map({ Self.rect($0, in: size) }) {
+                    switch feedback.mover {
+                    case .photographer:
+                        WalkAroundArrow(box: box, side: feedback.lightSide)
+                    case .subject:
+                        SubjectTurnArrow(box: box, side: feedback.lightSide)
+                    default:
+                        EmptyView()
+                    }
+                }
+            }
+            .animation(.snappy, value: feedback.lightSide)
+            .animation(.snappy, value: feedback.mover)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    static func rect(_ box: CGRect, in size: CGSize) -> CGRect {
+        CGRect(x: box.minX * size.width, y: box.minY * size.height, width: box.width * size.width, height: box.height * size.height)
+    }
+
+    /// On the light itself when it's in the frame, otherwise at the edge it comes from.
+    private func markerPoint(in size: CGSize) -> CGPoint? {
+        if let spot = feedback.lightSpot {
+            return CGPoint(x: spot.midX * size.width, y: spot.midY * size.height)
+        }
+        switch feedback.lightSide {
+        case .left: return CGPoint(x: 28, y: size.height * 0.4)
+        case .right: return CGPoint(x: size.width - 28, y: size.height * 0.4)
+        case .top: return CGPoint(x: size.width / 2, y: 80)
+        default: return nil
+        }
+    }
+
+    private var lightMarker: some View {
+        Image(systemName: feedback.isOutdoorLight ? "sun.max.fill" : "lightbulb.fill")
+            .font(.title2.weight(.semibold))
+            .foregroundStyle(Color.lightGuide)
+            .padding(8)
+            .background(.black.opacity(0.35), in: .circle)
+            .overlay(Circle().strokeBorder(Color.lightGuide, lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.4), radius: 3)
+            .phaseAnimator([false, true]) { marker, isBright in
+                marker.opacity(isBright ? 1 : 0.7)
+            } animation: { _ in .easeInOut(duration: 0.9) }
+    }
+}
+
+/// A curved arrow under the subject, going the way to walk around it: it says "walk around",
+/// not "point the camera". With no side known, a dashed ring says "walk around it" without a way.
+private struct WalkAroundArrow: View {
+    let box: CGRect
+    let side: LightSide?
+
+    var body: some View {
+        let centre = CGPoint(x: box.midX, y: box.midY)
+        let radius = max(box.width, box.height) / 2 + 24
+        ZStack {
+            Circle()
+                .strokeBorder(Color.lightGuide.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [6, 6]))
+                .frame(width: radius * 2, height: radius * 2)
+                .position(centre)
+            if let side = side?.sideWord {
+                // The near half of the circle, from below the subject round to its left or right.
+                let toLeft = side == "left"
+                Path { path in
+                    path.addArc(center: centre, radius: radius, startAngle: .degrees(90),
+                                endAngle: .degrees(toLeft ? 175 : 5), clockwise: !toLeft)
+                }
+                .stroke(Color.lightGuide, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                // Going round from below, the arrow at the side end points up, the way of travel.
+                Image(systemName: "arrowtriangle.up.fill")
+                    .font(.system(size: 18))
+                    .foregroundStyle(Color.lightGuide)
+                    .position(x: centre.x + (toLeft ? -radius : radius), y: centre.y - 6)
+                Image(systemName: "figure.walk")
+                    .font(.headline)
+                    .foregroundStyle(.black)
+                    .padding(6)
+                    .background(Color.lightGuide, in: .circle)
+                    .scaleEffect(x: toLeft ? -1 : 1)
+                    .position(x: centre.x, y: centre.y + radius)
+            }
+        }
+        .shadow(color: .black.opacity(0.4), radius: 2)
+    }
+}
+
+/// A short arrow from the subject toward the light, with a person badge: "ask them to turn".
+private struct SubjectTurnArrow: View {
+    let box: CGRect
+    let side: LightSide?
+
+    var body: some View {
+        let toLeft = side == .left
+        HStack(spacing: 4) {
+            if side?.sideWord != nil, toLeft {
+                Image(systemName: "arrow.left").font(.title2.weight(.bold))
+            }
+            Image(systemName: "person.fill").font(.headline)
+            if side?.sideWord != nil, !toLeft {
+                Image(systemName: "arrow.right").font(.title2.weight(.bold))
+            }
+        }
+        .foregroundStyle(.black)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.lightGuide, in: .capsule)
+        .shadow(color: .black.opacity(0.4), radius: 2)
+        .position(x: box.midX, y: max(box.minY - 24, 24))
+    }
+}
