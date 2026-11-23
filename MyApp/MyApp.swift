@@ -4,6 +4,7 @@ import SwiftUI
     var body: some Scene {
         WindowGroup {
             AutoRenderingView()
+                .appleIntelligenceAlert()
         }
     }
 }

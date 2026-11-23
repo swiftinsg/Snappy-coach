@@ -490,6 +490,20 @@ struct CoachRulesTests {
         }
     }
 
+    @Test func alertSaysAdviceMayNotBeAsGood() {
+        #expect(CoachRules.modelAlert(for: .available) == nil)
+        let reasons: [SystemLanguageModel.Availability.UnavailableReason] = [.appleIntelligenceNotEnabled, .deviceNotEligible, .modelNotReady]
+        let alerts = reasons.compactMap { CoachRules.modelAlert(for: .unavailable($0)) }
+        #expect(alerts.count == 3)
+        // Each reason alerts on its own, and every alert says what it means for the advice.
+        #expect(Set(alerts.map(\.key)).count == 3)
+        for alert in alerts {
+            #expect(alert.message.localizedCaseInsensitiveContains("advice may not be as good"))
+            #expect(alert.message.contains("framing, light and angle tips"))
+        }
+        #expect(CoachRules.modelAlert(for: .unavailable(.appleIntelligenceNotEnabled))?.message.contains("Settings") == true)
+    }
+
     @Test func stylesThatNeedAppleIntelligenceAreMarked() {
         #expect(CompositionGuide.leadingLines.needsAppleIntelligence)
         #expect(CompositionGuide.symmetry.needsAppleIntelligence)

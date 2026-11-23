@@ -984,3 +984,49 @@ struct AutoRenderingView: View {
 #Preview {
     AutoRenderingView()
 }
+
+// MARK: - Apple Intelligence alert
+
+/// Tells people once, in an alert, when Apple Intelligence can't help on this iPhone, so they know
+/// Composition advice may not be as good before they rely on it. Waits until the tour is done so
+/// it doesn't cover it, and alerts again only if the reason changes.
+private struct AppleIntelligenceAlert: ViewModifier {
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    /// The reason last alerted about, so the same one isn't repeated on every launch.
+    @AppStorage("appleIntelligenceAlertShown") private var shownReason = ""
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var alert: (key: String, title: String, message: String)?
+
+    func body(content: Content) -> some View {
+        content
+            .alert(
+                alert?.title ?? "",
+                isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })
+            ) {
+                Button("OK") {}
+            } message: {
+                Text(alert?.message ?? "")
+            }
+            .onChange(of: hasCompletedOnboarding, initial: true) { check() }
+            // Apple Intelligence can be switched off, or finish downloading, while the app is away.
+            .onChange(of: scenePhase) { if scenePhase == .active { check() } }
+    }
+
+    private func check() {
+        guard let found = CoachRules.modelAlert(for: SystemLanguageModel.default.availability) else {
+            // It's working now, so a later problem is worth an alert again.
+            shownReason = ""
+            return
+        }
+        guard hasCompletedOnboarding, alert == nil, found.key != shownReason else { return }
+        shownReason = found.key
+        alert = found
+    }
+}
+
+extension View {
+    /// Alerts once when Apple Intelligence isn't available, saying what that means for the advice.
+    func appleIntelligenceAlert() -> some View {
+        modifier(AppleIntelligenceAlert())
+    }
+}

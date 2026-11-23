@@ -676,6 +676,30 @@ nonisolated enum CoachRules {
         }
     }
 
+    /// The one-time alert for when Apple Intelligence can't help, saying up front that Composition
+    /// advice may not be as good. `key` names the reason, so a new reason (it's switched off after
+    /// downloading, say) alerts again. Nil when it's available.
+    static func modelAlert(for availability: SystemLanguageModel.Availability) -> (key: String, title: String, message: String)? {
+        let effect = "Composition advice may not be as good"
+        let detail = "You'll still get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines. All other modes work as usual."
+        switch availability {
+        case .available:
+            return nil
+        case .unavailable(.appleIntelligenceNotEnabled):
+            return ("notEnabled", "Apple Intelligence Is Off",
+                    "\(effect) until you turn on Apple Intelligence in Settings. \(detail)")
+        case .unavailable(.deviceNotEligible):
+            return ("deviceNotEligible", "Apple Intelligence Isn't Available",
+                    "This iPhone doesn't support Apple Intelligence, so \(effect.prefix(1).lowercased() + effect.dropFirst()). \(detail)")
+        case .unavailable(.modelNotReady):
+            return ("modelNotReady", "Apple Intelligence Is Downloading",
+                    "\(effect) until it finishes downloading. The coach switches over by itself once it's ready. \(detail)")
+        case .unavailable:
+            return ("unavailable", "Apple Intelligence Isn't Available",
+                    "\(effect) right now. \(detail)")
+        }
+    }
+
     /// What the coach can and can't do without Apple Intelligence, so the notice sets expectations.
     private static var stillWorks: String {
         "You'll still get framing, light and angle tips, but the coach can't judge backgrounds, edges or lines."
