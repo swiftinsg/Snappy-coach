@@ -37,6 +37,17 @@ nonisolated struct CameraReadings: Sendable, Equatable {
     var zoomStops: [Double] = [1, 2]
     /// How many degrees the view spans across the sensor's long side, at the current zoom.
     var fieldOfView: Double? = nil
+    /// The lens's f-number, for working out how much light there is.
+    var aperture: Double? = nil
+
+    /// How much light there is, as EV at ISO 100: about 15 in direct sun, 12 to 13 under cloud,
+    /// 11 or less in rain, and below 10 indoors. Nil until the camera reports its exposure.
+    var lightLevel: Double? {
+        guard let exposureSeconds, exposureSeconds > 0, let iso, iso > 0 else { return nil }
+        // The main lens of recent iPhones, if the camera didn't say.
+        let fNumber = aperture ?? 1.78
+        return log2(fNumber * fNumber / exposureSeconds) - log2(iso / 100)
+    }
 
     @MainActor
     static func read(from camera: CameraManager) -> CameraReadings {
@@ -52,7 +63,8 @@ nonisolated struct CameraReadings: Sendable, Equatable {
             isWhiteBalanceSet: camera.whiteBalanceKelvin != nil,
             zoom: Double(camera.zoomLevel),
             zoomStops: camera.zoomStops.map(Double.init),
-            fieldOfView: Self.fieldOfView(of: device)
+            fieldOfView: Self.fieldOfView(of: device),
+            aperture: Double(device.lensAperture)
         )
     }
 
@@ -356,6 +368,13 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         scenes.contains(.landscape) || scenes.contains(.city)
     }
 
+    /// Daylight with no direct sun: outdoors, no sun in the shot, and too little light for sunshine.
+    /// Cloud and rain spread the light out, so it can't cast hard shadows or patches of sun.
+    nonisolated var isSoftDaylight: Bool {
+        guard isOutdoors, sunSpot == nil, let level = readings.lightLevel else { return false }
+        return level < CoachRules.directSunLevel
+    }
+
     /// The subject is clearly darker than what's behind it.
     var isBacklit: Bool {
         guard let subjectBrightness, let backgroundBrightness else { return false }
@@ -429,6 +448,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             facts.append("a small, very bright light source (\(what)) at the \(place.rawValue) of the frame")
         }
         if let side = lightSide?.sideWord { facts.append("the light comes from the \(side) of the frame") }
+        if isSoftDaylight { facts.append("the sky is overcast, so the daylight is soft and even, with no direct sun") }
         // What's already on, so it isn't suggested again.
         var settings: [String] = []
         if readings.isNightModeOn { settings.append("Night Mode") }

@@ -855,6 +855,9 @@ nonisolated enum CoachRules {
     /// Below this brightness spread (see `SceneAnalysis.subjectContrast`) the subject is too plain
     /// to tell whether it's in focus.
     static let flatContrast = 0.05
+    /// Outdoors, below this light level (EV at ISO 100) the sun isn't shining directly: it's
+    /// cloudy or raining. Kept below light cloud (12 to 13) so dappled sun under trees still counts.
+    static let directSunLevel = 12.0
     /// Faces smaller than this share of the frame's height are a full-body or distant shot, where
     /// the space above the head is part of the scene, not "too much headroom".
     static let portraitFaceHeight = 0.06
@@ -1005,6 +1008,11 @@ nonisolated enum CoachRules {
     /// Whether the model's verdict fits what the camera measured. The model sometimes calls plain
     /// glass doors or a wall a distraction, so background verdicts must agree with the measurement.
     static func believes(_ issue: CoachIssue, detail: IssueDetail?, analysis: SceneAnalysis) -> Bool {
+        // Cloud and rain spread the light out, so there are no hard shadows, patches of sun or glare.
+        // Raindrops and wet, shiny surfaces can look patchy to the model, so the light level decides.
+        if [.hardShadowsOnSubject, .patchyLight, .sunGlare].contains(issue), analysis.isSoftDaylight {
+            return false
+        }
         // A horizon only exists outdoors, where land or sea meets the sky. The model sometimes
         // imagines one in a desk or room, so it's only believed when Vision sees a wide outdoor scene.
         if issue == .horizonThroughMiddle {

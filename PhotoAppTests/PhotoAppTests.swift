@@ -557,6 +557,28 @@ struct CoachRulesTests {
         #expect(!CoachRules.believes(.patchyLight, detail: nil, analysis: empty))
     }
 
+    @Test func rainAndCloudCantMakePatchyLight() {
+        // Outdoors in the rain: 1/250 s at ISO 64 is about EV 10, far too dim for direct sun.
+        var rainy = scene(readings: CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 250, iso: 64))
+        rainy.isOutdoors = true
+        // Raindrops and wet ground give the subject plenty of light and dark.
+        rainy.subjectContrast = 0.2
+        #expect(rainy.isSoftDaylight)
+        #expect(!CoachRules.believes(.patchyLight, detail: nil, analysis: rainy))
+        #expect(!CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: rainy))
+        #expect(!CoachRules.believes(.sunGlare, detail: nil, analysis: rainy))
+        #expect(rainy.summary.contains("overcast"))
+        // In sunshine (1/4000 s at ISO 50, about EV 14.6) patches of sun are real.
+        var sunny = rainy
+        sunny.readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 4000, iso: 50)
+        #expect(!sunny.isSoftDaylight)
+        #expect(CoachRules.believes(.patchyLight, detail: nil, analysis: sunny))
+        // Indoors, a lamp through blinds is patchy however dim the room is.
+        var indoors = rainy
+        indoors.isOutdoors = false
+        #expect(CoachRules.believes(.patchyLight, detail: nil, analysis: indoors))
+    }
+
     @Test func compositionShowsOneTip() {
         // Composition mixes rule and model tips, so it shows one; other topics' tips are all rules.
         #expect(!CoachRules.showsSecondTip(for: .composition))

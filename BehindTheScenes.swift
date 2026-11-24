@@ -1235,6 +1235,7 @@ final class PhotoCoach {
     private static let lightNoneExample = """
         A face lit softly by a window to one side, with the far side a little darker but still clearly visible: issue none, region whole, thing "", strength "Soft side light".
         A person in open shade on a bright day: issue none, region whole, thing "", strength "Even, soft light".
+        A street on a rainy, cloudy day with wet, shiny ground: issue none, region whole, thing "", strength "Soft, even light".
         """
     private static let noneExample = """
         A tidy portrait against a plain wall: issue none, region whole, thing "", strength "Clean background".
@@ -1298,7 +1299,10 @@ final class PhotoCoach {
                 patches of sun and shade fall across it, and \
                 whether the sun just outside the frame washes it out with haze or flare. \
                 Side light is only good when it is soft and the shadow side still shows detail: if half of \
-                the subject or a face is lost in deep, dark shadow, that is hardShadowsOnSubject, not a strength
+                the subject or a face is lost in deep, dark shadow, that is hardShadowsOnSubject, not a strength. \
+                Raindrops, water on the lens, wet shiny ground and reflections are not patches of light or \
+                shadows. On a cloudy or rainy day the light is soft, so pick none unless a lamp or the sun \
+                clearly lights the subject
                 """
         default:
             return "the framing: the background, the edges, whether the subject is cut off, and empty space"
