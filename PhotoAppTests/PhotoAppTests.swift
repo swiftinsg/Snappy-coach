@@ -478,6 +478,23 @@ struct CoachRulesTests {
         #expect(placed.contains("on a thirds crossing"))
         #expect(placed.contains("don't suggest moving the camera"))
         #expect(CoachRules.handledNote(issues: [], keepsPlacement: false, placement: .centre) == nil)
+        // Exposure tips the camera is giving are passed on, so the model doesn't report brightness.
+        let sky = try #require(CoachRules.handledNote(issues: [.highlightsClipped, .highISO], keepsPlacement: false, placement: .centre))
+        #expect(sky.contains("bright areas turning white and grain"))
+        #expect(sky.contains("don't report brightness"))
+    }
+
+    @Test func everydayExposureTipsDontStopTheLightModel() {
+        // A clipped sky or a high ISO indoors is common, and doesn't hide hard shadows or glare.
+        for issue: CoachIssue in [.highlightsClipped, .highISO, .underexposed, .overexposed] {
+            #expect(!issue.blocksModel(in: .light))
+            #expect(issue.blocksModel(in: .composition))
+        }
+        // The big light problems still come first, before the model judges the light.
+        for issue in CoachRules.bigLightIssues + [.harshContrast] {
+            #expect(issue.blocksModel(in: .light))
+        }
+        #expect(!CoachIssue.subjectTooSmall.blocksModel(in: .composition))
     }
 
     /// A face-sized patch, with its left and right halves at the given brightness (0...1).
@@ -521,8 +538,11 @@ struct CoachRulesTests {
         #expect(!CoachRules.allows(.flatLight, for: .composition, styles: Set(CompositionGuide.allCases)))
         // Exposure, Focus and Angle & Perspective stay measured only.
         #expect(!CoachRules.usesModel(.focus) && !CoachRules.usesModel(.anglePerspective))
-        // Light tips clear once the person reframes, like other model tips.
+        // Light tips are model-only, but moving the camera doesn't change the light, so reframing
+        // doesn't clear them the way it clears other model tips.
         #expect(CoachIssue.patchyLight.isModelOnly)
+        #expect(CoachIssue.patchyLight.isLightQuality)
+        #expect(!CoachIssue.clutteredBackground.isLightQuality)
         #expect(!CoachRules.showsSecondTip(for: .light))
         // Shadows need a subject to fall on.
         var empty = SceneAnalysis(brightness: 0.5, highlightClip: 0, shadowClip: 0, subject: nil, subjectBrightness: nil,

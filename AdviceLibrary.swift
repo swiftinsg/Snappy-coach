@@ -718,9 +718,27 @@ extension CoachIssue {
         }
     }
 
+    /// The quality of the light, judged by the model in Light. Moving the camera doesn't change
+    /// the light, so unlike other model-only tips these don't clear when the view is reframed.
+    var isLightQuality: Bool {
+        switch self {
+        case .hardShadowsOnSubject, .flatLight, .patchyLight, .sunGlare: true
+        default: false
+        }
+    }
+
     /// Problems the model can't see past, so it isn't asked while they're on screen.
-    var blocksModel: Bool {
-        self != .subjectTooSmall
+    /// In Light, everyday exposure tips like a clipped sky or high ISO don't hide the quality of
+    /// the light, so the model still judges it; only the big light problems and hard contrast stop it.
+    func blocksModel(in topic: AdviceTopic) -> Bool {
+        switch self {
+        case .subjectTooSmall:
+            false
+        case .highlightsClipped, .highISO, .underexposed, .overexposed:
+            topic != .light
+        default:
+            true
+        }
     }
 
     private func tiltAdvice(_ tilt: Double?) -> Advice {
@@ -860,6 +878,16 @@ nonisolated enum CoachRules {
         var handled: [String] = []
         if issues.contains(.subjectTooSmall) {
             handled.append("the camera is already asking them to step closer or zoom in, so don't report the subject being small or far away")
+        }
+        let exposure: [(CoachIssue, String)] = [
+            (.highlightsClipped, "bright areas turning white"),
+            (.overexposed, "the photo being too bright"),
+            (.underexposed, "the photo being too dark"),
+            (.highISO, "grain from dim light"),
+        ]
+        let exposureHandled = exposure.filter { issues.contains($0.0) }.map(\.1)
+        if !exposureHandled.isEmpty {
+            handled.append("the camera is already pointing out \(exposureHandled.joined(separator: " and ")), so don't report brightness")
         }
         if keepsPlacement {
             handled.append("the subject is already where the chosen style wants it (\(placement.name)), so don't suggest moving the camera left, right, up or down; only stepping closer or back, zooming, or none")

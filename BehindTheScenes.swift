@@ -12,6 +12,7 @@ import CoreImage
 import SwiftUI
 import Vision
 import UIKit
+import os
 
 /// Keeps the newest camera frame so the coach can look at it every few seconds.
 /// It has its own video output, so it doesn't compete with the histogram's.
@@ -622,6 +623,9 @@ final class PhotoCoach {
     private static let measureInterval: Duration = .seconds(1)
     /// How long the model gets to judge a frame before the request is cancelled.
     private static let modelTimeout: Duration = .seconds(8)
+    /// Failed model requests in a row after which the coach goes on with the measurements alone.
+    private static let modelFailureLimit = 3
+    private static let modelLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "PhotoApp", category: "coach-model")
 
     /// Shared with the on-screen level, so the line and the tilt advice always agree.
     let attitude = PhoneAttitude()
@@ -712,6 +716,9 @@ final class PhotoCoach {
         var lastFrame = ContinuousClock.now
         // True while the notice says the camera is paused or missing, so it's cleared once it's back.
         var showsCameraNotice = false
+        // Model requests in a row that failed or timed out. Past the limit, the measurements
+        // speak alone, so a model that keeps failing can't leave the card empty.
+        var modelFailures = 0
         while !Task.isCancelled {
             if !isFirstPass {
                 try? await Task.sleep(for: usesModel ? Self.modelInterval : Self.measureInterval)
@@ -725,6 +732,11 @@ final class PhotoCoach {
             if modelReady != usesModel {
                 usesModel = modelReady
                 session = modelReady ? makeSession(for: topic, styles: styles) : nil
+                session?.prewarm()
+            } else if usesModel, session == nil {
+                // Each request uses a fresh session; making it now, while the frame is analysed,
+                // means the model is warm by the time it's asked.
+                session = makeSession(for: topic, styles: styles)
                 session?.prewarm()
             }
 
@@ -799,7 +811,9 @@ final class PhotoCoach {
                 continue
             }
 
-            if let shownIssue, shownIssue.isModelOnly {
+            // Moving the camera doesn't change the light, so light tips clear only once the model
+            // stops seeing the problem, not when the view changes.
+            if let shownIssue, shownIssue.isModelOnly, !shownIssue.isLightQuality {
                 let zoom = camera.zoomLevel
                 if let start = reframeStart {
                     let zoomChange = max(zoom, start.zoom) / max(min(zoom, start.zoom), 0.1)
@@ -846,12 +860,16 @@ final class PhotoCoach {
             ].compactMap(\.self).joined(separator: " ")
             // Whether the model judged this frame, when it's meant to. Until then, nothing is praised.
             var modelAnswered = !usesModel
-            if usesModel, !issues.contains(where: \.blocksModel),
-               let judgement = await judge(
-                   frame, topic: topic, styles: styles, analysis: analysis,
-                   selectedName: picked?.name, handled: handled.isEmpty ? nil : handled
-               ) {
+            var judgement: CoachJudgement?
+            if usesModel, !issues.contains(where: { $0.blocksModel(in: topic) }) {
+                judgement = await judge(
+                    frame, topic: topic, styles: styles, analysis: analysis,
+                    selectedName: picked?.name, handled: handled.isEmpty ? nil : handled
+                )
                 guard !Task.isCancelled else { break }
+                modelFailures = judgement == nil ? modelFailures + 1 : 0
+            }
+            if let judgement {
                 modelAnswered = true
                 var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
                 detail.subjectBox = analysis.subject
@@ -900,7 +918,8 @@ final class PhotoCoach {
             issues = memory.reordered(issues, keeping: shownIssue)
             // The first request can be slow to start or time out. Saying the shot looks good on the
             // measurements alone, then finding a problem a moment later, reads as the coach changing its mind.
-            if issues.isEmpty, !modelAnswered { continue }
+            // But once it has failed several times in a row, the measurements are all there is.
+            if issues.isEmpty, !modelAnswered, modelFailures < Self.modelFailureLimit { continue }
 
             publish(
                 top: issues.first,
@@ -1226,7 +1245,12 @@ final class PhotoCoach {
     private func makeSession(for topic: AdviceTopic, styles: Set<CompositionGuide>) -> LanguageModelSession {
         let allowed = VisualIssue.allCases.filter { $0 != .none && CoachRules.allows($0, for: topic, styles: styles) }
         let none = topic == .light ? Self.lightNoneExample : Self.noneExample
-        let examples = Self.examples.filter { allowed.contains($0.issue) }.prefix(4).map(\.text) + [none]
+        // One example per issue before the limit, so no allowed issue goes without one
+        // (Light has two hard-shadow examples, which used to push sun glare out).
+        var seen: Set<VisualIssue> = []
+        let examples = Self.examples
+            .filter { allowed.contains($0.issue) && seen.insert($0.issue).inserted }
+            .prefix(4).map(\.text) + [none]
         let praised = memory.recentStrengths.isEmpty
             ? ""
             : " Already praised: \(memory.recentStrengths.joined(separator: ", ")); praise something else if you can."
@@ -1326,6 +1350,11 @@ final class PhotoCoach {
                 }.content
             }
         } catch {
+            // Logged so a model that keeps failing (timeouts, an unsupported language, guardrails)
+            // can be seen in the console instead of the coach quietly getting simpler.
+            if !Task.isCancelled {
+                Self.modelLog.error("\(topic.title, privacy: .public) request failed: \(String(describing: error), privacy: .public)")
+            }
             return nil
         }
     }
