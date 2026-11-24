@@ -93,35 +93,40 @@ struct AutoRenderingView: View {
     }
 
     /// Shows feedback, but only while the tour is on `step`.
-    private func noteOnboarding(_ step: OnboardingStep, _ text: String, isComplete: Bool) {
+    private func noteOnboarding(_ step: OnboardingStep, _ text: String, isComplete: Bool, preview: TourPreview? = nil) {
         guard onboardingStep == step else { return }
-        onboardingFeedback = OnboardingFeedback(text: text, isComplete: isComplete)
+        onboardingFeedback = OnboardingFeedback(text: text, isComplete: isComplete, preview: preview)
     }
 
     /// The tour walks through every mode in menu order, then asks to go back to Composition.
     /// Whichever topic is picked gets explained.
     private func noteTopicPicked(_ topic: AdviceTopic) {
         guard onboardingStep == .topicMenu else { return }
-        let explained = "\(topic.displayTitle): \(topic.tourDescription)"
+        // Light tips only show when the light needs fixing, so the tour shows what to look for.
+        let preview: TourPreview? = topic == .light ? .lightSignals : nil
+        let signals = topic == .light
+            ? " When the light needs fixing, the card says who moves, amber arrows show the way, and Settings tips have a button that does it for you."
+            : ""
+        let explained = "\(topic.displayTitle): \(topic.tourDescription)\(signals)"
         guard let next = tourNextTopic else {
             if topic == .composition {
                 noteOnboarding(.topicMenu, "Back to Composition. \(topic.tourDescription)", isComplete: true)
             } else {
-                noteOnboarding(.topicMenu, "\(explained) Now open the menu and go back to Composition.", isComplete: false)
+                noteOnboarding(.topicMenu, "\(explained) Now open the menu and go back to Composition.", isComplete: false, preview: preview)
             }
             return
         }
         guard topic == next else {
-            noteOnboarding(.topicMenu, "\(explained) For this tour, open the menu and select \(next.displayTitle).", isComplete: false)
+            noteOnboarding(.topicMenu, "\(explained) For this tour, open the menu and select \(next.displayTitle).", isComplete: false, preview: preview)
             return
         }
         let modes = AdviceTopic.allCases
         let after = modes.firstIndex(of: topic).map { modes.index(after: $0) }
         tourNextTopic = after.flatMap { $0 < modes.endIndex ? modes[$0] : nil }
         if let upcoming = tourNextTopic {
-            noteOnboarding(.topicMenu, "\(explained) Open the menu again and select \(upcoming.displayTitle).", isComplete: false)
+            noteOnboarding(.topicMenu, "\(explained) Open the menu again and select \(upcoming.displayTitle).", isComplete: false, preview: preview)
         } else {
-            noteOnboarding(.topicMenu, "\(explained) That's every mode. Open the menu once more and go back to Composition.", isComplete: false)
+            noteOnboarding(.topicMenu, "\(explained) That's every mode. Open the menu once more and go back to Composition.", isComplete: false, preview: preview)
         }
     }
 
@@ -538,6 +543,7 @@ struct AutoRenderingView: View {
         let point = FrameMapping.framePoint(for: location, frameAspect: aspect, in: size)
         guard (0...1).contains(point.x), (0...1).contains(point.y) else { return false }
         camera.focusAndExpose(at: camera.frameGrabber.sensorPoint(forUpright: point))
+        noteOnboarding(.brightness, "Focus set. Now drag up or down to change the brightness.", isComplete: false)
         return true
     }
 
@@ -569,7 +575,7 @@ struct AutoRenderingView: View {
                     CameraSwitchBlur(isSwitching: camera.isSwitchingCamera)
                 }
                 // The tour spotlights the whole viewfinder, so the tap reaches the object.
-                .onboardingAnchor(.selectObject)
+                .onboardingAnchor(.brightness, .selectObject)
                 // Grids help line the scene up while composing.
                 .overlay {
                     if adviceTopic == .composition {
@@ -604,7 +610,9 @@ struct AutoRenderingView: View {
                 // get advice about it, and see it outlined while it's followed.
                 .overlay {
                     UprightOverlay(orientation: camera.holdOrientation) {
-                        ViewfinderTapLayer(camera: camera, onFocus: focus, onSelect: selectObject)
+                        ViewfinderTapLayer(camera: camera, onFocus: focus, onSelect: selectObject) {
+                            noteOnboarding(.brightness, "Up is brighter, down is darker. The sun beside the box shows how far.", isComplete: true)
+                        }
                     }
                 }
                 .overlay {

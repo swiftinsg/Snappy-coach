@@ -14,7 +14,7 @@ import FoundationModels
 nonisolated enum CoachIssue: String, CaseIterable, Sendable {
     // Found by measuring the frame.
     case underexposed, overexposed, highlightsClipped, backlitSubject
-    case tooDark, harshContrast, highISO, faceHalfInShadow, sunInFrame, colourCast
+    case tooDark, harshContrast, highISO, faceHalfInShadow, sunInFrame
     case cameraShaking, subjectSoft, slowShutter
     case phoneTilted, shootingDown, pointingUp
     case headCutOff, tooMuchHeadroom, subjectTooSmall
@@ -25,7 +25,7 @@ nonisolated enum CoachIssue: String, CaseIterable, Sendable {
     case linesDontLead, notSymmetric, vanishingPointOffCentre, linesNotStraight
     case noTriangle, noClearVertex, notOverhead, layersNotStacked, subjectTooBig, jointsCropped
     // Judged by the model in Light: the quality of the light, which brightness can't show.
-    case hardShadowsOnSubject, flatLight, mixedColourLight, patchyLight, sunGlare
+    case hardShadowsOnSubject, flatLight, patchyLight, sunGlare
 }
 
 /// What to do now, and the photography idea behind it.
@@ -90,8 +90,6 @@ nonisolated enum Mover: String, Sendable, Equatable {
 /// A setting a tip can change in one tap.
 nonisolated enum QuickFix: Equatable, Sendable {
     case nightMode, flash, meterOnSubject, brighten, darken, raw
-    /// White Balance for light of this colour temperature, in kelvin.
-    case whiteBalance(Float)
 
     var title: String {
         switch self {
@@ -101,7 +99,6 @@ nonisolated enum QuickFix: Equatable, Sendable {
         case .brighten: "Brighten"
         case .darken: "Darken"
         case .raw: "Shoot RAW"
-        case .whiteBalance: "Fix the colours"
         }
     }
 
@@ -113,7 +110,6 @@ nonisolated enum QuickFix: Equatable, Sendable {
         case .brighten: "sun.max.fill"
         case .darken: "sun.min.fill"
         case .raw: "r.square"
-        case .whiteBalance: "thermometer.sun"
         }
     }
 }
@@ -438,7 +434,7 @@ extension CoachIssue {
     /// Who acts on the other light tips.
     private func lightMover(for a: SceneAnalysis) -> Mover? {
         switch self {
-        case .tooDark, .highISO, .underexposed, .overexposed, .highlightsClipped, .colourCast: .settings
+        case .tooDark, .highISO, .underexposed, .overexposed, .highlightsClipped: .settings
         case .harshContrast, .hardShadowsOnSubject, .patchyLight, .faceHalfInShadow: .subject
         case .flatLight, .backlitSubject, .sunInFrame, .sunGlare: .photographer
         default: nil
@@ -454,9 +450,6 @@ extension CoachIssue {
             return .brighten
         case .overexposed, .highlightsClipped:
             return .darken
-        case .colourCast:
-            // White Balance set for the light's colour cancels it: lamps are warm, shade is cool.
-            return .whiteBalance((a.colourWarmth ?? 1) > 1 ? 3200 : 7000)
         default:
             return nil
         }
@@ -482,10 +475,6 @@ extension CoachIssue {
             Advice(action: "Turn the face toward the light to fill the shadow", why: "Half a face in deep shadow hides an eye and looks gloomy.")
         case .sunInFrame:
             Advice(action: "Stand so a tree or roof hides the sun", why: "Shooting into the sun blows out the sky and darkens the subject.")
-        case .colourCast:
-            (analysis?.colourWarmth ?? 1) > 1
-                ? Advice(action: "Fix the orange colour with White Balance", why: "Lamps light everything orange, so skin and white things look wrong.")
-                : Advice(action: "Fix the blue colour with White Balance", why: "Shade and screens turn everything blue and cold.")
         case .cameraShaking:
             Advice(action: "Hold still with both hands, elbows tucked in", why: "Movement while the shutter is open blurs the whole photo.")
         case .subjectSoft:
@@ -540,8 +529,6 @@ extension CoachIssue {
             Advice(action: "Move into open shade or next to a window", why: "Direct sun or a bare bulb casts hard, dark shadows on the subject.")
         case .flatLight:
             Advice(action: "Turn so the light comes from the side", why: "Side light shows shape and texture; light from straight ahead looks flat.")
-        case .mixedColourLight:
-            Advice(action: "Use only the window, or only the lamps", why: "Warm bulbs mixed with daylight give odd colours on skin and food.")
         case .patchyLight:
             Advice(action: "Move so the subject is fully in light or shade", why: "Spots of sun and shadow across the subject look messy.")
         case .sunGlare:
@@ -678,7 +665,6 @@ extension CoachIssue {
         case .harshContrast: "softened the light"
         case .faceHalfInShadow: "lit both sides of the face"
         case .sunInFrame: "kept the sun out of the shot"
-        case .colourCast: "fixed the colours"
         case .cameraShaking, .slowShutter: "held the camera steady"
         case .subjectSoft: "got the subject sharp"
         case .phoneTilted: "levelled the phone"
@@ -703,7 +689,6 @@ extension CoachIssue {
         case .jointsCropped: "cropped the portrait cleanly"
         case .hardShadowsOnSubject: "softened the shadows"
         case .flatLight: "found side light"
-        case .mixedColourLight: "kept to one colour of light"
         case .patchyLight: "evened out the light"
         case .sunGlare: "blocked the glare"
         }
@@ -726,7 +711,7 @@ extension CoachIssue {
         case .clutteredBackground, .distractingEdges, .subjectCutOff, .horizonThroughMiddle,
              .linesDontLead, .notSymmetric, .vanishingPointOffCentre, .noTriangle, .noClearVertex,
              .layersNotStacked, .jointsCropped,
-             .hardShadowsOnSubject, .flatLight, .mixedColourLight, .patchyLight, .sunGlare:
+             .hardShadowsOnSubject, .flatLight, .patchyLight, .sunGlare:
             true
         default:
             false
@@ -788,12 +773,11 @@ enum VisualIssue: String, CaseIterable {
     case jointsCropped
     case hardShadowsOnSubject
     case flatLight
-    case mixedColourLight
     case patchyLight
     case sunGlare
 
     /// Light quality, which only Light judges.
-    static let lightIssues: Set<VisualIssue> = [.hardShadowsOnSubject, .flatLight, .mixedColourLight, .patchyLight, .sunGlare]
+    static let lightIssues: Set<VisualIssue> = [.hardShadowsOnSubject, .flatLight, .patchyLight, .sunGlare]
 
     nonisolated var coachIssue: CoachIssue? {
         self == .none ? nil : CoachIssue(rawValue: rawValue)
@@ -859,9 +843,6 @@ nonisolated enum CoachRules {
     /// Below this, a face's darker half is in deep shadow next to its lit half (see
     /// `SceneAnalysis.faceShadowRatio`). Soft side light stays well above it.
     static let faceShadowLimit = 0.45
-    /// Red over blue above this indoors is an orange cast, below `coolCastLimit` a blue one.
-    static let warmCastLimit = 1.6
-    static let coolCastLimit = 0.7
 
     /// Below this share of edges (see `SceneAnalysis.backgroundBusyness`) the background is
     /// measurably plain, so the model's "cluttered background" isn't believed.
@@ -1055,7 +1036,7 @@ nonisolated enum CoachRules {
 
     /// Topics where the model adds judgement the measurements can't give. Composition looks beyond
     /// the subject, at the background and other objects. Light adds the quality of the light, like
-    /// hard shadows or mixed colours, which brightness can't show. Exposure, Focus and Angle &
+    /// hard shadows or patchy sun, which brightness can't show. Exposure, Focus and Angle &
     /// Perspective are exact measurements, so they stay measured only.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
         topic == .composition || topic == .light
@@ -1126,12 +1107,6 @@ nonisolated enum CoachRules {
             if a.highlightClip > 0.04, a.shadowClip > 0.1, !found.contains(.highlightsClipped) { found.append(.harshContrast) }
             // Side light gives a face shape, but one half lost in deep shadow hides an eye.
             if let ratio = a.faceShadowRatio, ratio < faceShadowLimit, !a.isBacklit { found.append(.faceHalfInShadow) }
-            // A strong colour cast indoors, from lamps or screens. Outdoors warm light is usually the
-            // point (sunsets), so it's left alone, as is a White Balance set by hand.
-            if !a.isOutdoors, !a.readings.isWhiteBalanceSet, let warmth = a.colourWarmth,
-               warmth > warmCastLimit || warmth < coolCastLimit {
-                found.append(.colourCast)
-            }
             if iso > 800, !found.contains(.tooDark), !addsLight { found.append(.highISO) }
         case .focus:
             // Shake blurs everything, so fix it before blaming the focus.

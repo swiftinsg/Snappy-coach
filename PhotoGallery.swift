@@ -60,10 +60,87 @@ nonisolated struct ShotRecord: Codable, Equatable, Sendable {
     /// The tip still showing when the shot wasn't ready.
     var suggestion: String?
     var date: Date
+    /// Every mode the photo was improved in since the previous photo, in shooting order, with the
+    /// mode at the shutter always included. Nil for photos saved before modes were kept separately.
+    var modes: [ModeResult]? = nil
+}
+
+/// What was done in one mode before a photo: the top-level fields of `ShotRecord`, per mode.
+nonisolated struct ModeResult: Codable, Equatable, Sendable {
+    var topicID: String
+    var styles: [String] = []
+    var fixed: [String] = []
+    var praised: [String] = []
+    var wasReady = false
+
+    var topic: AdviceTopic? { AdviceTopic.stored(topicID) }
 }
 
 extension ShotRecord {
+    /// The mode the shutter fired in.
     var topic: AdviceTopic? { AdviceTopic.stored(topicID) }
+
+    /// Each mode's results; older photos have just the one mode they were taken in.
+    var results: [ModeResult] {
+        modes ?? [ModeResult(topicID: topicID, styles: styles, fixed: fixed, praised: praised, wasReady: wasReady)]
+    }
+
+    /// Every known mode the photo was improved in, in shooting order.
+    var topics: [AdviceTopic] {
+        results.compactMap(\.topic)
+    }
+
+    /// The mode the gallery files the photo under: the one it was taken in, unless only some of its
+    /// modes were finished, then a finished one, since that's what the photo shows off.
+    var filedTopic: AdviceTopic? {
+        let ready = results.filter(\.wasReady).compactMap(\.topic)
+        let all = topics
+        guard !ready.isEmpty, ready.count < all.count, !ready.contains(where: { $0 == topic }) else { return topic ?? all.last }
+        return ready.last
+    }
+
+    /// Whether the coach said the filed mode was ready, for the grid's checkmark.
+    var filedWasReady: Bool {
+        results.first { $0.topic == filedTopic }?.wasReady ?? wasReady
+    }
+}
+
+/// What the coach saw in each mode between two photos, so a photo improved in several modes keeps
+/// them all, not only the mode the shutter fired in.
+nonisolated struct ShotProgress: Equatable, Sendable {
+    private var byTopic: [String: ModeResult] = [:]
+
+    var isEmpty: Bool { byTopic.isEmpty }
+
+    /// A fix made in `topic`, as its past-tense accomplishment.
+    mutating func noteFixed(_ accomplishment: String, in topic: AdviceTopic, styles: [String]) {
+        var result = byTopic[topic.rawValue] ?? ModeResult(topicID: topic.rawValue, styles: styles)
+        result.styles = styles
+        if !result.fixed.contains(accomplishment) { result.fixed.append(accomplishment) }
+        byTopic[topic.rawValue] = result
+    }
+
+    /// How a mode stood when the person left it (or at the shutter): what was liked, and whether it was ready.
+    mutating func noteState(of topic: AdviceTopic, styles: [String], praised: [String], wasReady: Bool) {
+        var result = byTopic[topic.rawValue] ?? ModeResult(topicID: topic.rawValue)
+        result.styles = styles
+        if !praised.isEmpty { result.praised = praised }
+        result.wasReady = wasReady
+        byTopic[topic.rawValue] = result
+    }
+
+    /// The modes worth keeping with the photo: any with a fix or that were ready, plus `current`
+    /// (the mode at the shutter) always, in shooting order.
+    func results(current: AdviceTopic) -> [ModeResult] {
+        let kept = byTopic.values.filter { $0.topicID == current.rawValue || $0.wasReady || !$0.fixed.isEmpty }
+        let current = byTopic[current.rawValue] ?? ModeResult(topicID: current.rawValue)
+        let others = kept.filter { $0.topicID != current.topicID }
+        return (others + [current]).sorted { order($0) < order($1) }
+    }
+
+    private func order(_ result: ModeResult) -> Int {
+        result.topic.flatMap(AdviceTopic.allCases.firstIndex) ?? AdviceTopic.allCases.count
+    }
 }
 
 /// One run of photos in the gallery grid: a mode, or nil for photos taken before stories were saved.
@@ -76,16 +153,27 @@ struct GallerySection: Identifiable {
 
     /// Splits photos (newest first) by the mode they were taken in, in the modes' menu order,
     /// keeping each section newest first. With `filter`, only that mode's photos.
-    static func group(_ assets: [PHAsset], topicOf: (PHAsset) -> AdviceTopic?, filter: AdviceTopic? = nil) -> [GallerySection] {
-        grouped(assets, topicOf: topicOf, filter: filter).map { GallerySection(topic: $0.topic, assets: $0.items) }
+    static func group(
+        _ assets: [PHAsset],
+        topicOf: (PHAsset) -> AdviceTopic?,
+        topicsOf: ((PHAsset) -> [AdviceTopic])? = nil,
+        filter: AdviceTopic? = nil
+    ) -> [GallerySection] {
+        grouped(assets, topicOf: topicOf, topicsOf: topicsOf, filter: filter).map { GallerySection(topic: $0.topic, assets: $0.items) }
     }
 
     /// The grouping itself, for any kind of item, so it can be tested without the Photos library.
-    static func grouped<Item>(_ items: [Item], topicOf: (Item) -> AdviceTopic?, filter: AdviceTopic? = nil) -> [(topic: AdviceTopic?, items: [Item])] {
-        let byTopic = Dictionary(grouping: items, by: topicOf)
+    /// `topicOf` is where an item is filed; `topicsOf` is every mode it belongs to, which a filter matches.
+    static func grouped<Item>(
+        _ items: [Item],
+        topicOf: (Item) -> AdviceTopic?,
+        topicsOf: ((Item) -> [AdviceTopic])? = nil,
+        filter: AdviceTopic? = nil
+    ) -> [(topic: AdviceTopic?, items: [Item])] {
         if let filter {
-            return [(filter, byTopic[filter] ?? [])]
+            return [(filter, items.filter { topicsOf?($0).contains(filter) ?? (topicOf($0) == filter) })]
         }
+        let byTopic = Dictionary(grouping: items, by: topicOf)
         let topics: [AdviceTopic?] = AdviceTopic.allCases.map(Optional.some) + [nil]
         return topics.compactMap { topic in
             guard let found = byTopic[topic], !found.isEmpty else { return nil }
@@ -133,12 +221,17 @@ final class PhotoGallery {
 
     /// The gallery's sections, newest photos first in each.
     func sections(filter: AdviceTopic? = nil) -> [GallerySection] {
-        GallerySection.group(assets, topicOf: { record(for: $0)?.topic }, filter: filter)
+        GallerySection.group(
+            assets,
+            topicOf: { record(for: $0)?.filedTopic },
+            topicsOf: { self.record(for: $0)?.topics ?? [] },
+            filter: filter
+        )
     }
 
-    /// How many photos each mode has, for the filter chips.
+    /// How many photos each mode has, for the filter chips. A photo improved in two modes counts in both.
     var countsByTopic: [AdviceTopic: Int] {
-        Dictionary(grouping: assets.compactMap { record(for: $0)?.topic }, by: \.self).mapValues(\.count)
+        Dictionary(grouping: assets.flatMap { record(for: $0)?.topics ?? [] }, by: \.self).mapValues(\.count)
     }
 
     /// Saved identifiers, newest first.

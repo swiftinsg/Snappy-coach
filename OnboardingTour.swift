@@ -14,6 +14,9 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     case editControls
     case compositionRow
     case explainStyle
+    /// A single tap sets focus and brightness, then a drag changes it. Taught just before the
+    /// double tap that picks the subject, so the two are told apart.
+    case brightness
     case selectObject
     case advice
     /// Comes after `selectObject`, since the dot and circle only show once there's a subject.
@@ -27,7 +30,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
 
     /// Steps that spotlight nearly the whole viewfinder, leaving no room for the card beside it.
     /// Their card sits on the composition row instead, over the bottom of the viewfinder.
-    var placesCardOnControls: Bool { self == .selectObject || self == .alignSubject }
+    var placesCardOnControls: Bool { self == .brightness || self == .selectObject || self == .alignSubject }
 
     /// Steps whose lowest spotlight is a tall panel with no room beside it.
     /// Their card sits inside the bottom of that panel, leaving its top and the bar above it clear.
@@ -40,6 +43,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .editControls: "Pick your buttons"
         case .compositionRow: "Composition styles"
         case .explainStyle: "Learn a style"
+        case .brightness: "Set the brightness"
         case .selectObject: "Pick your subject"
         case .alignSubject: "Line it up"
         case .advice: "Your coach"
@@ -60,8 +64,10 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
             "Each card is a way to frame your photo. Scroll the row to see them all, then tap one to practise it. You can select more than one. The ✨ icon marks the style the coach recommends for this scene."
         case .explainStyle:
             "Press and hold any card to see what the style means."
+        case .brightness:
+            "Tap anything to set focus and brightness there. Then drag up or down to make the photo brighter or darker."
         case .selectObject:
-            "Double-tap the thing you want to photograph. The coach will follow it and give advice about it. A single tap sets focus and brightness, like the Camera app."
+            "Now double-tap the thing you want to photograph. The coach will follow it and give advice about it."
         case .alignSubject:
             "The dot is where your phone points, and the circle is where it should point. Move the phone until the dot is inside the circle."
         case .advice:
@@ -77,6 +83,62 @@ struct OnboardingFeedback: Equatable {
     var text: String
     /// The step's goal is met, so the tour can move on.
     var isComplete: Bool
+    /// A small picture shown with the text, for things the tour can't count on seeing for real.
+    var preview: TourPreview? = nil
+}
+
+/// Pictures the tour can show with its feedback.
+nonisolated enum TourPreview: Equatable {
+    /// Light & Exposure's signals: who moves, the amber arrow, and a one-tap fix button.
+    case lightSignals
+}
+
+/// A sample of Light & Exposure's signals, in their real colours. Light tips only appear when
+/// the light needs fixing, which it may not during the tour, so this shows what to look for.
+struct LightSignalsPreview: View {
+    private var chips: some View {
+        ForEach([Mover.photographer, .subject, .settings], id: \.self) { mover in
+            Label(mover.label, systemImage: mover.systemImage)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.lightGuide, in: .capsule)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // In a row when they fit, stacked at larger text sizes.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { chips }
+                VStack(alignment: .leading, spacing: 6) { chips }
+            }
+            HStack(spacing: 10) {
+                // A tiny "walk around the subject" arrow.
+                ZStack {
+                    Circle().fill(.white).frame(width: 8, height: 8)
+                    Circle()
+                        .trim(from: 0.25, to: 0.5)
+                        .stroke(Color.lightGuide, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "sun.max.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.lightGuide)
+                        .offset(x: -20, y: -12)
+                }
+                .frame(width: 44, height: 36)
+                Label(QuickFix.nightMode.title, systemImage: QuickFix.nightMode.systemImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.lightGuide, in: .capsule)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Light tips say You move, Subject moves or Settings, show amber arrows, and can have a button that does the fix for you.")
+    }
 }
 
 // MARK: - Explanations shown as feedback
@@ -88,7 +150,7 @@ extension AdviceTopic {
         case .composition: "Pick a style, then move the phone until the dot is in the circle."
         case .anglePerspective: "A level helps you hold the camera straight and find better angles."
         case .focus: "The coach helps keep your subject sharp."
-        case .light: "The coach helps you find good light and get the brightness right. Amber arrows show who moves: you, around the subject, or the subject, toward the light."
+        case .light: "The coach helps you find good light and get the brightness right."
         }
     }
 }
@@ -176,6 +238,16 @@ struct OnboardingOverlay: View {
     let onSkip: () -> Void
 
     private let cornerRadius: CGFloat = 16
+    /// The height of the card's text below the title, measured so the card hugs it.
+    @State private var detailsHeight: CGFloat = 0
+    /// The title row and the button row, measured, so the text gets whatever room is left.
+    @State private var headerHeight: CGFloat = 0
+    @State private var footerHeight: CGFloat = 0
+
+    /// Everything on the card but the scrolling text: title, buttons, the 10-point gaps and the padding.
+    private var chromeHeight: CGFloat {
+        headerHeight + footerHeight + 2 * 10 + 2 * 16
+    }
 
     /// The holes in the dimming, a little bigger than the controls.
     private var cutouts: [CGRect] {
@@ -248,7 +320,7 @@ struct OnboardingOverlay: View {
             if placement.pointsUp, let x = placement.arrowX {
                 arrow(pointsUp: true, x: x)
             }
-            card
+            card(maxHeight: max(canvas.height - placement.inset - 110, 200))
             if !placement.pointsUp, let x = placement.arrowX {
                 arrow(pointsUp: false, x: x)
             }
@@ -272,37 +344,31 @@ struct OnboardingOverlay: View {
             .accessibilityHidden(true)
     }
 
-    private var card: some View {
+    /// `maxHeight` is the room beside the spotlight; at large text sizes the middle scrolls to fit.
+    private func card(maxHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(step.title)
-                    .font(.headline)
-                Spacer()
-                Text("\(stepNumber) of \(stepCount)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-
-            Text(step.instruction)
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let feedback {
-                Label {
-                    Text(feedback.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: feedback.isComplete ? "checkmark.circle.fill" : "info.circle.fill")
-                        .foregroundStyle(feedback.isComplete ? .green : .yellow)
+            // The step count moves under the title when large text leaves no room beside it.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline) {
+                    title
+                    Spacer()
+                    stepCounter
                 }
-                .font(.subheadline)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.white.opacity(0.1), in: .rect(cornerRadius: 12))
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                .id(feedback.text)
-                .accessibilityAddTraits(.updatesFrequently)
+                VStack(alignment: .leading, spacing: 4) {
+                    title
+                    stepCounter
+                }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
+
+            // Sized to its text, and scrolls only when large text needs more room than there is.
+            ScrollView {
+                details
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { detailsHeight = $0 }
+            }
+            .frame(maxHeight: min(detailsHeight, max(maxHeight - chromeHeight, 80)))
+            .scrollIndicators(.visible)
+            .scrollBounceBehavior(.basedOnSize)
 
             HStack {
                 Button {
@@ -331,6 +397,7 @@ struct OnboardingOverlay: View {
                         .accessibilityHidden(true)
                 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
         }
         .foregroundStyle(.white)
         .padding(16)
@@ -341,6 +408,51 @@ struct OnboardingOverlay: View {
         .padding(.horizontal, 20)
         .animation(.snappy, value: feedback)
         .accessibilityElement(children: .contain)
+    }
+
+    private var title: some View {
+        Text(step.title)
+            .font(.headline)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var stepCounter: some View {
+        Text("\(stepNumber) of \(stepCount)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.white.opacity(0.7))
+            .fixedSize()
+    }
+
+    /// The instruction, the feedback and any preview: the part of the card that can scroll.
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(step.instruction)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let feedback {
+                Label {
+                    Text(feedback.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: feedback.isComplete ? "checkmark.circle.fill" : "info.circle.fill")
+                        .foregroundStyle(feedback.isComplete ? .green : .yellow)
+                }
+                .font(.subheadline)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.white.opacity(0.1), in: .rect(cornerRadius: 12))
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                .id(feedback.text)
+                .accessibilityAddTraits(.updatesFrequently)
+
+                if feedback.preview == .lightSignals {
+                    LightSignalsPreview()
+                        .transition(.opacity)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -366,7 +478,11 @@ private struct SpotlightMask: Shape {
             canvas: proxy.size,
             stepNumber: 1,
             stepCount: 5,
-            feedback: OnboardingFeedback(text: "Composition it is. \(AdviceTopic.composition.tourDescription)", isComplete: true),
+            feedback: OnboardingFeedback(
+                text: "\(AdviceTopic.light.displayTitle): \(AdviceTopic.light.tourDescription) When the light needs fixing, the card says who moves, amber arrows show the way, and Settings tips have a button that does it for you.",
+                isComplete: false,
+                preview: .lightSignals
+            ),
             onContinue: {},
             onSkip: {}
         )

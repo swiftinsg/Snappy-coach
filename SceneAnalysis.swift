@@ -325,8 +325,6 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var lightSpot: CGRect? = nil
     /// Vision sees an outdoor scene, so a bright spot can be the sun.
     var isOutdoors = false
-    /// Red over blue across the frame. Around 1 is neutral; well above is orange (lamps), well below is blue (shade).
-    var colourWarmth: Double? = nil
 
     /// How many people are in the frame, whether their faces or only their bodies show.
     var personCount: Int {
@@ -504,8 +502,7 @@ extension SceneAnalysis {
             faceShadowRatio: faceLight?.ratio,
             faceLitSide: faceLight.flatMap { $0.ratio < Self.faceEvenRatio ? $0.litSide : nil },
             lightSpot: LightSpotFinder.find(in: gray),
-            isOutdoors: outdoors,
-            colourWarmth: Self.warmth(of: image)
+            isOutdoors: outdoors
         )
     }
 
@@ -539,22 +536,6 @@ extension SceneAnalysis {
         let brighter = max(left, right)
         guard brighter > 0.08 else { return nil }
         return (min(left, right) / brighter, left >= right ? .left : .right)
-    }
-
-    /// Red over blue for the whole frame, from a tiny copy of it.
-    nonisolated static func warmth(of image: CGImage) -> Double? {
-        var pixel = [UInt8](repeating: 0, count: 4)
-        let drawn = pixel.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(
-                data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
-                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
-            ) else { return false }
-            context.interpolationQuality = .medium
-            context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-            return true
-        }
-        guard drawn, pixel[2] > 8 else { return nil }
-        return Double(pixel[0]) / Double(pixel[2])
     }
 
     private nonisolated static func detectFaces(in image: CGImage) -> [CGRect] {

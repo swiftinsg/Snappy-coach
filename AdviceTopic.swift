@@ -14,7 +14,7 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
 
     /// A topic saved by an earlier version. Light and Exposure became one mode, so old
     /// Exposure photos and settings carry over to it.
-    static func stored(_ rawValue: String) -> AdviceTopic? {
+    nonisolated static func stored(_ rawValue: String) -> AdviceTopic? {
         rawValue == "exposure" ? .light : AdviceTopic(rawValue: rawValue)
     }
 
@@ -33,6 +33,11 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     /// The name as shown on screen: never split across lines, so "Angle & Perspective" moves to the
     /// next line whole rather than breaking as "Per-spective". `title` stays plain for the model.
     var displayTitle: String { title.keptTogether }
+
+    /// The name in the mode menu, with its step number: "1. Light & Exposure". The number stays
+    /// on the same line as the first word, and a long name wraps between its own words (never
+    /// mid-word), instead of the number sitting alone on one line and the name on the next.
+    var menuTitle: String { "\(step).\u{00A0}\(title.unhyphenated)" }
 
     /// Shorter name for the dropdown button, so it fits beside the camera controls.
     var shortTitle: String {
@@ -85,7 +90,7 @@ struct AdviceTopicMenu: View {
                             selection = topic
                             onSelect(topic)
                         })) {
-                            Label("\(topic.step). \(topic.displayTitle)", systemImage: topic.systemImage)
+                            Label(topic.menuTitle, systemImage: topic.systemImage)
                             Text(topic.tourDescription)
                         }
                     }
@@ -120,7 +125,7 @@ struct AdviceTopicMenu: View {
             onSelect(topic)
         })) {
             ForEach(AdviceTopic.allCases) { topic in
-                Label("\(topic.step). \(topic.displayTitle)", systemImage: topic.systemImage)
+                Label(topic.menuTitle, systemImage: topic.systemImage)
                     .tag(topic)
             }
         }

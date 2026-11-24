@@ -44,6 +44,8 @@ struct ViewfinderTapLayer: View {
     let onFocus: (CGPoint, CGSize) -> Bool
     /// Picks the object under a double tap.
     let onSelect: (CGPoint, CGSize) -> Void
+    /// A brightness drag finished, for the tour.
+    var onBrightnessDragEnded: () -> Void = {}
 
     /// Where the last single tap landed, while its box is showing.
     @State private var mark: CGPoint?
@@ -96,6 +98,7 @@ struct ViewfinderTapLayer: View {
     /// Up is brighter, down is darker, within the camera's ±2 stops. `translation` is nil when the drag ends.
     private func dragBrightness(_ translation: CGFloat?) {
         guard let translation else {
+            if biasAtDragStart != nil { onBrightnessDragEnded() }
             biasAtDragStart = nil
             markActivity += 1
             return
@@ -131,7 +134,6 @@ private struct ViewfinderTouches: UIViewRepresentable {
         let pan = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.panned(_:)))
         pan.maximumNumberOfTouches = 1
         pan.delegate = coordinator
-        coordinator.pan = pan
 
         [double, single, pan].forEach(view.addGestureRecognizer)
         return view
@@ -142,14 +144,16 @@ private struct ViewfinderTouches: UIViewRepresentable {
         coordinator.onTap = onTap
         coordinator.onDoubleTap = onDoubleTap
         coordinator.onDrag = onDrag
-        coordinator.pan?.isEnabled = isBrightnessDragEnabled
+        // Checked when a drag starts rather than switching the recognizer off: switching it off
+        // mid-drag cancels it right here, changing SwiftUI state during the view update.
+        coordinator.isDragEnabled = isBrightnessDragEnabled
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var onTap: (CGPoint) -> Void = { _ in }
         var onDoubleTap: (CGPoint) -> Void = { _ in }
         var onDrag: (CGFloat?) -> Void = { _ in }
-        weak var pan: UIPanGestureRecognizer?
+        var isDragEnabled = false
 
         @objc func tapped(_ recognizer: UITapGestureRecognizer) {
             onTap(recognizer.location(in: recognizer.view))
@@ -173,6 +177,7 @@ private struct ViewfinderTouches: UIViewRepresentable {
         /// Only mostly-vertical drags change the brightness, so a sideways swipe stays free.
         func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
             guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
+            guard isDragEnabled else { return false }
             let velocity = pan.velocity(in: pan.view)
             return abs(velocity.y) >= abs(velocity.x)
         }

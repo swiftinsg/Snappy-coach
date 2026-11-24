@@ -594,8 +594,11 @@ final class PhotoCoach {
     func dismissLightNudge() { lightNudge = nil }
     /// What has been done so far, kept across topics and photos.
     private(set) var memory = CoachMemory()
-    /// Issues fixed since the last photo, for that photo's story in the gallery.
-    private(set) var fixedSinceShot: [CoachIssue] = []
+    /// What was fixed and liked in each mode since the last photo, for that photo's story in the gallery.
+    private(set) var progressSinceShot = ShotProgress()
+    /// The mode being coached and its Composition styles, so fixes are kept under the right mode.
+    private var practisingTopic: AdviceTopic?
+    private var practisingStyles: [String] = []
     /// What kind of photo the camera is looking at, smoothed over the last few checks.
     private(set) var scene: SceneType?
 
@@ -672,6 +675,10 @@ final class PhotoCoach {
 
     /// Runs until the task is cancelled. Restart it (with a new topic or selection) when the pickers change.
     func run(camera: CameraManager, topic: AdviceTopic, styles: Set<CompositionGuide>, guide: SubjectGuide) async {
+        // Keep how the mode being left stood, before its card is cleared.
+        noteModeState()
+        practisingTopic = topic
+        practisingStyles = Self.styleTitles(topic: topic, styles: styles)
         feedback = nil
         notice = nil
         lightNudge = nil
@@ -837,12 +844,15 @@ final class PhotoCoach {
                 ),
                 topic == .light ? CoachRules.lightKeepNote(keepsFraming: keepsPlacement) : nil,
             ].compactMap(\.self).joined(separator: " ")
+            // Whether the model judged this frame, when it's meant to. Until then, nothing is praised.
+            var modelAnswered = !usesModel
             if usesModel, !issues.contains(where: \.blocksModel),
                let judgement = await judge(
                    frame, topic: topic, styles: styles, analysis: analysis,
                    selectedName: picked?.name, handled: handled.isEmpty ? nil : handled
                ) {
                 guard !Task.isCancelled else { break }
+                modelAnswered = true
                 var detail = IssueDetail(region: judgement.region, rawThing: judgement.thing, subjectName: picked?.name)
                 detail.subjectBox = analysis.subject
                 detail.isMirrored = camera.isUsingFrontCamera
@@ -888,6 +898,9 @@ final class PhotoCoach {
                 }
             }
             issues = memory.reordered(issues, keeping: shownIssue)
+            // The first request can be slow to start or time out. Saying the shot looks good on the
+            // measurements alone, then finding a problem a moment later, reads as the coach changing its mind.
+            if issues.isEmpty, !modelAnswered { continue }
 
             publish(
                 top: issues.first,
@@ -906,7 +919,7 @@ final class PhotoCoach {
     /// Call when a photo is taken: that finishes the current section.
     func noteShutter() {
         endSection()
-        fixedSinceShot = []
+        progressSinceShot = ShotProgress()
         // A new photo starts a new framing.
         memory.clearFraming()
     }
@@ -914,20 +927,41 @@ final class PhotoCoach {
     /// What the coach knew when the shutter fired, kept with the photo for its story in the gallery.
     /// Call before `noteShutter()`, which ends the section this describes.
     func shotRecord(topic: AdviceTopic, styles: Set<CompositionGuide>) -> ShotRecord {
+        let praised = currentPraise
+        let styleTitles = Self.styleTitles(topic: topic, styles: styles)
+        var progress = progressSinceShot
+        progress.noteState(of: topic, styles: styleTitles, praised: praised, wasReady: isReady)
+        let modes = progress.results(current: topic)
+        return ShotRecord(
+            topicID: topic.rawValue,
+            styles: styleTitles,
+            scene: scene?.title,
+            wasReady: isReady,
+            fixed: modes.first { $0.topicID == topic.rawValue }?.fixed ?? [],
+            praised: praised,
+            suggestion: isReady ? nil : feedback?.improve.first,
+            date: .now,
+            modes: modes
+        )
+    }
+
+    /// What the card likes now, plus the section's strength.
+    private var currentPraise: [String] {
         var praised = feedback?.good ?? []
         if let sectionStrength, !praised.contains(sectionStrength) {
             praised.append(sectionStrength)
         }
-        return ShotRecord(
-            topicID: topic.rawValue,
-            styles: topic == .composition ? CompositionGuide.allCases.filter(styles.contains).map(\.title) : [],
-            scene: scene?.title,
-            wasReady: isReady,
-            fixed: fixedSinceShot.map(\.accomplishment),
-            praised: praised,
-            suggestion: isReady ? nil : feedback?.improve.first,
-            date: .now
-        )
+        return praised
+    }
+
+    /// Saves how the mode being coached stands, when the person moves to another mode.
+    private func noteModeState() {
+        guard let practisingTopic, feedback != nil else { return }
+        progressSinceShot.noteState(of: practisingTopic, styles: practisingStyles, praised: currentPraise, wasReady: isReady)
+    }
+
+    private static func styleTitles(topic: AdviceTopic, styles: Set<CompositionGuide>) -> [String] {
+        topic == .composition ? CompositionGuide.allCases.filter(styles.contains).map(\.title) : []
     }
 
     // MARK: - Sections and memory
@@ -936,7 +970,9 @@ final class PhotoCoach {
     private func endSection(fixed issue: CoachIssue? = nil) {
         if let issue {
             memory.noteFixed(issue)
-            if !fixedSinceShot.contains(issue) { fixedSinceShot.append(issue) }
+            if let practisingTopic {
+                progressSinceShot.noteFixed(issue.accomplishment, in: practisingTopic, styles: practisingStyles)
+            }
         }
         if let sectionStrength {
             memory.noteStrength(sectionStrength)
@@ -974,7 +1010,8 @@ final class PhotoCoach {
             candidate = .some(top)
             candidateCount = 1
         }
-        let isFirstVerdict = feedback == nil
+        // A first tip shows at once, but "looks good" must be seen twice, so it isn't taken back.
+        let isFirstVerdict = feedback == nil && top != nil
         guard candidateCount >= 2 || isFirstVerdict else { return }
 
         let isNewSection = shownIssue != top
@@ -1172,7 +1209,6 @@ final class PhotoCoach {
         (.hardShadowsOnSubject, #"A face lit hard from one side, with the other half lost in deep shadow: issue hardShadowsOnSubject, region left, thing "the subject", strength "Clear subject"."#),
         (.hardShadowsOnSubject, #"A face in midday sun with dark shadows under the eyes and nose: issue hardShadowsOnSubject, region centre, thing "the subject", strength "Bright colours"."#),
         (.flatLight, #"A plate lit straight from the front, looking flat with no shadows to show its shape: issue flatLight, region whole, thing "the plate", strength "Neat setup"."#),
-        (.mixedColourLight, #"A face lit orange by a lamp on one side and blue by a window on the other: issue mixedColourLight, region whole, thing "the lamp", strength "Clear subject"."#),
         (.patchyLight, #"A person under a tree with spots of sun across the face: issue patchyLight, region centre, thing "the subject", strength "Nice setting"."#),
         (.sunGlare, #"A street scene washed out with haze and a flare streak from the sun just above the frame: issue sunGlare, region top, thing "the sun", strength "Clear subject"."#),
     ]
@@ -1235,7 +1271,7 @@ final class PhotoCoach {
             return """
                 the quality of the light on the subject, not how bright it is: whether its shadows are \
                 hard or soft, whether the light comes from the side or flat from straight ahead, whether \
-                lights of different colours mix on it, whether patches of sun and shade fall across it, and \
+                patches of sun and shade fall across it, and \
                 whether the sun just outside the frame washes it out with haze or flare. \
                 Side light is only good when it is soft and the shadow side still shows detail: if half of \
                 the subject or a face is lost in deep, dark shadow, that is hardShadowsOnSubject, not a strength

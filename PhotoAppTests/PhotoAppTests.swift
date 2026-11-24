@@ -515,7 +515,7 @@ struct CoachRulesTests {
         // Light asks the model about the light itself, and only about that.
         #expect(CoachRules.usesModel(.light))
         #expect(CoachRules.allows(.hardShadowsOnSubject, for: .light))
-        #expect(CoachRules.allows(.mixedColourLight, for: .light))
+        #expect(CoachRules.allows(.patchyLight, for: .light))
         #expect(!CoachRules.allows(.clutteredBackground, for: .light))
         // Composition doesn't judge the light, even with every style picked.
         #expect(!CoachRules.allows(.flatLight, for: .composition, styles: Set(CompositionGuide.allCases)))
@@ -978,8 +978,58 @@ struct GalleryStoryTests {
         #expect(shot.topic == .composition)
         #expect(shot.styles == CompositionGuide.allCases.filter([.ruleOfThirdsOne, .centre].contains).map(\.title))
         #expect(coach.shotRecord(topic: .light, styles: [.ruleOfThirdsOne]).styles.isEmpty)
+        #expect(shot.modes?.map(\.topicID) == [AdviceTopic.composition.rawValue])
         coach.noteShutter()
-        #expect(coach.fixedSinceShot.isEmpty)
+        #expect(coach.progressSinceShot.isEmpty)
+    }
+
+    @Test func photosSavedBeforeModesWereKeptLookTheSame() throws {
+        // The JSON an older version saved, with no "modes".
+        var old = record
+        old.modes = nil
+        let data = try JSONEncoder().encode(old)
+        let loaded = try JSONDecoder().decode(ShotRecord.self, from: data)
+        #expect(loaded.results == [ModeResult(topicID: "light", fixed: ["found better light"], praised: ["Soft side light"])])
+        #expect(loaded.filedTopic == .light)
+        #expect(loaded.topics == [.light])
+    }
+
+    @Test func eachModeKeepsItsOwnFixes() {
+        var progress = ShotProgress()
+        progress.noteFixed("found better light", in: .light, styles: [])
+        progress.noteState(of: .light, styles: [], praised: ["Soft light"], wasReady: true)
+        // Only looked at, nothing done: not kept.
+        progress.noteState(of: .focus, styles: [], praised: [], wasReady: false)
+        progress.noteFixed("cleared the edges", in: .composition, styles: ["Rule of Thirds"])
+        let results = progress.results(current: .composition)
+        #expect(results.map(\.topic) == [.light, .composition])
+        #expect(results[0].fixed == ["found better light"])
+        #expect(results[0].praised == ["Soft light"])
+        #expect(results[1].fixed == ["cleared the edges"])
+        #expect(results[1].styles == ["Rule of Thirds"])
+        // The mode at the shutter is always there, even with nothing done in it yet.
+        #expect(ShotProgress().results(current: .focus).map(\.topic) == [.focus])
+    }
+
+    @Test func photoIsFiledUnderTheFinishedMode() {
+        var shot = record
+        shot.topicID = AdviceTopic.composition.rawValue
+        let light = ModeResult(topicID: "light", fixed: ["found better light"], wasReady: true)
+        let framing = ModeResult(topicID: "composition", fixed: ["cleared the edges"], wasReady: false)
+        // Light was finished, framing only part done: filed under Light & Exposure.
+        shot.modes = [light, framing]
+        #expect(shot.filedTopic == .light)
+        #expect(shot.filedWasReady)
+        // Neither or both finished: filed under the mode it was taken in.
+        var unfinished = light
+        unfinished.wasReady = false
+        shot.modes = [unfinished, framing]
+        #expect(shot.filedTopic == .composition)
+        var finished = framing
+        finished.wasReady = true
+        shot.modes = [light, finished]
+        #expect(shot.filedTopic == .composition)
+        #expect(shot.topics == [.light, .composition])
     }
 }
 
@@ -997,6 +1047,17 @@ extension GalleryStoryTests {
         let lightOnly = GallerySection.grouped(photos, topicOf: { topics[$0] }, filter: .light)
         #expect(lightOnly.count == 1)
         #expect(lightOnly.first?.items == ["l1"])
+    }
+
+    @Test func aPhotoImprovedInTwoModesIsFiledOnceButFoundByBoth() {
+        let photos = ["both", "c1"]
+        let filed: [String: AdviceTopic] = ["both": .composition, "c1": .composition]
+        let all: [String: [AdviceTopic]] = ["both": [.light, .composition], "c1": [.composition]]
+        let sections = GallerySection.grouped(photos, topicOf: { filed[$0] }, topicsOf: { all[$0] ?? [] })
+        #expect(sections.map(\.topic) == [.composition])
+        #expect(sections[0].items == ["both", "c1"])
+        let light = GallerySection.grouped(photos, topicOf: { filed[$0] }, topicsOf: { all[$0] ?? [] }, filter: .light)
+        #expect(light.first?.items == ["both"])
     }
 }
 
@@ -1155,13 +1216,6 @@ struct LightCoachTests {
         #expect(dark.quickFix == .nightMode)
         dim.readings.isNightModeOn = true
         #expect(tip(.tooDark, dim).quickFix == nil)
-        // A strong orange cast indoors gets White Balance for lamplight; outdoors it's left alone.
-        var lamp = light()
-        lamp.colourWarmth = 2
-        #expect(CoachRules.issues(for: .light, in: lamp).contains(.colourCast))
-        #expect(tip(.colourCast, lamp).quickFix == .whiteBalance(3200))
-        lamp.isOutdoors = true
-        #expect(!CoachRules.issues(for: .light, in: lamp).contains(.colourCast))
     }
 
     @Test func theSunComesFirstAndReplacesHighlights() {
@@ -1186,5 +1240,23 @@ struct LightCoachTests {
         #expect(CoachRules.timeOfDayHint(hour: 12, outdoors: true)?.contains("harsh") == true)
         #expect(CoachRules.timeOfDayHint(hour: 12, outdoors: false) == nil)
         #expect(CoachRules.timeOfDayHint(hour: 22, outdoors: true) == nil)
+    }
+}
+
+/// The first-launch tour teaches tap and drag before the double tap, and shows the light signals.
+struct TourTests {
+    @Test func brightnessIsTaughtRightBeforePickingTheSubject() throws {
+        let steps = OnboardingStep.allCases
+        let brightness = try #require(steps.firstIndex(of: .brightness))
+        #expect(steps[brightness + 1] == .selectObject)
+        #expect(OnboardingStep.brightness.placesCardOnControls)
+        #expect(OnboardingStep.brightness.instruction.contains("drag up or down"))
+        #expect(OnboardingStep.selectObject.instruction.hasPrefix("Now double-tap"))
+    }
+
+    @Test func theLightPreviewTravelsWithTheFeedback() {
+        let feedback = OnboardingFeedback(text: "Light & Exposure", isComplete: false, preview: .lightSignals)
+        #expect(feedback.preview == .lightSignals)
+        #expect(OnboardingFeedback(text: "Composition", isComplete: true).preview == nil)
     }
 }

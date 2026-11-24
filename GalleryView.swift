@@ -241,21 +241,26 @@ struct GalleryView: View {
                         Color.white.opacity(0.25)
                     }
                 }
-                // In "All", which mode the photo was taken in, so it's clear even mid-scroll.
+                // In "All", every mode the photo was improved in, so it's clear even mid-scroll.
                 .overlay(alignment: .topLeading) {
-                    if filter == nil, let topic = gallery.record(for: asset)?.topic {
-                        Image(systemName: topic.systemImage)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(4)
-                            .background(.black.opacity(0.45), in: .circle)
-                            .padding(5)
-                            .accessibilityLabel(topic.title)
+                    if filter == nil, let topics = gallery.record(for: asset)?.topics, !topics.isEmpty {
+                        HStack(spacing: 2) {
+                            ForEach(topics) { topic in
+                                Image(systemName: topic.systemImage)
+                            }
+                        }
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(4)
+                        .background(.black.opacity(0.45), in: .capsule)
+                        .padding(5)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(topics.map(\.title).formatted(.list(type: .and)))
                     }
                 }
-                // The coach said this shot was ready when it was taken.
+                // The coach said this shot was ready in the mode it's filed under.
                 .overlay(alignment: .topTrailing) {
-                    if !isSelecting, gallery.record(for: asset)?.wasReady == true {
+                    if !isSelecting, gallery.record(for: asset)?.filedWasReady == true {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.caption)
                             .symbolRenderingMode(.palette)
@@ -497,10 +502,9 @@ private struct PhotoStory: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Label {
-                    Text(([record.topic?.displayTitle ?? "Photo"] + [record.styles.map(\.keptTogether).formatted(.list(type: .and))].filter { !$0.isEmpty })
-                        .joined(separator: " · "))
+                    Text(record.topics.isEmpty ? "Photo" : record.topics.map(\.displayTitle).joined(separator: " · "))
                 } icon: {
-                    Image(systemName: record.topic?.systemImage ?? "camera")
+                    Image(systemName: record.filedTopic?.systemImage ?? "camera")
                 }
                 .font(.headline)
                 if let scene = record.scene {
@@ -510,16 +514,43 @@ private struct PhotoStory: View {
                 }
             }
 
-            if record.wasReady {
+            // One mode reads as before; several get a block each, in shooting order.
+            let results = record.results
+            ForEach(Array(results.enumerated()), id: \.offset) { _, result in
+                modeBlock(result, showsTitle: results.count > 1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func modeBlock(_ result: ModeResult, showsTitle: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if showsTitle {
                 Label {
-                    Text("Coach said this shot was ready")
+                    Text(([result.topic?.displayTitle ?? "Earlier mode"] + [result.styles.map(\.keptTogether).formatted(.list(type: .and))].filter { !$0.isEmpty })
+                        .joined(separator: " · "))
+                } icon: {
+                    Image(systemName: result.topic?.systemImage ?? "camera")
+                }
+                .font(.subheadline.weight(.bold))
+            } else if !result.styles.isEmpty {
+                Text(result.styles.map(\.keptTogether).formatted(.list(type: .and)))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if result.wasReady {
+                Label {
+                    Text(showsTitle ? "Coach said this was ready" : "Coach said this shot was ready")
                 } icon: {
                     Image(systemName: "checkmark.circle.fill")
                         .symbolRenderingMode(.palette)
                         .foregroundStyle(.white, .green)
                 }
                 .font(.subheadline.weight(.semibold))
-            } else if let suggestion = record.suggestion {
+            } else if result.topicID == record.topicID, let suggestion = record.suggestion {
+                // Only the mode at the shutter had a tip showing.
                 Label {
                     Text("Coach was still suggesting: \(suggestion)")
                 } icon: {
@@ -529,10 +560,10 @@ private struct PhotoStory: View {
                 .font(.subheadline)
             }
 
-            list("You fixed", record.fixed)
-            list("Coach liked", record.praised)
+            list("You fixed", result.fixed)
+            list("Coach liked", result.praised)
 
-            if let topic = record.topic {
+            if let topic = result.topic {
                 Button {
                     onShowMode(topic)
                 } label: {
@@ -548,8 +579,9 @@ private struct PhotoStory: View {
                 .foregroundStyle(.tint)
             }
         }
+        .padding(showsTitle ? 12 : 0)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .contain)
+        .background(showsTitle ? AnyShapeStyle(.fill.quaternary) : AnyShapeStyle(.clear), in: .rect(cornerRadius: 12))
     }
 
     @ViewBuilder

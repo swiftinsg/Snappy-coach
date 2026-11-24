@@ -1342,7 +1342,6 @@ extension CameraManager {
         case .brighten: return exposureBias < 2
         case .darken: return exposureBias > -2
         case .raw: return format != .proRAW && photoOutput.isAppleProRAWSupported
-        case .whiteBalance: return whiteBalanceKelvin == nil && isAvailableOnCurrentCamera(.whiteBalance)
         }
     }
 
@@ -1369,9 +1368,6 @@ extension CameraManager {
                 _ = activate(.format)
             }
             return format == .proRAW ? "Format: RAW (Live off)" : "RAW isn't available on this camera"
-        case .whiteBalance(let kelvin):
-            setAdjustment(kelvin, for: .whiteBalance)
-            return "White Balance set for \(Int(kelvin))K light"
         }
     }
 }
