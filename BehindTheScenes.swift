@@ -1382,7 +1382,8 @@ final class PhotoCoach {
     }
 
     /// Asks the model about the frame. Returns nil if it couldn't answer.
-    private func judge(
+    /// Internal rather than private so tests can run the app's exact prompt on test scenes.
+    func judge(
         _ frame: CGImage,
         topic: AdviceTopic,
         styles: Set<CompositionGuide>,
