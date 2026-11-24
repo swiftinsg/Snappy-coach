@@ -488,6 +488,30 @@ struct PhotoFeedback: Equatable {
     var nextMode: AdviceTopic? = nil
 }
 
+/// Things in the shot besides the people, kept for a few checks after they were last seen, so one
+/// frame where Vision misses them never brings back a tip that turns away from them.
+struct RecentThings: Equatable {
+    /// Checks a thing is kept for, counting the one it was last seen in.
+    static let checks = 3
+    private var lastSeen: [CGRect] = []
+    private var missed = 0
+
+    mutating func note(_ now: [CGRect]) -> [CGRect] {
+        if !now.isEmpty {
+            lastSeen = now
+            missed = 0
+            return now
+        }
+        guard !lastSeen.isEmpty else { return [] }
+        missed += 1
+        if missed >= Self.checks {
+            lastSeen = []
+            return []
+        }
+        return lastSeen
+    }
+}
+
 /// What the coach remembers between sections. Every model session starts empty, so this is
 /// turned into one short sentence that keeps the coach from repeating itself.
 struct CoachMemory: Equatable {
@@ -505,11 +529,37 @@ struct CoachMemory: Equatable {
     static let repeatLimit = 2
 
     /// Composition got the subject lined up, so light tips mustn't move the camera until the
-    /// photo is taken.
+    /// photo is taken, or until the person has clearly moved to another view.
     private(set) var isFramingLinedUp = false
+    /// The view's layout and zoom when the framing was last lined up, to tell when it's been left.
+    private var linedUpLayout: [Double] = []
+    private var linedUpZoom = 1.0
+    /// Checks in a row the view has been clearly different from the lined-up one.
+    private var driftPasses = 0
 
-    mutating func noteFramingLinedUp() { isFramingLinedUp = true }
-    mutating func clearFraming() { isFramingLinedUp = false }
+    mutating func noteFramingLinedUp(layout: [Double], zoom: Double) {
+        isFramingLinedUp = true
+        linedUpLayout = layout
+        linedUpZoom = zoom
+        driftPasses = 0
+    }
+
+    /// Lets go of the lined-up framing once the view has been clearly different twice in a row,
+    /// measured like reframing for model tips, so one jumpy frame doesn't count.
+    mutating func noteView(layout: [Double], zoom: Double) {
+        guard isFramingLinedUp else { return }
+        let zoomChange = max(zoom, linedUpZoom) / max(min(zoom, linedUpZoom), 0.1)
+        let moved = SceneAnalysis.reframeAmount(from: linedUpLayout, to: layout) >= CoachRules.reframeThreshold
+            || zoomChange >= 1.3
+        driftPasses = moved ? driftPasses + 1 : 0
+        if driftPasses >= 2 { clearFraming() }
+    }
+
+    mutating func clearFraming() {
+        isFramingLinedUp = false
+        linedUpLayout = []
+        driftPasses = 0
+    }
 
     mutating func noteFixed(_ issue: CoachIssue) {
         fixed.removeAll { $0 == issue }
@@ -716,6 +766,8 @@ final class PhotoCoach {
         var lastFrame = ContinuousClock.now
         // True while the notice says the camera is paused or missing, so it's cleared once it's back.
         var showsCameraNotice = false
+        // What else was in the shot lately, so tips keep it there.
+        var recentThings = RecentThings()
         // Model requests in a row that failed or timed out. Past the limit, the measurements
         // speak alone, so a model that keeps failing can't leave the card empty.
         var modelFailures = 0
@@ -781,6 +833,7 @@ final class PhotoCoach {
             let backdropCounts = Dictionary(recentBackdrops.compactMap(\.self).map { ($0, 1) }, uniquingKeysWith: +)
             let steadyBackdrop = backdropCounts.first { $0.value * 2 > recentBackdrops.count }?.key
             analysis.backdrop = analysis.scene == .people ? steadyBackdrop : nil
+            analysis.otherThings = recentThings.note(analysis.otherThings)
 
             // Tell the picker which styles don't suit the scene.
             unavailableCompositions = CompositionGuide.unavailableStyles(in: analysis)
@@ -801,8 +854,13 @@ final class PhotoCoach {
                 hasNudgedLight = true
             }
             if usesBox, guide.target?.isAligned == true {
-                memory.noteFramingLinedUp()
+                memory.noteFramingLinedUp(layout: analysis.layout, zoom: Double(camera.zoomLevel))
                 lightNudge = nil
+            }
+            // Light keeps a frame lined up in Composition only while the view is still that frame:
+            // once the person has clearly moved elsewhere, moving tips are allowed again.
+            if topic == .light {
+                memory.noteView(layout: analysis.layout, zoom: Double(camera.zoomLevel))
             }
             if usesBox, let target = guide.target, !target.isAligned {
                 // The model's praise stays on the card, so the guide and the model read as one coach.
@@ -861,6 +919,8 @@ final class PhotoCoach {
             // Whether the model judged this frame, when it's meant to. Until then, nothing is praised.
             var modelAnswered = !usesModel
             var judgement: CoachJudgement?
+            // The light problem the model found this pass, which its own praise mustn't contradict.
+            var modelLightIssue: CoachIssue?
             if usesModel, !issues.contains(where: { $0.blocksModel(in: topic) }) {
                 judgement = await judge(
                     frame, topic: topic, styles: styles, analysis: analysis,
@@ -908,9 +968,19 @@ final class PhotoCoach {
                         }
                     }
                     details[issue] = detail
+                    // Praise the model's light verdict contradicts goes, so the card never says
+                    // "Soft, even light" beside a hard-shadows tip.
+                    if issue.isLightQuality {
+                        modelLightIssue = issue
+                        good.removeAll { !CoachRules.praise($0, survives: issue) }
+                        if let kept = sectionStrength, !CoachRules.praise(kept, survives: issue) {
+                            sectionStrength = nil
+                        }
+                    }
                 }
                 if let strength = Self.cleanedStrength(judgement.strength),
-                   !CoachRules.contradicts(strength: strength, analysis: analysis) {
+                   !CoachRules.contradicts(strength: strength, analysis: analysis),
+                   modelLightIssue.map({ CoachRules.praise(strength, survives: $0) }) ?? true {
                     sectionStrength = strength
                     if !good.contains(strength) { good.append(strength) }
                 }
@@ -1062,7 +1132,7 @@ final class PhotoCoach {
             sectionIssueCount = max(remaining, 1)
             // The usual tip didn't work in earlier sections, so try a different one.
             usesAlternative = memory.timesShown(top) >= CoachMemory.repeatLimit
-                && top.alternativeAdvice(for: topic) != nil
+                && top.alternativeAdvice(for: topic, analysis: analysis, keepsPlacement: keepsPlacement) != nil
             memory.noteShown(top)
             sectionDetail = details[top]
             renamePasses = 0
@@ -1092,7 +1162,9 @@ final class PhotoCoach {
         )
 
         let usual = top.advice(for: topic, analysis: analysis, detail: sectionDetail, keepsPlacement: keepsPlacement)
-        let advice = usesAlternative ? (top.alternativeAdvice(for: topic) ?? usual) : usual
+        // The other way must still be possible here; if it isn't, the usual tip stays.
+        let alternative = top.alternativeAdvice(for: topic, analysis: analysis, keepsPlacement: keepsPlacement)
+        let advice = usesAlternative ? (alternative ?? usual) : usual
         var improve = [advice.action]
         // The rules and the model are one coach: the second tip is left out when it would
         // undo the first, or move the subject off the spot the guide put it in.

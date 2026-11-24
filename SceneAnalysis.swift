@@ -337,6 +337,11 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     var lightSpot: CGRect? = nil
     /// Vision sees an outdoor scene, so a bright spot can be the sun.
     var isOutdoors = false
+    /// The hour on the phone's clock when the frame was analysed, nil when unknown.
+    var hour: Int? = nil
+    /// Things in the shot apart from the people: what stands out, and what was tapped when it
+    /// isn't a person. When there are people, these are meant to be in the photo with them.
+    var otherThings: [CGRect] = []
 
     /// How many people are in the frame, whether their faces or only their bodies show.
     var personCount: Int {
@@ -371,8 +376,18 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     /// Daylight with no direct sun: outdoors, no sun in the shot, and too little light for sunshine.
     /// Cloud and rain spread the light out, so it can't cast hard shadows or patches of sun.
     nonisolated var isSoftDaylight: Bool {
-        guard isOutdoors, sunSpot == nil, let level = readings.lightLevel else { return false }
+        guard isOutdoors, !isOutdoorsAtNight, sunSpot == nil, let level = readings.lightLevel else { return false }
         return level < CoachRules.directSunLevel
+    }
+
+    /// Outdoors after dark, where the light comes from street lamps, signs and windows, which can
+    /// cast hard shadows. Night is far darker than even heavy rain, so the light level decides;
+    /// the clock catches brightly lit places at night, like a floodlit square.
+    nonisolated var isOutdoorsAtNight: Bool {
+        guard isOutdoors else { return false }
+        if let hour, !CoachRules.isDaytime(hour: hour) { return true }
+        if let level = readings.lightLevel, level < CoachRules.nightLevel { return true }
+        return false
     }
 
     /// The subject is clearly darker than what's behind it.
@@ -449,6 +464,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
         }
         if let side = lightSide?.sideWord { facts.append("the light comes from the \(side) of the frame") }
         if isSoftDaylight { facts.append("the sky is overcast, so the daylight is soft and even, with no direct sun") }
+        if isOutdoorsAtNight { facts.append("it is night outside, so the light comes from street lamps, signs or windows, not the sun") }
         // What's already on, so it isn't suggested again.
         var settings: [String] = []
         if readings.isNightModeOn { settings.append("Night Mode") }
@@ -492,6 +508,14 @@ extension SceneAnalysis {
         let outdoors = [scene, behind].contains { [.landscape, .city, .nature].contains($0) }
             || labels.contains { ["sky", "outdoor", "sun", "sunset", "sunrise", "cloud"].contains($0.identifier.lowercased()) }
         let faceLight = faceLighting(of: faces, in: gray)
+        // Apart from the people, including bodies only guessed from faces, since a close selfie
+        // often shows too little of a body to be found.
+        let everyone = found.people + faces.map { bodyBox(below: $0) }
+        var others = SubjectFinder.otherThings(found.others, apartFrom: everyone)
+        // A tapped thing that isn't a person is meant to be in the shot, however small.
+        if let selectedSubject, !everyone.contains(where: { $0.intersects(selectedSubject) }) {
+            others.append(selectedSubject)
+        }
 
         // Without a subject, judge sharpness and brightness in the middle of the frame.
         let region = subject ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
@@ -522,8 +546,18 @@ extension SceneAnalysis {
             faceShadowRatio: faceLight?.ratio,
             faceLitSide: faceLight.flatMap { $0.ratio < Self.faceEvenRatio ? $0.litSide : nil },
             lightSpot: LightSpotFinder.find(in: gray),
-            isOutdoors: outdoors
+            isOutdoors: outdoors,
+            hour: Calendar.current.component(.hour, from: .now),
+            otherThings: others
         )
+    }
+
+    /// Roughly where the body under a face is: a little wider than the face, and several faces
+    /// tall below it, kept inside the frame.
+    nonisolated static func bodyBox(below face: CGRect) -> CGRect {
+        CGRect(x: face.minX - face.width * 0.75, y: face.minY - face.height * 0.3,
+               width: face.width * 2.5, height: face.height * 4)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
     }
 
     /// Vision's on-device labels for the frame, keeping only ones it is reasonably sure of.
@@ -727,7 +761,8 @@ nonisolated enum LightSide: String, Sendable, Equatable {
 
 extension SceneAnalysis {
     /// The sun, when the bright spot is outdoors. Indoors the same spot is a lamp or a window.
-    nonisolated var sunSpot: CGRect? { isOutdoors ? lightSpot : nil }
+    /// At night a bright spot outdoors is a street lamp, not the sun.
+    nonisolated var sunSpot: CGRect? { isOutdoors && !isOutdoorsAtNight ? lightSpot : nil }
 
     /// Which side the light comes from, only when the measurements are sure. A bright spot and
     /// the lit side of a face have to agree; on its own, only a clear sun or a face lost in deep
@@ -746,14 +781,36 @@ extension SceneAnalysis {
         }
     }
 
-    /// Someone is in the shot with scenery behind them that matters, so the camera shouldn't move.
-    nonisolated var hasImportantBackdrop: Bool {
-        personCount > 0 && backdrop != nil
+    /// Someone is in the shot with something else that matters: scenery Vision recognises behind
+    /// them, another thing that stands out, something tapped, or the place itself in a wide selfie.
+    /// The camera mustn't move and nobody should turn around, or it would leave the shot.
+    nonisolated var sceneryMatters: Bool {
+        guard personCount > 0 else { return false }
+        if backdrop != nil || !otherThings.isEmpty { return true }
+        // A selfie with the face small in the frame is about where you are.
+        return readings.isFrontCamera && (faces.map(\.height).max() ?? 0) < CoachRules.wideSelfieFace
+    }
+
+    /// How much of the frame the subject fills, 0...1, or nil without a subject.
+    nonisolated var subjectShare: Double? {
+        subject.map { Double($0.width * $0.height) }
+    }
+
+    /// Flash reaches a nearby subject, never a building or a view.
+    nonisolated var flashCanReach: Bool {
+        !isFixedScene
     }
 
     /// A scene that can't be moved or turned: a building or a view, with nobody in it.
     nonisolated var isFixedScene: Bool {
         personCount == 0 && (isWideScene || scene == .city || scene == .landscape)
+    }
+
+    /// Whether what's being photographed can move into better light: a person can be asked (or it's
+    /// you, on the front camera), and food or an object can be carried. A building, a view, a plant
+    /// or an animal can't, so light tips never ask them to.
+    nonisolated var canMoveSubject: Bool {
+        readings.isFrontCamera || personCount > 0 || !(isFixedScene || scene == .nature)
     }
 }
 
@@ -766,6 +823,8 @@ nonisolated enum LightSpotFinder {
     static let hotShare = 0.5
     /// At most this many cells (about 6% of the frame): bigger is the sky or a wall, not a source.
     static let maxCells = 15
+    /// The most of the frame a light source can cover.
+    static let maxShare = Double(maxCells) / Double(columns * rows)
     /// At most this wide or tall, as a share of the frame.
     static let maxSpan = 0.3
     /// Around the spot must be darker than this, or the bright area is just the scene.

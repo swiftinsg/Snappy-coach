@@ -151,7 +151,7 @@ struct CoachRulesTests {
     @Test func onlyBrightnessTipsAskForATapOnTheViewfinder() {
         // A single tap on the viewfinder sets focus and brightness there, so only brightness tips
         // ask for one. Picking the subject is a double tap, which tips never ask for.
-        let brightness: Set<CoachIssue> = [.underexposed, .overexposed, .highlightsClipped, .backlitSubject]
+        let brightness: Set<CoachIssue> = [.underexposed, .overexposed, .highlightsClipped, .backlitSubject, .subjectInShadow, .subjectTooBright]
         for issue in CoachIssue.allCases {
             for topic in AdviceTopic.allCases {
                 for advice in [issue.advice(for: topic), issue.alternativeAdvice(for: topic)].compactMap(\.self) {
@@ -561,6 +561,7 @@ struct CoachRulesTests {
         // Outdoors in the rain: 1/250 s at ISO 64 is about EV 10, far too dim for direct sun.
         var rainy = scene(readings: CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 250, iso: 64))
         rainy.isOutdoors = true
+        rainy.hour = 14
         // Raindrops and wet ground give the subject plenty of light and dark.
         rainy.subjectContrast = 0.2
         #expect(rainy.isSoftDaylight)
@@ -577,6 +578,38 @@ struct CoachRulesTests {
         var indoors = rainy
         indoors.isOutdoors = false
         #expect(CoachRules.believes(.patchyLight, detail: nil, analysis: indoors))
+    }
+
+    @Test func streetLampsAtNightCanCastHardShadows() {
+        // A lit street at night: 1/15 s at ISO 1600 is about EV 1.6, far darker than any rain.
+        var night = scene(readings: CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 15, iso: 1600))
+        night.isOutdoors = true
+        night.subjectContrast = 0.2
+        night.hour = 22
+        #expect(night.isOutdoorsAtNight)
+        #expect(!night.isSoftDaylight)
+        #expect(CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: night))
+        #expect(night.summary.contains("street lamps"))
+        // Too dark tells the light level alone, even if the clock is wrong or unknown.
+        night.hour = nil
+        #expect(night.isOutdoorsAtNight)
+        // A street lamp in the shot isn't the sun.
+        night.lightSpot = CGRect(x: 0.7, y: 0.1, width: 0.05, height: 0.05)
+        #expect(night.sunSpot == nil)
+        #expect(!CoachRules.issues(for: .light, in: night).contains(.sunInFrame))
+        // A floodlit square at night is as bright as a rainy day; the clock says it's night.
+        var floodlit = night
+        floodlit.lightSpot = nil
+        floodlit.readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 250, iso: 64)
+        floodlit.hour = 22
+        #expect(!floodlit.isSoftDaylight)
+        #expect(CoachRules.believes(.patchyLight, detail: nil, analysis: floodlit))
+        // The same light at 2 pm is a rainy day.
+        floodlit.hour = 14
+        #expect(floodlit.isSoftDaylight)
+        // Indoors is never "night outside", however dark.
+        night.isOutdoors = false
+        #expect(!night.isOutdoorsAtNight)
     }
 
     @Test func compositionShowsOneTip() {
@@ -1282,6 +1315,258 @@ struct LightCoachTests {
         #expect(CoachRules.timeOfDayHint(hour: 12, outdoors: true)?.contains("harsh") == true)
         #expect(CoachRules.timeOfDayHint(hour: 12, outdoors: false) == nil)
         #expect(CoachRules.timeOfDayHint(hour: 22, outdoors: true) == nil)
+    }
+
+    @Test func buildingsViewsAndPlantsAreNeverAskedToMove() {
+        for scene: SceneType in [.city, .landscape, .nature] {
+            let view = light(scene: scene, outdoors: true)
+            #expect(!view.canMoveSubject)
+            for issue: CoachIssue in [.hardShadowsOnSubject, .patchyLight, .harshContrast] {
+                #expect(tip(issue, view).mover == .wait, "\(issue) asks a \(scene) photo's subject to move")
+            }
+            // A plant can still be walked around for side light; it just can't move itself.
+            #expect(tip(.flatLight, view).mover != .subject)
+        }
+        // A view only gets side light when the sun moves.
+        #expect(tip(.flatLight, light(scene: .city, outdoors: true)).mover == .wait)
+        // RAW keeps detail in a contrasty view meanwhile.
+        #expect(tip(.harshContrast, light(scene: .landscape, outdoors: true)).quickFix == .raw)
+        // People, food and objects can still move into better light.
+        for scene: SceneType in [.food, .object] {
+            #expect(tip(.hardShadowsOnSubject, light(scene: scene)).mover == .subject)
+        }
+        #expect(tip(.patchyLight, light(scene: .people, faces: smallFace)).mover == .subject)
+    }
+
+    @Test func aLockedFramingNeverMovesTheCamera() {
+        let scenes = [
+            light(scene: .people, faces: smallFace, outdoors: true, spot: sunTopLeft, backlit: true),
+            light(scene: .object, backlit: true),
+            light(scene: .food),
+            light(scene: .city, outdoors: true, spot: sunTopLeft),
+        ]
+        let lightIssues: [CoachIssue] = [
+            .underexposed, .overexposed, .highlightsClipped, .backlitSubject, .tooDark, .harshContrast, .highISO,
+            .faceHalfInShadow, .sunInFrame, .hardShadowsOnSubject, .flatLight, .patchyLight, .sunGlare,
+        ]
+        for a in scenes {
+            for issue in lightIssues {
+                let advice = tip(issue, a, keepsFraming: true)
+                // Shading the lens is the only thing the photographer may do, and it doesn't move the camera.
+                if advice.mover == .photographer {
+                    #expect(advice.action == "Shade the lens with your hand", "\(issue) moves a kept framing: \(advice.action)")
+                }
+                if let other = issue.alternativeAdvice(for: .light, analysis: a, keepsPlacement: true) {
+                    #expect(other.mover != .photographer, "\(issue)'s other tip moves a kept framing: \(other.action)")
+                }
+            }
+        }
+        // With the framing kept, the subject turns to find side light instead.
+        let person = tip(.flatLight, light(scene: .people, faces: smallFace), keepsFraming: true)
+        #expect(person.mover == .subject)
+        #expect(person.action == "Ask them to turn so light falls from the side")
+    }
+
+    @Test func aSelfieInFrontOfALandmarkKeepsTheLandmark() {
+        let landmark = light(scene: .people, backdrop: .city, faces: bigFace, outdoors: true, spot: sunTopLeft, backlit: true, frontCamera: true)
+        for issue: CoachIssue in [.backlitSubject, .sunInFrame] {
+            let advice = tip(issue, landmark)
+            #expect(advice.mover == .settings)
+            // The face is close, so Flash reaches it and lights it without losing the landmark.
+            #expect(advice.action == "Turn on Flash to light your face")
+            #expect(advice.quickFix == .flash)
+            #expect(issue.alternativeAdvice(for: .light, analysis: landmark)?.action.contains("Turn") != true)
+        }
+        // With nothing important behind you, turning around is fine.
+        let plain = light(scene: .people, faces: bigFace, backlit: true, frontCamera: true)
+        #expect(tip(.backlitSubject, plain).action == "Turn around so the light falls on your face")
+        // Selfie tips talk to you, never about someone else.
+        for issue: CoachIssue in [.hardShadowsOnSubject, .harshContrast, .patchyLight, .flatLight] {
+            let advice = tip(issue, plain)
+            #expect(advice.mover == .subject)
+            #expect(!advice.action.contains("them") && !advice.action.contains("the subject"), "\(advice.action)")
+        }
+    }
+
+    @Test func theOtherTipFollowsTheSameLimits() throws {
+        let building = light(scene: .city, outdoors: true, backlit: true)
+        #expect(CoachIssue.backlitSubject.alternativeAdvice(for: .light, analysis: building) == nil)
+        #expect(CoachIssue.tooDark.alternativeAdvice(for: .light, analysis: building) == nil)
+        #expect(CoachIssue.hardShadowsOnSubject.alternativeAdvice(for: .light, analysis: building) == nil)
+        // A cup can be walked around, unless the framing is kept.
+        let cup = light(backlit: true)
+        let walk = try #require(CoachIssue.backlitSubject.alternativeAdvice(for: .light, analysis: cup))
+        #expect(walk.mover == .photographer)
+        #expect(CoachIssue.backlitSubject.alternativeAdvice(for: .light, analysis: cup, keepsPlacement: true) == nil)
+        // The flash tip comes with its one-tap fix.
+        let flash = try #require(CoachIssue.tooDark.alternativeAdvice(for: .light, analysis: cup))
+        #expect(flash.mover == .settings)
+        #expect(flash.quickFix == .flash)
+        // Without a scene, the other tip is the same as before.
+        #expect(CoachIssue.backlitSubject.alternativeAdvice(for: .light) != nil)
+    }
+
+    @Test func aLinedUpFrameIsLetGoOnceThePersonMovesOn() {
+        var memory = CoachMemory()
+        let linedUp = Array(repeating: 0.5, count: 64)
+        let elsewhere = Array(repeating: 0.8, count: 64)
+        memory.noteFramingLinedUp(layout: linedUp, zoom: 1)
+        // One jumpy frame doesn't count.
+        memory.noteView(layout: elsewhere, zoom: 1)
+        memory.noteView(layout: linedUp, zoom: 1)
+        #expect(memory.isFramingLinedUp)
+        // Clearly somewhere else, twice in a row.
+        memory.noteView(layout: elsewhere, zoom: 1)
+        memory.noteView(layout: elsewhere, zoom: 1)
+        #expect(!memory.isFramingLinedUp)
+        // Zooming well in counts as leaving the framing too.
+        memory.noteFramingLinedUp(layout: linedUp, zoom: 1)
+        memory.noteView(layout: linedUp, zoom: 2)
+        memory.noteView(layout: linedUp, zoom: 2)
+        #expect(!memory.isFramingLinedUp)
+    }
+
+    private let statue = [CGRect(x: 0.65, y: 0.2, width: 0.25, height: 0.5)]
+
+    @Test func aSelfieWithSomethingElseInItNeverTurnsAround() {
+        // Each way of knowing something else is in the shot, on its own.
+        var withBackdrop = light(scene: .people, backdrop: .city, faces: bigFace, outdoors: true, backlit: true, frontCamera: true)
+        withBackdrop.hour = 14
+        var withThing = light(scene: .people, faces: bigFace, backlit: true, frontCamera: true)
+        withThing.otherThings = statue
+        let wide = light(scene: .people, faces: smallFace, backlit: true, frontCamera: true)
+        for selfie in [withBackdrop, withThing, wide] {
+            #expect(selfie.sceneryMatters)
+            for issue: CoachIssue in [.backlitSubject, .sunInFrame, .flatLight, .sunGlare, .hardShadowsOnSubject, .patchyLight, .subjectInShadow] {
+                let advice = tip(issue, selfie)
+                for turn in ["Turn around", "Walk around", "Turn so the light comes from your side", "turn slightly away"] {
+                    #expect(!advice.action.contains(turn), "\(issue) loses what's behind you: \(advice.action)")
+                }
+            }
+        }
+        // A close face gets Flash; a far one gets brightened.
+        #expect(tip(.backlitSubject, withThing).action == "Turn on Flash to light your face")
+        #expect(tip(.backlitSubject, wide).action == "Tap your face so the camera brightens you")
+        #expect(tip(.sunGlare, wide).action == "Shade the lens with your hand")
+        #expect(tip(.flatLight, withThing).action == "Turn your head slightly toward the light")
+        // A close-up selfie with nothing else in it can still turn around.
+        let closeUp = light(scene: .people, faces: bigFace, backlit: true, frontCamera: true)
+        #expect(!closeUp.sceneryMatters)
+        #expect(tip(.backlitSubject, closeUp).action == "Turn around so the light falls on your face")
+    }
+
+    @Test func aPersonWithSomethingElseStaysPut() {
+        var portrait = light(scene: .people, faces: smallFace, backlit: true)
+        portrait.otherThings = statue
+        let backlit = tip(.backlitSubject, portrait)
+        #expect(backlit.mover == .settings)
+        #expect(!backlit.action.contains("Walk around"))
+        let flat = tip(.flatLight, portrait)
+        #expect(flat.mover == .subject)
+        #expect(flat.action == "Ask them to turn so light falls from the side")
+        #expect(tip(.sunGlare, portrait).action == "Shade the lens with your hand")
+        // With nothing else there, walking around them is still the best fix.
+        let alone = light(scene: .people, faces: smallFace, backlit: true)
+        #expect(tip(.backlitSubject, alone).mover == .photographer)
+    }
+
+    @Test func otherThingsAreFoundApartFromThePeople() {
+        let person = CGRect(x: 0.3, y: 0.2, width: 0.3, height: 0.7)
+        let boxes = [
+            CGRect(x: 0.35, y: 0.25, width: 0.2, height: 0.2), // the person's own head
+            CGRect(x: 0.7, y: 0.3, width: 0.25, height: 0.4),  // a statue beside them
+            CGRect(x: 0.05, y: 0.05, width: 0.05, height: 0.05), // a speck
+        ]
+        #expect(SubjectFinder.otherThings(boxes, apartFrom: [person]) == [boxes[1]])
+        // A face alone stands for the body under it, so a close selfie's own shoulders aren't "something else".
+        let face = CGRect(x: 0.4, y: 0.2, width: 0.2, height: 0.25)
+        let body = SceneAnalysis.bodyBox(below: face)
+        #expect(body.contains(CGPoint(x: 0.5, y: 0.8)))
+        #expect(SubjectFinder.otherThings([CGRect(x: 0.35, y: 0.5, width: 0.3, height: 0.4)], apartFrom: [body]).isEmpty)
+    }
+
+    @Test func somethingElseIsRememberedForAFewChecks() {
+        var recent = RecentThings()
+        #expect(recent.note(statue) == statue)
+        // Missed by Vision for a check or two: still there.
+        #expect(recent.note([]) == statue)
+        #expect(recent.note([]) == statue)
+        // Gone for three checks: really gone.
+        #expect(recent.note([]).isEmpty)
+        #expect(recent.note([]).isEmpty)
+    }
+
+    @Test func theModelMustAgreeWithTheMeasurements() {
+        // Glare needs the sun: a street lamp at night isn't it.
+        var night = light(outdoors: true)
+        night.subjectContrast = 0.2
+        night.hour = 22
+        #expect(!CoachRules.believes(.sunGlare, detail: nil, analysis: night))
+        var day = night
+        day.hour = 14
+        day.readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 4000, iso: 50)
+        #expect(CoachRules.believes(.sunGlare, detail: nil, analysis: day))
+        // A subject too far away to see the light on it.
+        var far = light(subject: CGRect(x: 0.5, y: 0.5, width: 0.1, height: 0.1))
+        far.subjectContrast = 0.2
+        #expect(!CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: far))
+        #expect(!CoachRules.believes(.flatLight, detail: nil, analysis: far))
+        var near = far
+        near.subject = CGRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3)
+        #expect(CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: near))
+        // Light measured from one side isn't flat.
+        let sideLit = light(scene: .people, faces: smallFace, litSide: .left, shadowRatio: 0.6)
+        #expect(!CoachRules.believes(.flatLight, detail: nil, analysis: sideLit))
+        #expect(CoachRules.believes(.flatLight, detail: nil, analysis: light(scene: .people, faces: smallFace)))
+        // Praise that the model's verdict contradicts goes; the rest stays.
+        #expect(!CoachRules.praise("Soft, even light", survives: .hardShadowsOnSubject))
+        #expect(!CoachRules.praise("Light reaches the subject", survives: .patchyLight))
+        #expect(!CoachRules.praise("Soft side light", survives: .flatLight))
+        #expect(!CoachRules.praise("Highlights have detail", survives: .sunGlare))
+        #expect(CoachRules.praise("Balanced brightness", survives: .hardShadowsOnSubject))
+    }
+
+    @Test func measuredLoopholesAreClosed() {
+        // Flash can't light a view, so it doesn't hide "too dark" there.
+        var view = light(scene: .landscape, outdoors: true)
+        view.readings = CameraReadings(exposureOffset: 0, exposureSeconds: 1.0 / 15, iso: 3200)
+        view.readings.isFlashOn = true
+        #expect(CoachRules.issues(for: .light, in: view).contains(.tooDark))
+        // A lamp alone indoors stays white without a tip.
+        var lamp = light(spot: CGRect(x: 0.1, y: 0.1, width: 0.1, height: 0.1))
+        lamp.highlightClip = 0.05
+        #expect(!CoachRules.issues(for: .light, in: lamp).contains(.highlightsClipped))
+        // A white sky behind a well-lit person: the face matters more.
+        var portrait = light(scene: .people, faces: smallFace, outdoors: true)
+        portrait.highlightClip = 0.1
+        #expect(!CoachRules.issues(for: .light, in: portrait).contains(.highlightsClipped))
+        // The same sky with nobody in it is still pointed out.
+        var sky = light(outdoors: true)
+        sky.highlightClip = 0.1
+        #expect(CoachRules.issues(for: .light, in: sky).contains(.highlightsClipped))
+    }
+
+    @Test func aSubjectInShadowOrTooBrightIsFound() {
+        // Someone under a tree in a sunny park: the frame is fine, the subject is dark.
+        let shaded = scene(subjectBrightness: 0.15, backgroundBrightness: 0.6)
+        #expect(CoachRules.issues(for: .light, in: shaded).contains(.subjectInShadow))
+        #expect(!CoachRules.strengths(for: .light, in: shaded).contains("Light reaches the subject"))
+        // Backlit or a dark frame are their own tips, not this one.
+        let backlit = scene(subjectBrightness: 0.15, backgroundBrightness: 0.95)
+        #expect(!CoachRules.issues(for: .light, in: backlit).contains(.subjectInShadow))
+        let dark = scene(brightness: 0.1, subjectBrightness: 0.05)
+        #expect(!CoachRules.issues(for: .light, in: dark).contains(.subjectInShadow))
+        // Spotlit on a dark stage.
+        let spotlit = scene(subjectBrightness: 0.92, backgroundBrightness: 0.2)
+        #expect(CoachRules.issues(for: .light, in: spotlit).contains(.subjectTooBright))
+        #expect(tip(.subjectTooBright, light()).quickFix == .meterOnSubject)
+        // Who moves for a subject in shadow.
+        var person = light(scene: .people, faces: smallFace)
+        person.subjectBrightness = 0.15
+        #expect(tip(.subjectInShadow, person).action == "Ask them to step into the light")
+        #expect(tip(.subjectInShadow, light(scene: .city, outdoors: true)).mover == .settings)
+        #expect(tip(.subjectInShadow, person, keepsFraming: true).mover == .settings)
+        #expect(tip(.subjectInShadow, light(scene: .people, faces: bigFace, frontCamera: true)).action == "Step into the light")
     }
 }
 

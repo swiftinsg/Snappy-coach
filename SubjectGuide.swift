@@ -18,6 +18,23 @@ nonisolated enum SubjectFinder {
         /// The whole group when there are people, so several people are one subject.
         var subject: CGRect?
         var people: [CGRect]
+        /// Other things that stand out, apart from the people, so tips know something else is in the shot.
+        var others: [CGRect] = []
+    }
+
+    /// Smaller than this share of the frame, a thing that stands out is too small to be meant for the shot.
+    static let otherThingShare = 0.02
+
+    /// Boxes that aren't mostly inside one of the people, and are big enough to be meant for the shot.
+    static func otherThings(_ boxes: [CGRect], apartFrom people: [CGRect]) -> [CGRect] {
+        boxes.filter { box in
+            let area = box.width * box.height
+            guard area >= otherThingShare else { return false }
+            return !people.contains { person in
+                let overlap = box.intersection(person)
+                return !overlap.isNull && overlap.width * overlap.height >= area * 0.5
+            }
+        }
     }
 
     /// The main subject's box, in 0...1 coordinates with the origin at the top left.
@@ -38,9 +55,12 @@ nonisolated enum SubjectFinder {
         // Whole bodies, so people facing away (with no visible face) still count.
         let humans = VNDetectHumanRectanglesRequest()
         humans.upperBodyOnly = false
+        // Every object that stands out, so a statue or a cake beside a person is known to be in the shot.
+        let objectness = VNGenerateObjectnessBasedSaliencyImageRequest()
         saliency.runOnCPUInSimulator()
         humans.runOnCPUInSimulator()
-        guard (try? handler.perform([saliency, humans])) != nil else { return Found(subject: nil, people: []) }
+        objectness.runOnCPUInSimulator()
+        guard (try? handler.perform([saliency, humans, objectness])) != nil else { return Found(subject: nil, people: []) }
 
         let people = (humans.results ?? [])
             .filter { $0.confidence >= 0.5 }
@@ -48,7 +68,8 @@ nonisolated enum SubjectFinder {
         // A group of people is one subject, so the box wraps them all.
         let group = people.reduce(nil as CGRect?) { box, person in box?.union(person) ?? person }
         let salient = saliency.results?.first?.salientObjects?.first.map { topLeft($0.boundingBox) }
-        return Found(subject: group ?? salient, people: people)
+        let objects = (objectness.results?.first?.salientObjects ?? []).map { topLeft($0.boundingBox) }
+        return Found(subject: group ?? salient, people: people, others: otherThings(objects, apartFrom: people))
     }
 
     /// Every object that stands out in the frame, from the top left, for pointing at what the coach names.
