@@ -856,6 +856,67 @@ extension Color {
     static let lightGuide = Color(red: 1, green: 0.72, blue: 0.22)
 }
 
+/// One line on the advice card saying what a mark on the viewfinder means and what to do with it,
+/// in the mark's own colour and shape, so no circle or arrow is left to guess.
+struct ViewfinderHint: Equatable, Identifiable {
+    let text: String
+    let systemImage: String
+    let tint: Color
+    var id: String { text }
+}
+
+extension PhotoFeedback {
+    /// Whether the viewfinder shows a sun or lamp for the light: on the light itself when it's in
+    /// the frame, otherwise at the left, right or top edge it comes from.
+    var showsLightMarker: Bool {
+        lightSpot != nil || [LightSide.left, .right, .top].contains(lightSide)
+    }
+
+    /// A line for each mark on the viewfinder while this tip shows, following the same rules as
+    /// the overlays that draw them. `target` is the dot and circle guide when it's on screen, and
+    /// `showsLevel` is true while the level is in the middle of the frame (Angle & Focus).
+    /// The "Step closer" badge and the tapped subject's outline already say what they are.
+    func viewfinderHints(target: SubjectTarget?, showsLevel: Bool) -> [ViewfinderHint] {
+        var hints: [ViewfinderHint] = []
+        if let target {
+            hints.append(target.isAligned
+                ? ViewfinderHint(text: "Green corners: the subject is in place. Hold still.", systemImage: "viewfinder", tint: .green)
+                : ViewfinderHint(text: "Move the phone until the yellow dot sits in the white circle.", systemImage: "smallcircle.filled.circle", tint: .yellow))
+        }
+        if let highlight {
+            hints.append(ViewfinderHint(text: "The orange box marks the \(highlight.label) the tip means.", systemImage: "square.dashed", tint: .orange))
+        }
+        if !thirdsLines.isEmpty {
+            hints.append(ViewfinderHint(text: "Line it up with the brighter grid line.", systemImage: "squareshape.split.3x3", tint: .white))
+        }
+        if showsLevel {
+            hints.append(ViewfinderHint(text: "Turn the phone until the line in the middle turns green.", systemImage: "level", tint: .green))
+        }
+        // Light & Exposure's amber marks.
+        if showsLightMarker {
+            hints.append(isOutdoorLight
+                ? ViewfinderHint(text: "The sun icon shows where the sunlight comes from.", systemImage: "sun.max.fill", tint: .lightGuide)
+                : ViewfinderHint(text: "The lamp icon shows where the light comes from.", systemImage: "lightbulb.fill", tint: .lightGuide))
+        }
+        if subjectBox != nil {
+            let hasSide = lightSide?.sideWord != nil
+            switch mover {
+            case .photographer:
+                hints.append(hasSide
+                    ? ViewfinderHint(text: "Walk around the subject the way the curved arrow points.", systemImage: "figure.walk", tint: .lightGuide)
+                    : ViewfinderHint(text: "Walk along the dotted circle, keeping the subject in the middle.", systemImage: "figure.walk", tint: .lightGuide))
+            case .subject:
+                hints.append(hasSide
+                    ? ViewfinderHint(text: "Ask the subject to move the way the arrow points.", systemImage: "person.fill", tint: .lightGuide)
+                    : ViewfinderHint(text: "The person badge means the subject moves, not you.", systemImage: "person.fill", tint: .lightGuide))
+            default:
+                break
+            }
+        }
+        return hints
+    }
+}
+
 /// Light & Exposure's signals on the viewfinder, sized like the preview:
 /// - where the light comes from: a sun or lamp at that edge, or on the bright spot itself
 /// - "you move": a curved arrow around the subject, the way to walk

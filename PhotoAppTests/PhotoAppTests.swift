@@ -1437,6 +1437,47 @@ struct LightCoachTests {
         }
     }
 
+    @MainActor
+    @Test func theCardSaysWhatEveryMarkOnScreenMeans() {
+        let subject = CGRect(x: 0.35, y: 0.35, width: 0.3, height: 0.3)
+        func texts(_ f: PhotoFeedback, target: SubjectTarget? = nil, level: Bool = false) -> [String] {
+            f.viewfinderHints(target: target, showsLevel: level).map(\.text)
+        }
+        var walk = PhotoFeedback(good: [], improve: ["Walk around the subject"], why: nil, isGoodEnough: false)
+        walk.mover = .photographer
+        walk.subjectBox = subject
+        // No side known: only the dotted circle is drawn, so the card says what to do with it.
+        #expect(texts(walk) == ["Walk along the dotted circle, keeping the subject in the middle."])
+        // With a side, the circle gets an arrow, and the sun marks the edge the light comes from.
+        walk.lightSide = .left
+        walk.isOutdoorLight = true
+        #expect(texts(walk) == [
+            "The sun icon shows where the sunlight comes from.",
+            "Walk around the subject the way the curved arrow points.",
+        ])
+        // A setting draws nothing, so there's nothing to explain.
+        var setting = PhotoFeedback(good: [], improve: ["Turn on Night Mode"], why: nil, isGoodEnough: false)
+        setting.mover = .settings
+        setting.subjectBox = subject
+        #expect(texts(setting).isEmpty)
+
+        // Composition: the dot and circle, the orange outline and the lit grid line.
+        var framing = PhotoFeedback(good: [], improve: ["Move away from the lamp post"], why: nil, isGoodEnough: false)
+        framing.highlight = CoachHighlight(box: subject, label: "lamp post", isArea: false)
+        framing.thirdsLines = [.bottom]
+        let off = SubjectTarget(subject: subject, target: subject, isAligned: false, aimPoint: CGPoint(x: 0.33, y: 0.33))
+        #expect(texts(framing, target: off) == [
+            "Move the phone until the yellow dot sits in the white circle.",
+            "The orange box marks the lamp post the tip means.",
+            "Line it up with the brighter grid line.",
+        ])
+        let lined = SubjectTarget(subject: subject, target: subject, isAligned: true, aimPoint: CGPoint(x: 0.5, y: 0.5))
+        #expect(texts(PhotoFeedback(good: [], improve: [], why: nil, isGoodEnough: false), target: lined)
+            == ["Green corners: the subject is in place. Hold still."])
+        // Angle & Focus: the level.
+        #expect(texts(setting, level: true) == ["Turn the phone until the line in the middle turns green."])
+    }
+
     @Test func theOtherTipFollowsTheSameLimits() throws {
         let building = light(scene: .city, outdoors: true, backlit: true)
         #expect(CoachIssue.backlitSubject.alternativeAdvice(for: .light, analysis: building) == nil)

@@ -1537,6 +1537,8 @@ struct CoachTipView: View {
 /// Glass card listing what is good and what to improve, or telling the user to take the shot.
 struct CoachFeedbackView: View {
     let feedback: PhotoFeedback
+    /// What the circles, arrows and lines on the viewfinder mean, shown under the tip.
+    var viewfinderHints: [ViewfinderHint] = []
     /// Whether the photography idea behind the advice is shown under it.
     var showsExplanation = true
     /// Whether a tip's one-tap fix can be applied on this camera right now.
@@ -1589,6 +1591,13 @@ struct CoachFeedbackView: View {
                         Text("Then: \(feedback.improve[1])")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.7))
+                    }
+
+                    // What each mark on the viewfinder means and what to do with it, in its own colour.
+                    ForEach(viewfinderHints) { hint in
+                        Label(hint.text, systemImage: hint.systemImage)
+                            .font(.footnote)
+                            .foregroundStyle(hint.tint)
                     }
 
                     // Follow the tip in one tap, or do it yourself.

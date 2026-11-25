@@ -363,6 +363,10 @@ struct AutoRenderingView: View {
                 }
                 CoachFeedbackView(
                     feedback: feedback,
+                    viewfinderHints: feedback.viewfinderHints(
+                        target: showsSubjectBox ? subjectGuide.target : nil,
+                        showsLevel: adviceTopic == .focus
+                    ),
                     showsExplanation: isAdviceExplained,
                     canApply: camera.canApply,
                     onQuickFix: applyQuickFix,
