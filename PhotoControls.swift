@@ -80,7 +80,9 @@ final class PhotoControlsModel {
     /// The advice topic whose bar is showing.
     private(set) var topic: AdviceTopic
     /// Bars the user has customised. Topics missing here use their defaults.
-    private var pinnedByTopic: [AdviceTopic: [PhotoControl]] = [:]
+    private var pinnedByTopic: [AdviceTopic: [PhotoControl]] = [:] {
+        didSet { save() }
+    }
     private(set) var draft: [PhotoControl] = []
     private(set) var isEditing = false
 
@@ -88,9 +90,42 @@ final class PhotoControlsModel {
     /// before iPhone 18 Pro, are left out everywhere.
     let availableControls: [PhotoControl]
 
-    init(topic: AdviceTopic = .composition, unsupported: Set<PhotoControl> = CameraManager.unsupportedControls) {
+    /// Where customised bars are kept between launches; nil keeps them in memory only.
+    private let storage: UserDefaults?
+    private static let storageKey = "pinnedControlsByTopic"
+
+    init(
+        topic: AdviceTopic = .composition,
+        unsupported: Set<PhotoControl> = CameraManager.unsupportedControls,
+        storage: UserDefaults? = .standard
+    ) {
         self.topic = topic
+        self.storage = storage
         availableControls = PhotoControl.allCases.filter { !unsupported.contains($0) }
+        pinnedByTopic = load()
+    }
+
+    /// Reads saved bars, carrying bars from merged topics into the one they joined and
+    /// dropping controls that no longer exist or this device can't offer.
+    private func load() -> [AdviceTopic: [PhotoControl]] {
+        guard let saved = storage?.dictionary(forKey: Self.storageKey) as? [String: [String]] else { return [:] }
+        var bars: [AdviceTopic: [PhotoControl]] = [:]
+        for (rawTopic, rawControls) in saved {
+            guard let topic = AdviceTopic(rawValue: rawTopic) ?? AdviceTopic.stored(rawTopic),
+                  bars[topic] == nil || AdviceTopic(rawValue: rawTopic) != nil else { continue }
+            var controls: [PhotoControl] = []
+            for control in rawControls.compactMap(PhotoControl.init(rawValue:))
+            where availableControls.contains(control) && !controls.contains(control) {
+                controls.append(control)
+            }
+            bars[topic] = Array(controls.prefix(Self.maxPinned))
+        }
+        return bars
+    }
+
+    private func save() {
+        let raw = Dictionary(uniqueKeysWithValues: pinnedByTopic.map { ($0.key.rawValue, $0.value.map(\.rawValue)) })
+        storage?.set(raw, forKey: Self.storageKey)
     }
 
     /// The controls pinned to the top bar for the current topic.
