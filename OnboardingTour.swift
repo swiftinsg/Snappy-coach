@@ -14,13 +14,8 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     case editControls
     case compositionRow
     case explainStyle
-    /// A single tap sets focus and brightness, then a drag changes it. Taught just before the
-    /// double tap that picks the subject, so the two are told apart.
-    case brightness
     case selectObject
     case advice
-    /// Comes after `selectObject`, since the dot and circle only show once there's a subject.
-    case alignSubject
     case shutter
 
     var id: Int { rawValue }
@@ -30,7 +25,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
 
     /// Steps that spotlight nearly the whole viewfinder, leaving no room for the card beside it.
     /// Their card sits on the composition row instead, over the bottom of the viewfinder.
-    var placesCardOnControls: Bool { self == .brightness || self == .selectObject || self == .alignSubject }
+    var placesCardOnControls: Bool { self == .selectObject }
 
     /// Steps whose lowest spotlight is a tall panel with no room beside it.
     /// Their card sits inside the bottom of that panel, leaving its top and the bar above it clear.
@@ -43,9 +38,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
         case .editControls: "Pick your buttons"
         case .compositionRow: "Composition styles"
         case .explainStyle: "Learn a style"
-        case .brightness: "Set the brightness"
         case .selectObject: "Pick your subject"
-        case .alignSubject: "Line it up"
         case .advice: "Your coach"
         case .shutter: "Take your first shot"
         }
@@ -55,25 +48,21 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     var instruction: String {
         switch self {
         case .topicMenu:
-            "This menu sets what the coach teaches you. Tap it to see the modes, and try each one in turn. They're numbered in shooting order: start with the light, then frame the shot."
+            "Pick what the coach teaches. Tap to see the modes."
         case .photoControls:
-            "These are quick camera settings. Press and hold them to choose which ones show."
+            "Quick camera settings. Press and hold to change them."
         case .editControls:
-            "Tap a control below to add it to the bar, or tap − on one in the bar to remove it. The bar holds up to 3. Tap ✓ when you're done."
+            "Tap a control to add it, − to remove it. Up to 3. Tap ✓ when done."
         case .compositionRow:
-            "Each card is a way to frame your photo. Scroll the row to see them all, then tap one to practise it. You can select more than one. The ✨ icon marks the style the coach recommends for this scene."
+            "Ways to frame your photo. Scroll, then tap one or more. ✨ marks the coach's pick."
         case .explainStyle:
-            "Press and hold any card to see what the style means."
-        case .brightness:
-            "Tap anything to set focus and brightness there. Then drag up or down to make the photo brighter or darker."
+            "Press and hold a card to learn the style."
         case .selectObject:
-            "Now double-tap the thing you want to photograph. The coach will follow it and give advice about it."
-        case .alignSubject:
-            "The dot is where your phone points, and the circle is where it should point. Move the phone until the dot is inside the circle."
+            "Double-tap what you want to photograph. The coach will follow it."
         case .advice:
-            "The coach gives live tips as you frame. Tap the card once to see why it's suggesting this, then tap again to tuck it away."
+            "Live tips as you frame. Tap once for why, again to hide it."
         case .shutter:
-            "The ring fills from yellow to green as your shot gets ready. Tap the shutter to take a photo."
+            "The ring turns green when you're ready. Tap to shoot."
         }
     }
 }
@@ -478,7 +467,7 @@ private struct SpotlightMask: Shape {
             stepNumber: 1,
             stepCount: 5,
             feedback: OnboardingFeedback(
-                text: "\(AdviceTopic.light.displayTitle): \(AdviceTopic.light.tourDescription) When the light needs fixing, the card says who moves, amber arrows show the way, and Settings tips have a button that does it for you.",
+                text: "\(AdviceTopic.light.displayTitle): \(AdviceTopic.light.tourDescription) Tips say who moves, arrows show where, and some have a fix button.",
                 isComplete: false,
                 preview: .lightSignals
             ),

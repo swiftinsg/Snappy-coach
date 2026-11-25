@@ -8,6 +8,7 @@
 
 import SwiftUI
 import Photos
+import PhotosUI
 import Observation
 import UniformTypeIdentifiers
 
@@ -193,6 +194,14 @@ final class PhotoGallery {
     private(set) var coverImage: UIImage?
     /// False when the person has denied Photos access.
     private(set) var hasAccess = true
+    /// True when the person allowed only some photos. Photos taken here are still added to that
+    /// selection, but older ones stay hidden until they're picked.
+    private(set) var isLimited = false
+
+    /// How many of the app's photos limited access is hiding right now.
+    var hiddenCount: Int {
+        isLimited ? max(identifiers.count - assets.count, 0) : 0
+    }
 
     /// The size of a thumbnail in the gallery grid, in points.
     static let thumbnailSize = CGSize(width: 140, height: 140)
@@ -255,6 +264,7 @@ final class PhotoGallery {
             status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         }
         hasAccess = status != .denied && status != .restricted
+        isLimited = status == .limited
         guard status == .authorized || status == .limited, !identifiers.isEmpty else {
             assets = []
             coverImage = nil
@@ -268,11 +278,14 @@ final class PhotoGallery {
             return (asset.localIdentifier, asset)
         })
         assets = ids.compactMap { found[$0] }
-        // Forget photos that were deleted outside the app, e.g. in the Photos app.
-        identifiers = assets.map(\.localIdentifier)
-        let kept = Set(identifiers)
-        if records.keys.contains(where: { !kept.contains($0) }) {
-            records = records.filter { kept.contains($0.key) }
+        // Forget photos that were deleted outside the app, e.g. in the Photos app. Only with full
+        // access: with limited access a missing photo may just be hidden, and comes back once picked.
+        if Self.forgetsMissingPhotos(status) {
+            identifiers = assets.map(\.localIdentifier)
+            let kept = Set(identifiers)
+            if records.keys.contains(where: { !kept.contains($0) }) {
+                records = records.filter { kept.contains($0.key) }
+            }
         }
 
         if let newest = assets.first {
@@ -295,6 +308,32 @@ final class PhotoGallery {
                 thumbnails[identifier] = image?.preparingForDisplay() ?? image
             }
         }
+    }
+
+    /// With limited access, shows iOS's picker so the person can let the app see more photos,
+    /// such as ones taken here before access was limited, then reloads.
+    func chooseMorePhotos() async {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        // The gallery is presented full screen, so present over whatever is on top.
+        var presenter = scene?.keyWindow?.rootViewController
+        while let presented = presenter?.presentedViewController {
+            presenter = presented
+        }
+        guard let presenter else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: presenter) { _ in
+                continuation.resume()
+            }
+        }
+        await load()
+    }
+
+    /// Whether a photo the library doesn't return was really deleted. Only full access sees the
+    /// whole library; with limited access it may just be outside the person's selection.
+    static func forgetsMissingPhotos(_ status: PHAuthorizationStatus) -> Bool {
+        status == .authorized
     }
 
     /// Whether the sharp grid thumbnail is already loaded.

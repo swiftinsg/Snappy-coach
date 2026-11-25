@@ -45,6 +45,15 @@ struct GalleryView: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
+                } else if gallery.assets.isEmpty && gallery.hiddenCount > 0 {
+                    // Limited access is hiding every photo taken here; they're kept, just not visible.
+                    ContentUnavailableView {
+                        Label("Photos Hidden", systemImage: "photo.badge.exclamationmark")
+                    } description: {
+                        Text("Photos access is limited, so \(hiddenPhotosText) taken here can't be shown. Choose them, or allow full access.")
+                    } actions: {
+                        limitedAccessButtons
+                    }
                 } else if gallery.assets.isEmpty {
                     // Prompts the first photo: back to the camera, where the coach helps take it.
                     ContentUnavailableView {
@@ -75,9 +84,14 @@ struct GalleryView: View {
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        // Only worth showing once some photos have a mode to filter by.
-                        if !gallery.countsByTopic.isEmpty {
-                            filterChips
+                        VStack(spacing: 0) {
+                            if gallery.hiddenCount > 0 {
+                                limitedAccessBanner
+                            }
+                            // Only worth showing once some photos have a mode to filter by.
+                            if !gallery.countsByTopic.isEmpty {
+                                filterChips
+                            }
                         }
                     }
                 }
@@ -115,6 +129,41 @@ struct GalleryView: View {
             }
         }
         .animation(.snappy, value: filter)
+    }
+
+    private var hiddenPhotosText: String {
+        gallery.hiddenCount == 1 ? "1 photo" : "\(gallery.hiddenCount) photos"
+    }
+
+    /// Says some photos are hidden by limited Photos access, with ways to show them.
+    private var limitedAccessBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Limited Photos access: \(hiddenPhotosText) hidden", systemImage: "photo.badge.exclamationmark")
+                .font(.subheadline.weight(.semibold))
+            HStack {
+                limitedAccessButtons
+            }
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .padding(.horizontal)
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private var limitedAccessButtons: some View {
+        Button("Choose Photos") {
+            Task { await gallery.chooseMorePhotos() }
+        }
+        .buttonStyle(.borderedProminent)
+        Button("Allow Full Access") {
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                openURL(url)
+            }
+        }
+        .buttonStyle(.bordered)
     }
 
     /// "All", then one chip per mode that has photos, each with how many.

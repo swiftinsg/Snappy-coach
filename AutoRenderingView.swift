@@ -50,9 +50,6 @@ struct AutoRenderingView: View {
     @State private var onboardingStep: OnboardingStep?
     /// How the person is doing on the current tour stop.
     @State private var onboardingFeedback: OnboardingFeedback?
-    /// On the topic stop, the mode the tour asks for next. Nil once every mode has been tried,
-    /// when the tour asks to go back to Composition.
-    @State private var tourNextTopic: AdviceTopic? = AdviceTopic.allCases.dropFirst().first
     /// On the composition stop, whether the person has scrolled the row and picked a style yet.
     @State private var tourScrolledStyles = false
     @State private var tourPickedStyle = false
@@ -69,14 +66,15 @@ struct AutoRenderingView: View {
     /// The header inside the open topic menu while the tour is on that stop, since the menu covers the tour card.
     private var topicMenuPrompt: String? {
         guard onboardingStep == .topicMenu else { return nil }
-        if let next = tourNextTopic {
-            return "Each mode coaches a different skill. Select \(next.displayTitle) next."
-        }
-        return "That's every mode. Go back to Composition."
+        return "Pick a mode to try."
     }
 
     /// Moves to the next tour stop whose control is on screen, or ends the tour after the last one.
     private func continueOnboarding(from step: OnboardingStep, available: Set<OnboardingStep>) {
+        // The rest of the tour teaches Composition's controls, so it carries on in that mode.
+        if step == .topicMenu {
+            adviceTopic = .composition
+        }
         if let next = OnboardingStep.allCases.first(where: {
             $0.rawValue > step.rawValue && !$0.isFollowOn && available.contains($0)
         }) {
@@ -98,36 +96,16 @@ struct AutoRenderingView: View {
         onboardingFeedback = OnboardingFeedback(text: text, isComplete: isComplete, preview: preview)
     }
 
-    /// The tour walks through every mode in menu order, then asks to go back to Composition.
-    /// Whichever topic is picked gets explained.
+    /// Picking any mode explains it and finishes the stop. The open menu already describes each one.
     private func noteTopicPicked(_ topic: AdviceTopic) {
         guard onboardingStep == .topicMenu else { return }
         // Light tips only show when the light needs fixing, so the tour shows what to look for.
         let preview: TourPreview? = topic == .light ? .lightSignals : nil
         let signals = topic == .light
-            ? " When the light needs fixing, the card says who moves, amber arrows show the way, and Settings tips have a button that does it for you."
+            ? " Tips say who moves, arrows show where, and some have a fix button."
             : ""
-        let explained = "\(topic.displayTitle): \(topic.tourDescription)\(signals)"
-        guard let next = tourNextTopic else {
-            if topic == .composition {
-                noteOnboarding(.topicMenu, "Back to Composition. \(topic.tourDescription)", isComplete: true)
-            } else {
-                noteOnboarding(.topicMenu, "\(explained) Now open the menu and go back to Composition.", isComplete: false, preview: preview)
-            }
-            return
-        }
-        guard topic == next else {
-            noteOnboarding(.topicMenu, "\(explained) For this tour, open the menu and select \(next.displayTitle).", isComplete: false, preview: preview)
-            return
-        }
-        let modes = AdviceTopic.allCases
-        let after = modes.firstIndex(of: topic).map { modes.index(after: $0) }
-        tourNextTopic = after.flatMap { $0 < modes.endIndex ? modes[$0] : nil }
-        if let upcoming = tourNextTopic {
-            noteOnboarding(.topicMenu, "\(explained) Open the menu again and select \(upcoming.displayTitle).", isComplete: false, preview: preview)
-        } else {
-            noteOnboarding(.topicMenu, "\(explained) That's every mode. Open the menu once more and go back to Composition.", isComplete: false, preview: preview)
-        }
+        let carriesOn = topic == .composition ? "" : " The tour continues in Composition."
+        noteOnboarding(.topicMenu, "\(topic.displayTitle): \(topic.tourDescription)\(signals) Switch anytime.\(carriesOn)", isComplete: true, preview: preview)
     }
 
     /// Opening the controls panel moves the tour on to picking buttons; closing it finishes that stop.
@@ -139,8 +117,8 @@ struct AutoRenderingView: View {
         } else {
             let names = controls.pinned.map(\.title)
             let text = names.isEmpty
-                ? "Your bar is empty now. Press and hold the top right corner anytime to add buttons back."
-                : "Your bar shows \(names.formatted(.list(type: .and))). Press and hold it anytime to change them."
+                ? "Bar is empty. Hold the top right to add buttons."
+                : "Bar shows \(names.formatted(.list(type: .and))). Hold it to change."
             noteOnboarding(.editControls, text, isComplete: true)
         }
     }
@@ -150,11 +128,11 @@ struct AutoRenderingView: View {
         // Opening and closing the panel also change the draft; only the person's own edits count.
         guard controls.isEditing, !old.isEmpty || new != controls.pinned else { return }
         if let added = new.first(where: { !old.contains($0) }) {
-            noteOnboarding(.editControls, "Added \(added.title). It \(added.tourDescription). Tap ✓ to keep it.", isComplete: false)
+            noteOnboarding(.editControls, "Added \(added.title): it \(added.tourDescription). Tap ✓.", isComplete: false)
         } else if let removed = old.first(where: { !new.contains($0) }) {
-            noteOnboarding(.editControls, "Removed \(removed.title). Tap ✓ to keep the change.", isComplete: false)
+            noteOnboarding(.editControls, "Removed \(removed.title). Tap ✓.", isComplete: false)
         } else if old != new {
-            noteOnboarding(.editControls, "Moved them around. Tap ✓ to keep this order.", isComplete: false)
+            noteOnboarding(.editControls, "Reordered. Tap ✓.", isComplete: false)
         }
     }
 
@@ -164,14 +142,14 @@ struct AutoRenderingView: View {
         let after = Set(new.split(separator: ",").compactMap { CompositionGuide(rawValue: String($0)) })
         // The stop is done once the row has been scrolled and a style picked, in either order.
         let next = tourScrolledStyles
-            ? "Tap another to combine styles. The ✨ icon marks the coach's recommendation for this scene."
-            : "Now scroll the row to see the other styles."
+            ? "Tap another to combine."
+            : "Now scroll for more."
         if let added = CompositionGuide.allCases.first(where: { after.contains($0) && !before.contains($0) }) {
             tourPickedStyle = true
-            noteOnboarding(.compositionRow, "\(added.title.keptTogether): \(added.tourDescription) The grid on screen shows you how. \(next)", isComplete: tourScrolledStyles)
+            noteOnboarding(.compositionRow, "\(added.title.keptTogether): \(added.tourDescription) \(next)", isComplete: tourScrolledStyles)
         } else if let removed = CompositionGuide.allCases.first(where: { before.contains($0) && !after.contains($0) }) {
             tourPickedStyle = true
-            noteOnboarding(.compositionRow, "Turned off \(removed.title.keptTogether). You can practise a few styles at once. \(next)", isComplete: tourScrolledStyles)
+            noteOnboarding(.compositionRow, "Turned off \(removed.title.keptTogether). \(next)", isComplete: tourScrolledStyles)
         }
     }
 
@@ -179,14 +157,14 @@ struct AutoRenderingView: View {
         guard onboardingStep == .compositionRow, !tourScrolledStyles else { return }
         tourScrolledStyles = true
         let text = tourPickedStyle
-            ? "That's all \(CompositionGuide.allCases.count) styles. You can select more than one, and the ✨ icon marks the coach's recommendation for this scene."
-            : "That's all \(CompositionGuide.allCases.count) styles. Now tap one to practise it. You can select more than one, and the ✨ icon marks the coach's recommendation."
+            ? "That's all \(CompositionGuide.allCases.count) styles."
+            : "That's all \(CompositionGuide.allCases.count) styles. Tap one to try it."
         noteOnboarding(.compositionRow, text, isComplete: tourPickedStyle)
     }
 
     private func noteZoomChanged() {
         let level = Double(camera.zoomLevel).formatted(.number.precision(.fractionLength(0...1)))
-        noteOnboarding(.compositionRow, "Zoomed to \(level)×. Zooming changes how much of the scene fits in the frame. Now try tapping a style.", isComplete: false)
+        noteOnboarding(.compositionRow, "Zoomed to \(level)×. Now tap a style.", isComplete: false)
     }
 
     /// The composition styles the person is practising. At least one is always selected,
@@ -547,7 +525,6 @@ struct AutoRenderingView: View {
         let point = FrameMapping.framePoint(for: location, frameAspect: aspect, in: size)
         guard (0...1).contains(point.x), (0...1).contains(point.y) else { return false }
         camera.focusAndExpose(at: camera.frameGrabber.sensorPoint(forUpright: point))
-        noteOnboarding(.brightness, "Focus set. Now drag up or down to change the brightness.", isComplete: false)
         return true
     }
 
@@ -579,7 +556,7 @@ struct AutoRenderingView: View {
                     CameraSwitchBlur(isSwitching: camera.isSwitchingCamera)
                 }
                 // The tour spotlights the whole viewfinder, so the tap reaches the object.
-                .onboardingAnchor(.brightness, .selectObject)
+                .onboardingAnchor(.selectObject)
                 // Grids help line the scene up while composing.
                 .overlay {
                     if adviceTopic == .composition {
@@ -602,21 +579,11 @@ struct AutoRenderingView: View {
                         }
                     }
                 }
-                // The tour spotlights the viewfinder for lining up, but only for styles that have a dot and circle.
-                .overlay {
-                    if showsSubjectBox {
-                        Color.clear
-                            .allowsHitTesting(false)
-                            .onboardingAnchor(.alignSubject)
-                    }
-                }
                 // Tap to focus and set the brightness, like the Camera app. Double-tap anything to
                 // get advice about it, and see it outlined while it's followed.
                 .overlay {
                     UprightOverlay(orientation: camera.holdOrientation) {
-                        ViewfinderTapLayer(camera: camera, onFocus: focus, onSelect: selectObject) {
-                            noteOnboarding(.brightness, "Up is brighter, down is darker. The sun beside the box shows how far.", isComplete: true)
-                        }
+                        ViewfinderTapLayer(camera: camera, onFocus: focus, onSelect: selectObject)
                     }
                 }
                 .overlay {
@@ -902,7 +869,6 @@ struct AutoRenderingView: View {
             isAdviceCollapsed = false
             // The walk through the modes starts from Composition, the first one.
             adviceTopic = .composition
-            tourNextTopic = AdviceTopic.allCases.dropFirst().first
             showOnboarding(.topicMenu)
         }
         .task {
@@ -950,10 +916,12 @@ struct AutoRenderingView: View {
             try? await Task.sleep(for: .seconds(6))
             camera.clearProblem()
         }
-        // Coming back to the app: make sure the camera is running again.
+        // Coming back to the app: make sure the camera is running again, and pick up any change
+        // to Photos access made in Settings, e.g. limited switched to full.
         .onChange(of: scenePhase) {
             if scenePhase == .active {
                 camera.resumeIfNeeded()
+                Task { await gallery.load() }
             }
         }
         .task(id: statusMessage) {
@@ -993,7 +961,7 @@ struct AutoRenderingView: View {
                     isShutterBlinking = false
                 }
             }
-            noteOnboarding(.shutter, "Nice shot! It's saved. Tap the thumbnail at the bottom left to see your photos.", isComplete: true)
+            noteOnboarding(.shutter, "Saved! Tap the thumbnail to see it.", isComplete: true)
         }
         // The tour watches what the person does and tells them what it did.
         .onChange(of: controls.isEditing) { noteControlsEditingChanged() }
@@ -1003,29 +971,20 @@ struct AutoRenderingView: View {
         .onChange(of: objectSelection.object?.name) {
             guard let name = objectSelection.object?.name else { return }
             let subject = name == "person" ? "your subject" : "the \(name)"
-            noteOnboarding(.selectObject, "Got it: \(subject). The outline follows it, and the advice is now about it.", isComplete: true)
+            noteOnboarding(.selectObject, "Got it: \(subject). Advice is now about it.", isComplete: true)
         }
         .onChange(of: compositionExplanation) {
             guard let guide = compositionExplanation else { return }
-            noteOnboarding(.explainStyle, "\(guide.title.keptTogether): \(guide.tourDescription) Hold another card to compare, or tap Continue.", isComplete: true)
-        }
-        .onChange(of: subjectGuide.target?.isAligned) {
-            guard onboardingStep == .alignSubject, let target = subjectGuide.target else { return }
-            if target.isAligned {
-                noteOnboarding(.alignSubject, "Lined up! The frame turns green and you'll feel a tick when your subject is in place.", isComplete: true)
-            } else if onboardingFeedback?.isComplete == true {
-                // Drifting off after lining up keeps the step done, but says how to get back.
-                noteOnboarding(.alignSubject, "You drifted off. Follow the arrows to bring the dot back into the circle.", isComplete: true)
-            }
+            noteOnboarding(.explainStyle, "\(guide.title.keptTogether): \(guide.tourDescription)", isComplete: true)
         }
         .onChange(of: isAdviceExplained) {
             guard isAdviceExplained else { return }
             // Not done yet: the tour wants the second tap too, which tucks the card away.
-            noteOnboarding(.advice, "That's the idea behind the tip. Now tap the card again to tuck it away.", isComplete: false)
+            noteOnboarding(.advice, "That's why. Tap again to hide it.", isComplete: false)
         }
         .onChange(of: isAdviceCollapsed) {
             guard isAdviceCollapsed else { return }
-            noteOnboarding(.advice, "Tucked away. Tap the Advice pill to bring the coach back anytime.", isComplete: true)
+            noteOnboarding(.advice, "Hidden. Tap the Advice pill to bring it back.", isComplete: true)
         }
         .animation(.spring, value: controls.isEditing)
         .animation(.snappy, value: controls.draft)

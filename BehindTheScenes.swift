@@ -486,6 +486,9 @@ struct PhotoFeedback: Equatable {
     var quickFix: QuickFix? = nil
     /// The mode to go on to once this one is done, like framing once the light is good.
     var nextMode: AdviceTopic? = nil
+    /// Shown while the model is still judging the first frame, like "Checking the light…", so the
+    /// measured strengths appear at once without the card calling the shot ready too early.
+    var checkingNote: String? = nil
 }
 
 /// Things in the shot besides the people, kept for a few checks after they were last seen, so one
@@ -671,6 +674,9 @@ final class PhotoCoach {
     private static let modelInterval: Duration = .seconds(2)
     /// How often measured-only topics refresh. Measuring is cheap, so it can be quicker.
     private static let measureInterval: Duration = .seconds(1)
+    /// How soon to try again while there's no card yet, like when the camera hasn't sent its first
+    /// frame: waiting the full interval would leave the card empty for seconds.
+    private static let firstCardRetry: Duration = .milliseconds(200)
     /// How long the model gets to judge a frame before the request is cancelled.
     private static let modelTimeout: Duration = .seconds(8)
     /// Failed model requests in a row after which the coach goes on with the measurements alone.
@@ -773,7 +779,8 @@ final class PhotoCoach {
         var modelFailures = 0
         while !Task.isCancelled {
             if !isFirstPass {
-                try? await Task.sleep(for: usesModel ? Self.modelInterval : Self.measureInterval)
+                let interval = usesModel ? Self.modelInterval : Self.measureInterval
+                try? await Task.sleep(for: feedback == nil ? Self.firstCardRetry : interval)
             }
             isFirstPass = false
             guard !Task.isCancelled else { continue }
@@ -938,6 +945,13 @@ final class PhotoCoach {
                         styles: styles,
                         analysis: analysis,
                         keepsPlacement: keepsPlacement
+                    )
+                } else if feedback == nil {
+                    // Nothing measured to fix: show what's already good while the model looks,
+                    // but don't call the shot ready until it has.
+                    feedback = PhotoFeedback(
+                        good: good, improve: [], why: nil, isGoodEnough: false,
+                        checkingNote: topic == .light ? "Checking the light…" : "Checking the shot…"
                     )
                 }
                 judgement = await judge(
@@ -1120,7 +1134,8 @@ final class PhotoCoach {
             candidateCount = 1
         }
         // A first tip shows at once, but "looks good" must be seen twice, so it isn't taken back.
-        let isFirstVerdict = feedback == nil && top != nil
+        // The "Checking…" card isn't a verdict yet, so it doesn't count as one.
+        let isFirstVerdict = (feedback == nil || feedback?.checkingNote != nil) && top != nil
         guard candidateCount >= 2 || isFirstVerdict else { return }
 
         let isNewSection = shownIssue != top
@@ -1557,6 +1572,18 @@ struct CoachFeedbackView: View {
 
             if !feedback.good.isEmpty {
                 section(title: "Good", items: feedback.good, systemImage: "checkmark", tint: .green)
+            }
+
+            if let checking = feedback.checkingNote {
+                Label {
+                    Text(checking)
+                } icon: {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
             }
 
             // One thing to do at a time, so a beginner isn't juggling instructions.

@@ -44,8 +44,6 @@ struct ViewfinderTapLayer: View {
     let onFocus: (CGPoint, CGSize) -> Bool
     /// Picks the object under a double tap.
     let onSelect: (CGPoint, CGSize) -> Void
-    /// A brightness drag finished, for the tour.
-    var onBrightnessDragEnded: () -> Void = {}
 
     /// Where the last single tap landed, while its box is showing.
     @State private var mark: CGPoint?
@@ -98,7 +96,6 @@ struct ViewfinderTapLayer: View {
     /// Up is brighter, down is darker, within the camera's ±2 stops. `translation` is nil when the drag ends.
     private func dragBrightness(_ translation: CGFloat?) {
         guard let translation else {
-            if biasAtDragStart != nil { onBrightnessDragEnded() }
             biasAtDragStart = nil
             markActivity += 1
             return

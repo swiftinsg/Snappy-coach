@@ -11,6 +11,7 @@ import ImageIO
 import FoundationModels
 import SwiftUI
 import UIKit
+import Photos
 @testable import Grp_6pm_Photo_App
 
 /// A frame with sensible defaults, so each test only states what matters to it.
@@ -1172,6 +1173,14 @@ extension GalleryStoryTests {
         let light = GallerySection.grouped(photos, topicOf: { filed[$0] }, topicsOf: { all[$0] ?? [] }, filter: .light)
         #expect(light.first?.items == ["both"])
     }
+
+    /// With limited access a photo outside the selection is hidden, not deleted, so its story is kept.
+    @Test func onlyFullAccessForgetsMissingPhotos() {
+        #expect(PhotoGallery.forgetsMissingPhotos(.authorized))
+        #expect(!PhotoGallery.forgetsMissingPhotos(.limited))
+        #expect(!PhotoGallery.forgetsMissingPhotos(.denied))
+        #expect(!PhotoGallery.forgetsMissingPhotos(.notDetermined))
+    }
 }
 
 /// Names on screen wrap whole, never as "Ex-posure".
@@ -1663,15 +1672,19 @@ struct LightCoachTests {
     }
 }
 
-/// The first-launch tour teaches tap and drag before the double tap, and shows the light signals.
+/// The first-launch tour keeps to the essential stops, and shows the light signals.
 struct TourTests {
-    @Test func brightnessIsTaughtRightBeforePickingTheSubject() throws {
-        let steps = OnboardingStep.allCases
-        let brightness = try #require(steps.firstIndex(of: .brightness))
-        #expect(steps[brightness + 1] == .selectObject)
-        #expect(OnboardingStep.brightness.placesCardOnControls)
-        #expect(OnboardingStep.brightness.instruction.contains("drag up or down"))
-        #expect(OnboardingStep.selectObject.instruction.hasPrefix("Now double-tap"))
+    @Test func pickingTheSubjectIsTaughtWithoutABrightnessStop() {
+        #expect(OnboardingStep.selectObject.placesCardOnControls)
+        #expect(OnboardingStep.selectObject.instruction.hasPrefix("Double-tap"))
+    }
+
+    @Test func theTourGoesStraightFromThePressAndHoldToTheAdviceWithoutLiningUp() {
+        let expected: [OnboardingStep] = [
+            .topicMenu, .photoControls, .editControls, .compositionRow, .explainStyle,
+            .selectObject, .advice, .shutter
+        ]
+        #expect(OnboardingStep.allCases == expected)
     }
 
     @Test func theLightPreviewTravelsWithTheFeedback() {
