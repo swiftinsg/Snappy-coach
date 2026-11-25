@@ -20,6 +20,12 @@
     { "path": "PhotoControlsSheet.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "CameraSettings.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     {
+      "path": "MyApp.swift",
+      "target-membership": [
+        "Snappy Coach/compile-sources",
+        "PhotoAppTests/compile-sources",
+      ],
+    }, {
       "path": "Snappy Coach Final.icon",
       "target-membership": [
         "Snappy Coach/resources",
@@ -34,12 +40,6 @@
           "target-membership": [
             "Snappy Coach/resources",
             "PhotoAppTests/resources",
-          ],
-        }, {
-          "path": "MyApp.swift",
-          "target-membership": [
-            "Snappy Coach/compile-sources",
-            "PhotoAppTests/compile-sources",
           ],
         }, {
           "path": "Assets.xcassets",
