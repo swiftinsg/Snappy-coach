@@ -12,7 +12,7 @@ import CoreGraphics
 import Foundation
 import FoundationModels
 import Testing
-@testable import Grp_6pm_Photo_App
+@testable import Snappy_Coach
 
 /// A scene drawn in code, how it's set up, and what Light & Exposure should make of it.
 struct SyntheticScene: CustomTestStringConvertible, Sendable {

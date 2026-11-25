@@ -12,7 +12,7 @@ import FoundationModels
 import SwiftUI
 import UIKit
 import Photos
-@testable import Grp_6pm_Photo_App
+@testable import Snappy_Coach
 
 /// A frame with sensible defaults, so each test only states what matters to it.
 private func scene(
