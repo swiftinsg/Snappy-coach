@@ -1,0 +1,181 @@
+{
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.58596,0.58472,0.96783,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.96783,0.12138,0.06358,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "system-dark"
+            }
+          ],
+          "glass" : false,
+          "image-name" : "Vector-1.svg",
+          "name" : "Vector-1",
+          "position" : {
+            "scale" : 1.05,
+            "translation-in-points" : [
+              242,
+              -120.5
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.89062,0.78906,0.93896,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : "system-light"
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "system-light"
+            }
+          ],
+          "glass" : false,
+          "image-name" : "Ellipse 4.svg",
+          "name" : "Ellipse 4",
+          "position" : {
+            "scale" : 0.72,
+            "translation-in-points" : [
+              0,
+              15
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : "system-dark"
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "automatic"
+            }
+          ],
+          "glass" : false,
+          "image-name" : "Ellipse 3.svg",
+          "name" : "Ellipse 3",
+          "position" : {
+            "scale" : 0.75,
+            "translation-in-points" : [
+              0,
+              14
+            ]
+          }
+        },
+        {
+          "blend-mode-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.91352,0.91779,0.96783,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "automatic"
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Vector 2.svg",
+          "name" : "Vector 2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Vector-5.svg",
+          "name" : "Vector-5",
+          "position" : {
+            "scale" : 1.08,
+            "translation-in-points" : [
+              242,
+              -263.84
+            ]
+          }
+        },
+        {
+          "hidden" : false,
+          "image-name" : "Vector-4.svg",
+          "name" : "Vector-4",
+          "position" : {
+            "scale" : 0.92,
+            "translation-in-points" : [
+              421,
+              -224.41999999999996
+            ]
+          }
+        },
+        {
+          "image-name" : "Vector-3.svg",
+          "name" : "Vector-3",
+          "position" : {
+            "scale" : 1.1,
+            "translation-in-points" : [
+              329,
+              -341.15
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : "automatic"
+            }
+          ],
+          "hidden" : true,
+          "image-name" : "Vector-2.svg",
+          "name" : "Vector-2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              18
+            ]
+          }
+        }
+      ],
+      "name" : "App Icon Template (Community)",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

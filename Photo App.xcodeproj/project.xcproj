@@ -15,11 +15,41 @@
     { "path": "Grp-6pm-Photo-App-Info.plist" },
     { "path": "AutoRenderingView.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "PreviewView.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
-    { "kind": "folder", "path": "MyApp", "target-membership": [ "Snappy Coach" ] },
     { "path": "PhotoControls.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "PhotoControlsBar.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "PhotoControlsSheet.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "CameraSettings.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
+    {
+      "path": "Snappy Coach Final.icon",
+      "target-membership": [
+        "Snappy Coach/resources",
+        "PhotoAppTests/resources",
+      ],
+    }, {
+      "kind": "group",
+      "path": "MyApp",
+      "children": [
+        {
+          "path": "PrivacyInfo.xcprivacy",
+          "target-membership": [
+            "Snappy Coach/resources",
+            "PhotoAppTests/resources",
+          ],
+        }, {
+          "path": "MyApp.swift",
+          "target-membership": [
+            "Snappy Coach/compile-sources",
+            "PhotoAppTests/compile-sources",
+          ],
+        }, {
+          "path": "Assets.xcassets",
+          "target-membership": [
+            "Snappy Coach/resources",
+            "PhotoAppTests/resources",
+          ],
+        },
+      ],
+    },
     { "path": "Histogram.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "CameraAdjustmentSlider.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
     { "path": "PhotoCaptureProcessor.swift", "target-membership": [ "Snappy Coach/compile-sources" ] },
@@ -56,7 +86,7 @@
         "resources",
       ],
       "build-settings": {
-        "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
+        "ASSETCATALOG_COMPILER_APPICON_NAME": "Snappy Coach Final",
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
         "DEVELOPMENT_TEAM": "7WND928CSD",
