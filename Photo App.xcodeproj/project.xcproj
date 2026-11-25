@@ -68,7 +68,7 @@
         "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.photography",
         "INFOPLIST_KEY_NSCameraUsageDescription": "Snappy Coach uses your camera to show the viewfinder, take photos, and give you live tips on composition, lighting and focus while you shoot.",
         "INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription": "Snappy Coach saves the photos you take to your photo library.",
-        "INFOPLIST_KEY_NSPhotoLibraryUsageDescription": "Snappy Coach shows the photos you take in this app in its gallery, and let you share or delete them.",
+        "INFOPLIST_KEY_NSPhotoLibraryUsageDescription": "Snappy Coach shows the photos you take in this app in its gallery, and lets you share or delete them.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]": "YES",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]": "YES",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]": "YES",
