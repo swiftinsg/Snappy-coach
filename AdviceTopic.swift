@@ -8,14 +8,19 @@ import SwiftUI
 /// What the live advice focuses on. Chosen from the dropdown in the top bar.
 enum AdviceTopic: String, CaseIterable, Identifiable {
     /// In the order to work in: where to stand for the light, then the framing, then the details.
-    case light, composition, anglePerspective, focus
+    /// `focus` is Angle & Focus: holding the phone level and steady, and getting the subject sharp.
+    case light, composition, focus
 
     var id: String { rawValue }
 
-    /// A topic saved by an earlier version. Light and Exposure became one mode, so old
-    /// Exposure photos and settings carry over to it.
+    /// A topic saved by an earlier version. Light and Exposure became one mode, and so did
+    /// Angle & Perspective and Focus, so old photos and settings carry over to the merged mode.
     nonisolated static func stored(_ rawValue: String) -> AdviceTopic? {
-        rawValue == "exposure" ? .light : AdviceTopic(rawValue: rawValue)
+        switch rawValue {
+        case "exposure": .light
+        case "anglePerspective": .focus
+        default: AdviceTopic(rawValue: rawValue)
+        }
     }
 
     /// Where it comes in the shooting order, shown beside it in the menu.
@@ -24,14 +29,13 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .composition: "Composition"
-        case .anglePerspective: "Angle & Perspective"
-        case .focus: "Focus"
+        case .focus: "Angle & Focus"
         case .light: "Light & Exposure"
         }
     }
 
-    /// The name as shown on screen: never split across lines, so "Angle & Perspective" moves to the
-    /// next line whole rather than breaking as "Per-spective". `title` stays plain for the model.
+    /// The name as shown on screen: never split across lines, so "Light & Exposure" moves to the
+    /// next line whole rather than breaking as "Ex-posure". `title` stays plain for the model.
     var displayTitle: String { title.keptTogether }
 
     /// The name in the mode menu, with its step number: "1. Light & Exposure". The number stays
@@ -42,7 +46,7 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     /// Shorter name for the dropdown button, so it fits beside the camera controls.
     var shortTitle: String {
         switch self {
-        case .anglePerspective: "Angle"
+        case .focus: "Focus"
         case .light: "Light"
         default: title
         }
@@ -51,7 +55,6 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .composition: "square.grid.3x3"
-        case .anglePerspective: "angle"
         case .focus: "dot.viewfinder"
         case .light: "sun.max"
         }
@@ -62,7 +65,6 @@ enum AdviceTopic: String, CaseIterable, Identifiable {
     var defaultControls: [PhotoControl] {
         switch self {
         case .composition: [.aspect, .timer, .live]
-        case .anglePerspective: [.aspect, .timer, .live]
         case .focus: [.focus, .depth, .lensAperture]
         case .light: [.exposure, .flash, .nightMode]
         }

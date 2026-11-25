@@ -148,8 +148,7 @@ extension AdviceTopic {
     var tourDescription: String {
         switch self {
         case .composition: "Pick a style, then move the phone until the dot is in the circle."
-        case .anglePerspective: "A level helps you hold the camera straight and find better angles."
-        case .focus: "The coach helps keep your subject sharp."
+        case .focus: "A level helps you hold the camera straight, and the coach helps keep your subject sharp."
         case .light: "The coach helps you find good light and get the brightness right."
         }
     }

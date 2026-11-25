@@ -224,13 +224,15 @@ extension SyntheticScene {
                 r.exposureBias = -1
                 return r
             }(),
+            // A city view can't step into shade, so harsh light on it isn't raised.
             outdoors: true, sceneType: .city,
-            expected: [.harshContrast]
+            notExpected: [.harshContrast]
         ),
     ]
 }
 
-@MainActor
+/// Not on the main actor: the scene checks run in parallel with the other suites. Only the model
+/// report needs the main actor, and it's time-limited so it can never hold up a test run.
 struct LightScenesTests {
     /// Draws and measures a scene with the app's code, then sets the facts drawings can't show.
     static func measure(_ scene: SyntheticScene) async -> (image: CGImage, analysis: SceneAnalysis)? {
@@ -247,22 +249,26 @@ struct LightScenesTests {
         return (image, analysis)
     }
 
-    @Test(arguments: SyntheticScene.all)
-    func measuredProblemsMatchEachScene(_ scene: SyntheticScene) async throws {
-        let measured = try #require(await Self.measure(scene))
-        let a = measured.analysis
-        let issues = Set(CoachRules.issues(for: .light, in: a))
-        for issue in scene.expected {
-            #expect(issues.contains(issue), "\(scene.name): expected \(issue), found \(issues.map(\.rawValue).sorted())")
-        }
-        for issue in scene.notExpected {
-            #expect(!issues.contains(issue), "\(scene.name): didn't expect \(issue)")
-        }
-        if scene.needsLightSpot {
-            #expect(a.lightSpot != nil, "\(scene.name): no light source found, so the scene doesn't test what it means to")
+    /// One test over every scene, so running it always checks all of them; failures name the scene.
+    @Test func everySceneRaisesTheRightProblems() async throws {
+        for scene in SyntheticScene.all {
+            let measured = try #require(await Self.measure(scene), "\(scene.name): couldn't draw or measure")
+            let a = measured.analysis
+            let issues = Set(CoachRules.issues(for: .light, in: a))
+            for issue in scene.expected {
+                #expect(issues.contains(issue), "\(scene.name): expected \(issue), found \(issues.map(\.rawValue).sorted())")
+            }
+            for issue in scene.notExpected {
+                #expect(!issues.contains(issue), "\(scene.name): didn't expect \(issue)")
+            }
+            if scene.needsLightSpot {
+                #expect(a.lightSpot != nil, "\(scene.name): no light source found, so the scene doesn't test what it means to")
+            }
         }
     }
 
+    /// On the main actor because tips are worded there.
+    @MainActor
     @Test func rainAndCityScenesGetTheRightTips() async throws {
         // Rain: whatever the model says, it can't be hard shadows, patches of sun or glare.
         let rain = try #require(await Self.measure(SyntheticScene.all[9])).analysis
@@ -270,23 +276,26 @@ struct LightScenesTests {
         for issue: CoachIssue in [.hardShadowsOnSubject, .patchyLight, .sunGlare] {
             #expect(!CoachRules.believes(issue, detail: nil, analysis: rain))
         }
-        // A harsh city view can't move: wait for softer light, and shoot RAW meanwhile.
+        // A harsh city view can't move, and only the weather could soften it, so it isn't raised.
         let city = try #require(await Self.measure(SyntheticScene.all[13])).analysis
-        let advice = CoachIssue.harshContrast.advice(for: .light, analysis: city)
-        #expect(advice.mover == .wait)
-        #expect(advice.quickFix == .raw)
+        #expect(!CoachRules.issues(for: .light, in: city).contains(.harshContrast))
     }
 
     /// Runs every scene through the measurements, the model and the tip, and prints a table.
     /// Model answers on drawings aren't a fair pass or fail, so this reports rather than checks.
-    @Test(.enabled(if: SystemLanguageModel.default.isAvailable))
+    /// 14 model calls take a minute or two, so it has a time limit.
+    @MainActor
+    @Test(.enabled(if: SystemLanguageModel.default.isAvailable), .timeLimit(.minutes(4)))
     func modelReport() async throws {
         let coach = PhotoCoach()
-        var rows = ["scene | measured | app asks model? | model says | believed? | tip shown | who moves | one-tap"]
+        var rows = ["scene | measured | app asks model? | model says | believed? | tip shown | who moves | one-tap | seconds"]
         for scene in SyntheticScene.all {
+            let started = ContinuousClock.now
             let measured = try #require(await Self.measure(scene))
             let a = measured.analysis
-            var issues = CoachRules.issues(for: .light, in: a)
+            // What the camera measured, kept apart from the list the model's problem may lead.
+            let measuredIssues = CoachRules.issues(for: .light, in: a)
+            var issues = measuredIssues
             let blocked = issues.contains { $0.blocksModel(in: .light) }
             let handled = [
                 CoachRules.handledNote(issues: issues, keepsPlacement: false, placement: CompositionGuide.guidePlacement(for: [])),
@@ -308,13 +317,14 @@ struct LightScenesTests {
             let advice = top?.advice(for: .light, analysis: a)
             rows.append([
                 scene.name,
-                issues.isEmpty ? "none" : CoachRules.issues(for: .light, in: a).map(\.rawValue).joined(separator: ", "),
+                measuredIssues.isEmpty ? "none" : measuredIssues.map(\.rawValue).joined(separator: ", "),
                 blocked ? "no (blocked)" : "yes",
                 said,
                 believed,
                 advice?.action ?? "Looks good",
                 advice?.mover?.label ?? "-",
                 advice?.quickFix?.title ?? "-",
+                (ContinuousClock.now - started).formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 1))),
             ].joined(separator: " | "))
         }
         print("\n=== Light & Exposure scene report ===\n" + rows.joined(separator: "\n") + "\n=== end ===\n")

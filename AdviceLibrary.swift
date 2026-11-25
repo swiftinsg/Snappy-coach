@@ -70,15 +70,12 @@ nonisolated struct Advice: Equatable, Sendable {
 /// Who a light tip asks to act.
 nonisolated enum Mover: String, Sendable, Equatable {
     case photographer, subject, settings
-    /// Nobody can move: a building or a view stays put, so the light has to change instead.
-    case wait
 
     var label: String {
         switch self {
         case .photographer: "You move"
         case .subject: "Subject moves"
         case .settings: "Settings"
-        case .wait: "Wait for the light"
         }
     }
 
@@ -87,7 +84,6 @@ nonisolated enum Mover: String, Sendable, Equatable {
         case .photographer: "figure.walk"
         case .subject: "person.fill"
         case .settings: "slider.horizontal.3"
-        case .wait: "clock"
         }
     }
 }
@@ -370,8 +366,9 @@ extension CoachIssue {
     /// Light tips that need someone to move, worked out so nobody is asked to do what they can't and
     /// what's being photographed stays in the shot: a setting balances the light when the scenery
     /// behind a person matters, the photographer walks around a subject with nothing important behind
-    /// it, and a building or view gets a setting or waits for softer light, since neither it nor the
-    /// sun can move. A side is only named when the measurements agree on it.
+    /// it, and a building or view gets a setting or a small turn, since neither it nor the sun can
+    /// move. Light that only the weather or the time of day could change isn't raised at all (see
+    /// `CoachRules.canFix`). A side is only named when the measurements agree on it.
     /// With `keepsFraming`, the framing is already lined up, so the camera never moves.
     /// Nil when the usual wording already fits.
     func lightAdvice(_ a: SceneAnalysis, keepsFraming: Bool) -> Advice? {
@@ -445,11 +442,6 @@ extension CoachIssue {
                     ? tip(.subject, "Step into shade, keeping the view behind you")
                     : tip(.subject, "Step into shade, or face a window")
             }
-            // A building or a view can't go into the shade: only softer light helps, and RAW keeps
-            // more detail in bright and dark areas meanwhile.
-            if !a.canMoveSubject {
-                return tip(.wait, "Come back in the morning or evening for softer light", fix: self == .harshContrast ? .raw : nil)
-            }
             return nil
 
         case .patchyLight:
@@ -457,9 +449,6 @@ extension CoachIssue {
                 return a.sceneryMatters
                     ? tip(.subject, "Step fully into shade, keeping the view behind you")
                     : tip(.subject, "Step fully into the shade")
-            }
-            if !a.canMoveSubject {
-                return tip(.wait, "Wait for a cloud to even out the light")
             }
             return nil
 
@@ -470,11 +459,8 @@ extension CoachIssue {
                     ? tip(.subject, "Turn your head slightly toward the light")
                     : tip(.subject, "Turn so the light comes from your side")
             }
-            // A view only gets side light when the sun moves. Elsewhere, the usual tip has the
-            // photographer walk round; with the framing kept, the subject turns instead.
-            if a.isFixedScene || (keepsFraming && !a.canMoveSubject) {
-                return tip(.wait, "Come back when the sun is low, to one side")
-            }
+            // The usual tip has the photographer walk round; with the framing kept, the subject
+            // turns instead. A view, which only gets side light when the sun moves, never gets here.
             // When something else is in the shot, the camera stays and the person turns instead.
             if keepsFraming || (person && a.sceneryMatters) {
                 return person
@@ -1000,8 +986,9 @@ nonisolated enum CoachRules {
     /// the space above the head is part of the scene, not "too much headroom".
     static let portraitFaceHeight = 0.06
     /// Below this, a face's darker half is in deep shadow next to its lit half (see
-    /// `SceneAnalysis.faceShadowRatio`). Soft side light stays well above it.
-    static let faceShadowLimit = 0.45
+    /// `SceneAnalysis.faceShadowRatio`): about three stops darker, where an eye gets lost.
+    /// Window side light, the classic portrait look, usually measures 0.4 to 0.6 and stays above it.
+    static let faceShadowLimit = 0.35
 
     /// Below this share of edges (see `SceneAnalysis.backgroundBusyness`) the background is
     /// measurably plain, so the model's "cluttered background" isn't believed.
@@ -1180,14 +1167,20 @@ nonisolated enum CoachRules {
         if issue == .sunGlare {
             return analysis.isOutdoors && !analysis.isOutdoorsAtNight
         }
+        // Side light measured on a face, with detail kept on the shadow side, is the look to learn,
+        // not hard shadows. The card praises it as "Soft side light", so the two would disagree.
+        if issue == .hardShadowsOnSubject, analysis.hasGoodSideLight {
+            return false
+        }
         // Light on the subject needs a subject to fall on.
         // and big enough in the frame for the light on it to show.
         if [.hardShadowsOnSubject, .flatLight, .patchyLight].contains(issue), analysis.faces.isEmpty,
            (analysis.subjectShare ?? 0) < tinySubjectShare {
             return false
         }
-        // Light that's measured coming from one side isn't flat.
-        if issue == .flatLight, analysis.faceLitSide != nil || analysis.lightSide?.sideWord != nil {
+        // Light that's measured coming from one side isn't flat, and neither is light from a lamp,
+        // window or the sun in the shot: flat light comes from straight behind the camera.
+        if issue == .flatLight, analysis.faceLitSide != nil || analysis.lightSide?.sideWord != nil || analysis.lightSpot != nil {
             return false
         }
         // A subject with almost no light and dark in it can't have hard shadows or patches on it.
@@ -1232,8 +1225,8 @@ nonisolated enum CoachRules {
 
     /// Topics where the model adds judgement the measurements can't give. Composition looks beyond
     /// the subject, at the background and other objects. Light adds the quality of the light, like
-    /// hard shadows or patchy sun, which brightness can't show. Exposure, Focus and Angle &
-    /// Perspective are exact measurements, so they stay measured only.
+    /// hard shadows or patchy sun, which brightness can't show. Angle & Focus
+    /// is exact measurements, so it stays measured only.
     static func usesModel(_ topic: AdviceTopic) -> Bool {
         topic == .composition || topic == .light
     }
@@ -1244,7 +1237,7 @@ nonisolated enum CoachRules {
         guard !unusedModelIssues.contains(issue) else { return false }
         switch topic {
         case .composition:
-            // Composition is about framing; rotating or angling the phone belongs to Angle & Perspective,
+            // Composition is about framing; rotating or angling the phone belongs to Angle & Focus,
             // and the quality of the light to Light.
             guard ![.linesNotStraight, .notOverhead].contains(issue), !VisualIssue.lightIssues.contains(issue) else { return false }
             // Style issues only count when one of their styles is being practised.
@@ -1255,6 +1248,21 @@ nonisolated enum CoachRules {
             return VisualIssue.lightIssues.contains(issue)
         default:
             return false
+        }
+    }
+
+    /// Whether someone can fix this light problem now. A building, a view or a plant can't step into
+    /// shade, and a view can't turn to the sun, so hard, patchy or flat light on them would only be
+    /// "wait for the light". Those aren't raised; the coach only asks for what can be done.
+    /// With `keepsFraming`, the camera can't walk round either.
+    static func canFix(_ issue: CoachIssue, in a: SceneAnalysis, keepsFraming: Bool = false) -> Bool {
+        switch issue {
+        case .harshContrast, .hardShadowsOnSubject, .patchyLight:
+            a.canMoveSubject
+        case .flatLight:
+            a.readings.isFrontCamera || !(a.isFixedScene || (keepsFraming && !a.canMoveSubject))
+        default:
+            true
         }
     }
 
@@ -1320,13 +1328,25 @@ nonisolated enum CoachRules {
                !onlyALamp, !skyBehindPeople {
                 found.append(.highlightsClipped)
             }
-            if a.highlightClip > 0.04, a.shadowClip > 0.1, !found.contains(.highlightsClipped), !onlyALamp { found.append(.harshContrast) }
+            if a.highlightClip > 0.04, a.shadowClip > 0.1, !found.contains(.highlightsClipped), !onlyALamp,
+               canFix(.harshContrast, in: a) {
+                found.append(.harshContrast)
+            }
             // Side light gives a face shape, but one half lost in deep shadow hides an eye.
             if let ratio = a.faceShadowRatio, ratio < faceShadowLimit, !a.isBacklit { found.append(.faceHalfInShadow) }
             if iso > 800, !found.contains(.tooDark), !addsLight { found.append(.highISO) }
         case .focus:
-            // Shake blurs everything, so fix it before blaming the focus.
+            // Shake blurs everything and throws off the level, so fix it first.
             if let shake = a.shake, shake >= shakeThreshold { found.append(.cameraShaking) }
+            // Then the angle, because moving the phone changes what's in focus.
+            if isTilted(a.tilt, alreadyShown: tiltShown) { found.append(.phoneTilted) }
+            if let pitch = a.pitch {
+                // Wide limits, so holding the phone near one doesn't flick the tip on and off.
+                if pitch < -35, a.personCount > 0 { found.append(.shootingDown) }
+                // Tilting up only bends straight lines like walls and buildings. Shooting up at
+                // the sky, a tree or a bird is fine.
+                if pitch > 25, a.scenes.contains(.city) { found.append(.pointingUp) }
+            }
             // A plain subject has little detail even when it's in focus, so it can't be called soft.
             if a.subjectSharpness < softThreshold, !a.subjectIsFlat { found.append(.subjectSoft) }
             // A slow shutter is only a problem while the phone moves. The tip is to hold still,
@@ -1335,15 +1355,6 @@ nonisolated enum CoachRules {
             if let seconds = a.readings.exposureSeconds, seconds > 1.0 / 30,
                !found.contains(.cameraShaking), !isSteady {
                 found.append(.slowShutter)
-            }
-        case .anglePerspective:
-            if isTilted(a.tilt, alreadyShown: tiltShown) { found.append(.phoneTilted) }
-            if let pitch = a.pitch {
-                // Wide limits, so holding the phone near one doesn't flick the tip on and off.
-                if pitch < -35, a.personCount > 0 { found.append(.shootingDown) }
-                // Tilting up only bends straight lines like walls and buildings. Shooting up at
-                // the sky, a tree or a bird is fine.
-                if pitch > 25, a.scenes.contains(.city) { found.append(.pointingUp) }
             }
         case .composition:
             // Everyone counts: any head at the top edge is cut off, and headroom is
@@ -1391,7 +1402,6 @@ nonisolated enum CoachRules {
         case .focus:
             if a.subjectSharpness >= softThreshold { good.append("Subject is sharp") }
             if let shake = a.shake, shake < shakeThreshold / 2 { good.append("Steady hands") }
-        case .anglePerspective:
             if a.tilt != nil, !problems.contains(.phoneTilted) { good.append("Phone is level") }
         case .composition:
             // Other framing strengths come from the model and the target guide, not from how the phone is held.

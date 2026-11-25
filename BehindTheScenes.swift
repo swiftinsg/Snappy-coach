@@ -922,6 +922,24 @@ final class PhotoCoach {
             // The light problem the model found this pass, which its own praise mustn't contradict.
             var modelLightIssue: CoachIssue?
             if usesModel, !issues.contains(where: { $0.blocksModel(in: topic) }) {
+                // What the camera measured doesn't need the model, so the first card shows it straight
+                // away instead of waiting a second or two for the model. If the model then finds
+                // something bigger, it takes over as usual. Only for the first card, so one pass never
+                // counts twice toward changing a card that's already showing.
+                if feedback == nil, !issues.isEmpty {
+                    let measured = memory.reordered(issues, keeping: shownIssue)
+                    publish(
+                        top: measured.first,
+                        next: measured.dropFirst().first,
+                        remaining: measured.count,
+                        good: good,
+                        details: [:],
+                        topic: topic,
+                        styles: styles,
+                        analysis: analysis,
+                        keepsPlacement: keepsPlacement
+                    )
+                }
                 judgement = await judge(
                     frame, topic: topic, styles: styles, analysis: analysis,
                     selectedName: picked?.name, handled: handled.isEmpty ? nil : handled
@@ -943,6 +961,8 @@ final class PhotoCoach {
                    issue != .subjectCutOff || analysis.subjectTouchesEdge,
                    // A plain wall or glass doors aren't clutter, whatever the model says.
                    CoachRules.believes(issue, detail: detail, analysis: analysis),
+                   // Light nobody can change now, like flat light on a view, isn't raised.
+                   CoachRules.canFix(issue, in: analysis, keepsFraming: keepsPlacement),
                    // A tip that can only be fixed by moving the subject off its spot loses to the guide.
                    !(keepsPlacement && issue.undoesPlacement(CompositionGuide.guidePlacement(for: styles))) {
                     // What the model saw is more specific than a minor measurement, so it leads.
@@ -1213,15 +1233,13 @@ final class PhotoCoach {
     }
 
     /// Eye-catching objects in the frame. Runs off the main thread because Vision takes a moment.
-    @concurrent
     nonisolated private static func salientObjects(in frame: CGImage) async -> [CGRect] {
-        SubjectFinder.salientObjects(in: frame)
+        await VisionWork.run { SubjectFinder.salientObjects(in: frame) }
     }
 
     /// What Vision sees in `box`. Runs off the main thread because Vision takes a moment.
-    @concurrent
     nonisolated private static func labels(of box: CGRect, in frame: CGImage) async -> [(label: String, confidence: Float)] {
-        SubjectFinder.labels(of: box, in: frame)
+        await VisionWork.run { SubjectFinder.labels(of: box, in: frame) }
     }
 
     /// Suggests what to practise once the current section is complete.
@@ -1306,6 +1324,7 @@ final class PhotoCoach {
     /// Light's answers when the light is already good, so soft, even light isn't marked down.
     private static let lightNoneExample = """
         A face lit softly by a window to one side, with the far side a little darker but still clearly visible: issue none, region whole, thing "", strength "Soft side light".
+        A mug lit from a window on its left, with a soft shadow on its right side: issue none, region whole, thing "", strength "Side light shows shape".
         A person in open shade on a bright day: issue none, region whole, thing "", strength "Even, soft light".
         A street on a rainy, cloudy day with wet, shiny ground: issue none, region whole, thing "", strength "Soft, even light".
         """
@@ -1370,8 +1389,9 @@ final class PhotoCoach {
                 hard or soft, whether the light comes from the side or flat from straight ahead, whether \
                 patches of sun and shade fall across it, and \
                 whether the sun just outside the frame washes it out with haze or flare. \
-                Side light is only good when it is soft and the shadow side still shows detail: if half of \
-                the subject or a face is lost in deep, dark shadow, that is hardShadowsOnSubject, not a strength. \
+                Light from one side is usually good: it shows shape and depth on faces, food and objects. \
+                A darker shadow side is fine. Only report hardShadowsOnSubject when shadows are hard-edged \
+                from direct sun or a bare bulb, or a shadow is so dark that detail like an eye is lost. \
                 Raindrops, water on the lens, wet shiny ground and reflections are not patches of light or \
                 shadows. On a cloudy or rainy day the light is soft, so pick none unless a lamp or the sun \
                 clearly lights the subject

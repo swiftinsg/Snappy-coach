@@ -168,15 +168,15 @@ struct CoachRulesTests {
 
     @Test func tiltedPhoneIsReportedWithDirection() {
         let tilted = scene(tilt: 5)
-        #expect(CoachRules.issues(for: .anglePerspective, in: tilted).first == .phoneTilted)
-        #expect(CoachIssue.phoneTilted.advice(for: .anglePerspective, analysis: tilted).action.contains("left"))
-        #expect(CoachIssue.phoneTilted.advice(for: .anglePerspective, analysis: scene(tilt: -5)).action.contains("right"))
-        #expect(CoachRules.issues(for: .anglePerspective, in: scene(tilt: 1)).isEmpty)
+        #expect(CoachRules.issues(for: .focus, in: tilted).first == .phoneTilted)
+        #expect(CoachIssue.phoneTilted.advice(for: .focus, analysis: tilted).action.contains("left"))
+        #expect(CoachIssue.phoneTilted.advice(for: .focus, analysis: scene(tilt: -5)).action.contains("right"))
+        #expect(CoachRules.issues(for: .focus, in: scene(tilt: 1)).isEmpty)
     }
 
     @Test func shootingDownAtPeopleSuggestsEyeLevel() {
         let face = CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.2)
-        #expect(CoachRules.issues(for: .anglePerspective, in: scene(faces: [face], pitch: -45)).contains(.shootingDown))
+        #expect(CoachRules.issues(for: .focus, in: scene(faces: [face], pitch: -45)).contains(.shootingDown))
     }
 
     @Test func headroomRules() {
@@ -528,6 +528,30 @@ struct CoachRulesTests {
         #expect(!CoachRules.issues(for: .light, in: analysis).contains(.faceHalfInShadow))
     }
 
+    @Test func windowSideLightIsGoodNotAProblem() throws {
+        let face = [CGRect(x: 0, y: 0, width: 1, height: 1)]
+        // Classic window side light: the shadow side clearly darker, but still showing detail.
+        let windowImage = try #require(faceImage(left: 0.8, right: 0.34))
+        let ratio = try #require(SceneAnalysis.faceShadowRatio(of: face, in: windowImage))
+        #expect(ratio >= CoachRules.faceShadowLimit && ratio < SceneAnalysis.faceEvenRatio)
+        var analysis = scene(faces: face)
+        analysis.faceShadowRatio = ratio
+        analysis.faceLitSide = .left
+        analysis.subjectContrast = 0.2
+        // Not called out, praised instead, and the model can't call it hard shadows.
+        #expect(analysis.hasGoodSideLight)
+        #expect(!CoachRules.issues(for: .light, in: analysis).contains(.faceHalfInShadow))
+        #expect(CoachRules.strengths(for: .light, in: analysis).contains("Soft side light"))
+        #expect(!CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: analysis))
+        // The model is told it's good side light.
+        #expect(analysis.summary.contains("good side light"))
+        // A face with one eye lost in shadow is still pointed out, and hard shadows can be believed.
+        analysis.faceShadowRatio = 0.2
+        #expect(!analysis.hasGoodSideLight)
+        #expect(CoachRules.issues(for: .light, in: analysis).contains(.faceHalfInShadow))
+        #expect(CoachRules.believes(.hardShadowsOnSubject, detail: nil, analysis: analysis))
+    }
+
     @Test func lightJudgesTheQualityOfLight() {
         // Light asks the model about the light itself, and only about that.
         #expect(CoachRules.usesModel(.light))
@@ -536,8 +560,8 @@ struct CoachRulesTests {
         #expect(!CoachRules.allows(.clutteredBackground, for: .light))
         // Composition doesn't judge the light, even with every style picked.
         #expect(!CoachRules.allows(.flatLight, for: .composition, styles: Set(CompositionGuide.allCases)))
-        // Exposure, Focus and Angle & Perspective stay measured only.
-        #expect(!CoachRules.usesModel(.focus) && !CoachRules.usesModel(.anglePerspective))
+        // Angle & Focus stays measured only.
+        #expect(!CoachRules.usesModel(.focus))
         // Light tips are model-only, but moving the camera doesn't change the light, so reframing
         // doesn't clear them the way it clears other model tips.
         #expect(CoachIssue.patchyLight.isModelOnly)
@@ -732,10 +756,10 @@ struct CoachRulesTests {
         #expect(CoachRules.issues(for: .focus, in: blurryBook).contains(.subjectSoft))
 
         // Pointing up only matters for buildings, not the sky or a tree.
-        #expect(!CoachRules.issues(for: .anglePerspective, in: scene(pitch: 40)).contains(.pointingUp))
+        #expect(!CoachRules.issues(for: .focus, in: scene(pitch: 40)).contains(.pointingUp))
         var building = scene(pitch: 40)
         building.scene = .city
-        #expect(CoachRules.issues(for: .anglePerspective, in: building).contains(.pointingUp))
+        #expect(CoachRules.issues(for: .focus, in: building).contains(.pointingUp))
 
         // A small, distant face is a full-body shot, not too much headroom.
         let farAway = CGRect(x: 0.45, y: 0.5, width: 0.03, height: 0.04)
@@ -767,8 +791,7 @@ struct CoachRulesTests {
     @Test func modelIssuesAreFilteredByTopic() {
         #expect(CoachRules.allows(.clutteredBackground, for: .composition))
         // Only Composition looks at the background and other objects.
-        #expect(!CoachRules.allows(.clutteredBackground, for: .anglePerspective))
-        #expect(!CoachRules.usesModel(.anglePerspective))
+        #expect(!CoachRules.allows(.clutteredBackground, for: .focus))
         #expect(CoachRules.usesModel(.composition))
         #expect(!CoachRules.allows(.subjectCutOff, for: .focus))
     }
@@ -783,13 +806,13 @@ struct CoachRulesTests {
     }
 
     @Test func tiltWarningStaysUntilClearlyLevel() {
-        #expect(CoachRules.issues(for: .anglePerspective, in: scene(tilt: 5)).contains(.phoneTilted))
+        #expect(CoachRules.issues(for: .focus, in: scene(tilt: 5)).contains(.phoneTilted))
         // 3.5° is too small to start a warning, but not level enough to clear one.
-        #expect(!CoachRules.issues(for: .anglePerspective, in: scene(tilt: 3.5)).contains(.phoneTilted))
-        #expect(CoachRules.issues(for: .anglePerspective, in: scene(tilt: 3.5), tiltShown: true).contains(.phoneTilted))
+        #expect(!CoachRules.issues(for: .focus, in: scene(tilt: 3.5)).contains(.phoneTilted))
+        #expect(CoachRules.issues(for: .focus, in: scene(tilt: 3.5), tiltShown: true).contains(.phoneTilted))
         // Close enough by hand counts as level; it never asks for a perfect 1°.
-        #expect(!CoachRules.issues(for: .anglePerspective, in: scene(tilt: 2.5), tiltShown: true).contains(.phoneTilted))
-        #expect(!CoachRules.strengths(for: .anglePerspective, in: scene(tilt: 3.5), tiltShown: true).contains("Phone is level"))
+        #expect(!CoachRules.issues(for: .focus, in: scene(tilt: 2.5), tiltShown: true).contains(.phoneTilted))
+        #expect(!CoachRules.strengths(for: .focus, in: scene(tilt: 3.5), tiltShown: true).contains("Phone is level"))
     }
 
     @Test func compositionNeverAsksToRotateOrAngleThePhone() {
@@ -840,11 +863,18 @@ struct CoachRulesTests {
         #expect(CoachRules.issues(for: .focus, in: scene(shake: 0.05)).isEmpty)
     }
 
+    @Test func angleAndFocusFixShakeThenLevelThenSharpness() {
+        let issues = CoachRules.issues(for: .focus, in: scene(sharpness: 10, tilt: 5, shake: 0.6))
+        #expect(issues.prefix(3) == [.cameraShaking, .phoneTilted, .subjectSoft])
+        let strengths = CoachRules.strengths(for: .focus, in: scene(shake: 0.05))
+        #expect(["Subject is sharp", "Steady hands", "Phone is level"].allSatisfy(strengths.contains))
+    }
+
     @Test func styleIssuesOnlyForTheirStyles() {
         #expect(CoachRules.allows(.notSymmetric, for: .composition, styles: [.symmetry]))
         #expect(!CoachRules.allows(.notSymmetric, for: .composition, styles: [.ruleOfThirdsOne]))
         #expect(CoachRules.allows(.clutteredBackground, for: .composition, styles: [.symmetry]))
-        #expect(!CoachRules.allows(.linesDontLead, for: .anglePerspective, styles: [.leadingLines]))
+        #expect(!CoachRules.allows(.linesDontLead, for: .focus, styles: [.leadingLines]))
         // Every visual issue except none maps to a coach issue.
         for issue in VisualIssue.allCases where issue != .none {
             #expect(issue.coachIssue != nil, "\(issue) has no advice")
@@ -877,16 +907,16 @@ struct CoachRulesTests {
 
         // Clutter just left of the subject: stepping left slides it out from behind.
         detail.box = CGRect(x: 0.38, y: 0.1, width: 0.05, height: 0.6)
-        let left = CoachIssue.clutteredBackground.advice(for: .anglePerspective, detail: detail)
+        let left = CoachIssue.clutteredBackground.advice(for: .focus, detail: detail)
         #expect(left.action == "Step left so the lamp post isn't behind the subject")
         #expect(left.symbol == "arrow.left")
 
         detail.box = CGRect(x: 0.55, y: 0.1, width: 0.05, height: 0.6)
-        #expect(CoachIssue.clutteredBackground.advice(for: .anglePerspective, detail: detail).symbol == "arrow.right")
+        #expect(CoachIssue.clutteredBackground.advice(for: .focus, detail: detail).symbol == "arrow.right")
 
         // Straight behind, or not found: either way works, and the advice says so.
         detail.box = nil
-        #expect(CoachIssue.clutteredBackground.advice(for: .anglePerspective, detail: detail).action.hasPrefix("Step left or right"))
+        #expect(CoachIssue.clutteredBackground.advice(for: .focus, detail: detail).action.hasPrefix("Step left or right"))
     }
 
     @Test func adviceNamesTheTappedSubject() {
@@ -1038,7 +1068,15 @@ struct GalleryStoryTests {
         old.topicID = "exposure"
         #expect(old.topic == .light)
         #expect(AdviceTopic.stored("exposure") == .light)
-        #expect(AdviceTopic.allCases.map(\.title) == ["Light & Exposure", "Composition", "Angle & Perspective", "Focus"])
+        #expect(AdviceTopic.allCases.map(\.title) == ["Light & Exposure", "Composition", "Angle & Focus"])
+    }
+
+    @Test func oldAnglePhotosJoinAngleAndFocus() {
+        var old = record
+        old.topicID = "anglePerspective"
+        #expect(old.topic == AdviceTopic.focus)
+        #expect(AdviceTopic.stored("anglePerspective") == AdviceTopic.focus)
+        #expect(AdviceTopic.stored("focus") == AdviceTopic.focus)
     }
 
     @Test func anUnknownModeIsTreatedAsAnEarlierPhoto() {
@@ -1136,13 +1174,13 @@ extension GalleryStoryTests {
     }
 }
 
-/// Names on screen wrap whole, never as "Per-spective".
+/// Names on screen wrap whole, never as "Ex-posure".
 struct TextWrappingTests {
     @Test func namesAreKeptTogetherButReadTheSame() {
-        let shown = "Angle & Perspective".keptTogether
+        let shown = "Light & Exposure".keptTogether
         #expect(!shown.contains(" "))
-        #expect(shown.replacingOccurrences(of: "\u{2060}", with: "").replacingOccurrences(of: "\u{00A0}", with: " ") == "Angle & Perspective")
-        #expect(AdviceTopic.anglePerspective.title == "Angle & Perspective")
+        #expect(shown.replacingOccurrences(of: "\u{2060}", with: "").replacingOccurrences(of: "\u{00A0}", with: " ") == "Light & Exposure")
+        #expect(AdviceTopic.light.title == "Light & Exposure")
     }
 
     @Test func unhyphenatedTextCanStillWrapBetweenWords() {
@@ -1321,16 +1359,27 @@ struct LightCoachTests {
         for scene: SceneType in [.city, .landscape, .nature] {
             let view = light(scene: scene, outdoors: true)
             #expect(!view.canMoveSubject)
+            // Only the weather could change this light, so it isn't raised rather than told to wait.
             for issue: CoachIssue in [.hardShadowsOnSubject, .patchyLight, .harshContrast] {
-                #expect(tip(issue, view).mover == .wait, "\(issue) asks a \(scene) photo's subject to move")
+                #expect(!CoachRules.canFix(issue, in: view), "\(issue) is raised for a \(scene) photo nobody can fix")
             }
             // A plant can still be walked around for side light; it just can't move itself.
             #expect(tip(.flatLight, view).mover != .subject)
         }
-        // A view only gets side light when the sun moves.
-        #expect(tip(.flatLight, light(scene: .city, outdoors: true)).mover == .wait)
-        // RAW keeps detail in a contrasty view meanwhile.
-        #expect(tip(.harshContrast, light(scene: .landscape, outdoors: true)).quickFix == .raw)
+        // A view only gets side light when the sun moves, so flat light on it isn't raised.
+        #expect(!CoachRules.canFix(.flatLight, in: light(scene: .city, outdoors: true)))
+        #expect(CoachRules.canFix(.flatLight, in: light(scene: .nature, outdoors: true)))
+        #expect(!CoachRules.canFix(.flatLight, in: light(scene: .nature, outdoors: true), keepsFraming: true))
+        // The measured harsh contrast is left out for a view too.
+        var harshView = light(scene: .landscape, outdoors: true)
+        harshView.highlightClip = 0.1
+        harshView.shadowClip = 0.2
+        // Darkened a full stop, so the white areas no longer count as clipped highlights.
+        harshView.readings.exposureBias = -1
+        #expect(!CoachRules.issues(for: .light, in: harshView).contains(.harshContrast))
+        var harshCup = harshView
+        harshCup.scene = .object
+        #expect(CoachRules.issues(for: .light, in: harshCup).contains(.harshContrast))
         // People, food and objects can still move into better light.
         for scene: SceneType in [.food, .object] {
             #expect(tip(.hardShadowsOnSubject, light(scene: scene)).mover == .subject)
@@ -1518,6 +1567,9 @@ struct LightCoachTests {
         let sideLit = light(scene: .people, faces: smallFace, litSide: .left, shadowRatio: 0.6)
         #expect(!CoachRules.believes(.flatLight, detail: nil, analysis: sideLit))
         #expect(CoachRules.believes(.flatLight, detail: nil, analysis: light(scene: .people, faces: smallFace)))
+        // A lamp in the shot means the light isn't coming flat from behind the camera.
+        let lampInShot = light(scene: .people, faces: smallFace, spot: CGRect(x: 0.7, y: 0.1, width: 0.1, height: 0.1))
+        #expect(!CoachRules.believes(.flatLight, detail: nil, analysis: lampInShot))
         // Praise that the model's verdict contradicts goes; the rest stays.
         #expect(!CoachRules.praise("Soft, even light", survives: .hardShadowsOnSubject))
         #expect(!CoachRules.praise("Light reaches the subject", survives: .patchyLight))

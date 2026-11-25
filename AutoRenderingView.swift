@@ -584,9 +584,9 @@ struct AutoRenderingView: View {
                         }
                     }
                 }
-                // A level in the middle of the frame while practising angle and perspective.
+                // A level in the middle of the frame while practising angle and focus, even before a subject is picked.
                 .overlay {
-                    if adviceTopic == .anglePerspective {
+                    if adviceTopic == .focus {
                         CameraLevel(attitude: coach.attitude)
                     }
                 }

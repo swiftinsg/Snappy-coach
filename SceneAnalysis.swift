@@ -463,6 +463,7 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
             facts.append("a small, very bright light source (\(what)) at the \(place.rawValue) of the frame")
         }
         if let side = lightSide?.sideWord { facts.append("the light comes from the \(side) of the frame") }
+        if hasGoodSideLight { facts.append("the face is lit from one side with detail kept in the shadow side, which is good side light") }
         if isSoftDaylight { facts.append("the sky is overcast, so the daylight is soft and even, with no direct sun") }
         if isOutdoorsAtNight { facts.append("it is night outside, so the light comes from street lamps, signs or windows, not the sun") }
         // What's already on, so it isn't suggested again.
@@ -482,9 +483,20 @@ nonisolated struct SceneAnalysis: Sendable, Equatable {
     }
 }
 
+/// Runs Vision work on a default-priority queue. Vision's own worker threads run at default priority,
+/// so waiting on them from a higher-priority thread is a priority inversion that can stall both.
+nonisolated enum VisionWork {
+    static func run<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .default).async {
+                continuation.resume(returning: work())
+            }
+        }
+    }
+}
+
 extension SceneAnalysis {
     /// Measures an upright frame. Runs off the main thread because Vision and the pixel loops take a moment.
-    @concurrent
     nonisolated static func analyze(
         _ image: CGImage,
         readings: CameraReadings = CameraReadings(),
@@ -493,6 +505,20 @@ extension SceneAnalysis {
         shake: Double? = nil,
         selectedSubject: CGRect? = nil
     ) async -> SceneAnalysis? {
+        await VisionWork.run {
+            measure(image, readings: readings, pitch: pitch, tilt: tilt, shake: shake, selectedSubject: selectedSubject)
+        }
+    }
+
+    /// The measuring itself, which blocks while Vision works, so it's only called through `VisionWork`.
+    private nonisolated static func measure(
+        _ image: CGImage,
+        readings: CameraReadings,
+        pitch: Double?,
+        tilt: Double?,
+        shake: Double?,
+        selectedSubject: CGRect?
+    ) -> SceneAnalysis? {
         guard let gray = GrayImage(image) else { return nil }
         let found = SubjectFinder.find(in: image)
         // What the person tapped is the subject, whatever else stands out.
@@ -511,7 +537,9 @@ extension SceneAnalysis {
         // Apart from the people, including bodies only guessed from faces, since a close selfie
         // often shows too little of a body to be found.
         let everyone = found.people + faces.map { bodyBox(below: $0) }
-        var others = SubjectFinder.otherThings(found.others, apartFrom: everyone)
+        // Only looked for with people in the shot, where it decides whether they may turn around:
+        // it's an extra Vision pass that nothing else needs.
+        var others = everyone.isEmpty ? [] : SubjectFinder.otherThings(SubjectFinder.salientObjects(in: image), apartFrom: everyone)
         // A tapped thing that isn't a person is meant to be in the shot, however small.
         if let selectedSubject, !everyone.contains(where: { $0.intersects(selectedSubject) }) {
             others.append(selectedSubject)
@@ -789,6 +817,13 @@ extension SceneAnalysis {
         if backdrop != nil || !otherThings.isEmpty { return true }
         // A selfie with the face small in the frame is about where you are.
         return readings.isFrontCamera && (faces.map(\.height).max() ?? 0) < CoachRules.wideSelfieFace
+    }
+
+    /// A face lit from one side with its shadow side still showing detail: the side light
+    /// photographers look for, measured rather than guessed.
+    nonisolated var hasGoodSideLight: Bool {
+        guard faceLitSide != nil, let ratio = faceShadowRatio, !isBacklit else { return false }
+        return ratio >= CoachRules.faceShadowLimit
     }
 
     /// How much of the frame the subject fills, 0...1, or nil without a subject.
